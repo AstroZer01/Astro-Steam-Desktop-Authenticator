@@ -10,6 +10,13 @@ using System.Threading;
 using System.Drawing;
 using System.Linq;
 
+using ZXing.QrCode;
+using System.Runtime.InteropServices;
+using ZXing.Common;
+using ZXing;
+using ZXing.Windows.Compatibility;
+using System.Threading.Tasks;
+
 namespace Steam_Desktop_Authenticator
 {
     public partial class MainForm : Form
@@ -24,6 +31,13 @@ namespace Steam_Desktop_Authenticator
         private long currentSteamChunk = 0;
         private string passKey = null;
         private bool startSilent = false;
+
+        const int VK_RCONTROL = 0xA3;
+        [DllImport("user32.dll")]
+        private static extern bool GetCursorPos(out Point lpPoint);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern short GetAsyncKeyState(int vKey);
 
         // Forms
         private TradePopupForm popupFrm = new TradePopupForm();
@@ -122,6 +136,104 @@ namespace Steam_Desktop_Authenticator
             var loginForm = new LoginForm();
             loginForm.ShowDialog();
             this.loadAccountsList();
+        }
+
+        static async Task WaitForLeftAltKeyPress()
+        {
+            while (true)
+            {
+                if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
+                    break;
+
+                await Task.Delay(100);
+            }
+        }
+
+        private async void btnLoginViaQr_Click(object sender, EventArgs e)
+        {
+            if (currentAccount == null) return;
+
+            this.btnLoginViaQr.Enabled = false;
+            string originalText = this.btnLoginViaQr.Text;
+
+            MessageBox.Show("Move your cursor over the Steam QR code and press RIGHT CTRL to sign in.", "Scan QR Code", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            bool keyPressed = false;
+            for (int i = 300; i > 0; i--)
+            {
+                if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
+                {
+                    keyPressed = true;
+                    break;
+                }
+
+                if (i % 10 == 0)
+                {
+                    this.btnLoginViaQr.Text = $"Press Right CTRL ({i / 10}s)";
+                }
+
+                await Task.Delay(100);
+            }
+
+            this.btnLoginViaQr.Text = originalText;
+            this.btnLoginViaQr.Enabled = true;
+
+            if (!keyPressed)
+            {
+                MessageBox.Show("QR Code scan cancelled (timeout).", "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            
+            GetCursorPos(out Point cursorPos);
+            int scanWidth = 500;
+            int scanHeight = 500;
+
+            using (Bitmap bitmap = new Bitmap(scanWidth, scanHeight))
+            {
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    g.CopyFromScreen(cursorPos.X - scanWidth / 2, cursorPos.Y - scanHeight / 2, 0, 0, bitmap.Size);
+                }
+
+                var reader = new BarcodeReader();
+                var result = reader.Decode(bitmap);
+
+                if (result == null)
+                {
+                    MessageBox.Show("No QR code detected. Make sure your cursor is exactly over the QR code.", "Scan Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                
+                string idOfQR = null;
+                try
+                {
+                    string[] parts = result.Text.Split('/');
+                    if (parts.Length > 5)
+                    {
+                        idOfQR = parts[5];
+                    }
+                }
+                catch { }
+                
+                if (string.IsNullOrEmpty(idOfQR))
+                {
+                    MessageBox.Show("Can't get ID of QR code. Steam might have changed their QR format.", "Wrong QR code.", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                try 
+                {
+                    string response = await currentAccount.SignInViaQR(idOfQR);
+                    if (response != "1")
+                        MessageBox.Show($"Can't log in to account.\n\nDebug Info:\nID: {idOfQR}\nEResult: {response}\n\nTry refreshing the Steam login page and scan again.", "Something went wrong!", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    else
+                        MessageBox.Show("Successfully logged in via QR code!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Exception during QR Login:\n\nID: {idOfQR}\nError: {ex.Message}", "API Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
         }
 
         private void btnTradeConfirmations_Click(object sender, EventArgs e)
@@ -585,7 +697,7 @@ namespace Steam_Desktop_Authenticator
                 listAccounts.Sorted = true;
                 trayAccountList.Sorted = true;
             }
-            menuDeactivateAuthenticator.Enabled = btnTradeConfirmations.Enabled = allAccounts.Length > 0;
+            menuDeactivateAuthenticator.Enabled = btnTradeConfirmations.Enabled = btnLoginViaQr.Enabled = allAccounts.Length > 0;
         }
 
         private void listAccounts_KeyDown(object sender, KeyEventArgs e)

@@ -39,6 +39,7 @@ namespace Steam_Desktop_Authenticator
             this.listAccounts = new System.Windows.Forms.ListBox();
             this.timerSteamGuard = new System.Windows.Forms.Timer(this.components);
             this.btnTradeConfirmations = new System.Windows.Forms.Button();
+            this.btnLoginViaQr = new System.Windows.Forms.Button();
             this.btnManageEncryption = new System.Windows.Forms.Button();
             this.groupAccount = new System.Windows.Forms.GroupBox();
             this.labelVersion = new System.Windows.Forms.Label();
@@ -159,11 +160,23 @@ namespace Steam_Desktop_Authenticator
             this.btnTradeConfirmations.Enabled = false;
             this.btnTradeConfirmations.Location = new System.Drawing.Point(6, 19);
             this.btnTradeConfirmations.Name = "btnTradeConfirmations";
-            this.btnTradeConfirmations.Size = new System.Drawing.Size(298, 31);
+            this.btnTradeConfirmations.Size = new System.Drawing.Size(145, 31);
             this.btnTradeConfirmations.TabIndex = 4;
             this.btnTradeConfirmations.Text = "View Confirmations";
             this.btnTradeConfirmations.UseVisualStyleBackColor = true;
             this.btnTradeConfirmations.Click += new System.EventHandler(this.btnTradeConfirmations_Click);
+            // 
+            // btnLoginViaQr
+            // 
+            this.btnLoginViaQr.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
+            this.btnLoginViaQr.Enabled = false;
+            this.btnLoginViaQr.Location = new System.Drawing.Point(159, 19);
+            this.btnLoginViaQr.Name = "btnLoginViaQr";
+            this.btnLoginViaQr.Size = new System.Drawing.Size(145, 31);
+            this.btnLoginViaQr.TabIndex = 4;
+            this.btnLoginViaQr.Text = "Login via QR";
+            this.btnLoginViaQr.UseVisualStyleBackColor = true;
+            this.btnLoginViaQr.Click += new System.EventHandler(this.btnLoginViaQr_Click);
             // 
             // btnManageEncryption
             // 
@@ -181,6 +194,7 @@ namespace Steam_Desktop_Authenticator
             this.groupAccount.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
             this.groupAccount.Controls.Add(this.btnTradeConfirmations);
+            this.groupAccount.Controls.Add(this.btnLoginViaQr);
             this.groupAccount.Location = new System.Drawing.Point(12, 155);
             this.groupAccount.Name = "groupAccount";
             this.groupAccount.Size = new System.Drawing.Size(310, 56);
@@ -472,6 +486,7 @@ namespace Steam_Desktop_Authenticator
         private System.Windows.Forms.ListBox listAccounts;
         private System.Windows.Forms.Timer timerSteamGuard;
         private System.Windows.Forms.Button btnTradeConfirmations;
+        private System.Windows.Forms.Button btnLoginViaQr;
         private System.Windows.Forms.Button btnManageEncryption;
         private System.Windows.Forms.GroupBox groupAccount;
         private System.Windows.Forms.Label labelVersion;
