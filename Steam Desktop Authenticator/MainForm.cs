@@ -529,8 +529,17 @@ namespace Steam_Desktop_Authenticator
         /// <param name="account">The account to refresh</param>
         private void PromptRefreshLogin(SteamGuardAccount account)
         {
+            if (account == null)
+            {
+                MessageBox.Show("Please select an account first.", "Login Again", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
             var loginForm = new LoginForm(LoginForm.LoginType.Refresh, account);
-            loginForm.ShowDialog();
+            if (!loginForm.IsDisposed)
+            {
+                loginForm.ShowDialog();
+            }
         }
 
         /// <summary>
