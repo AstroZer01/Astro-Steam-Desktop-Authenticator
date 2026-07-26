@@ -18,6 +18,7 @@ Currently, this rework is strictly focused on maintaining and fixing the underly
 
 ### To-Do List
 - [x] Fix SSL/TLS 1.2+ handshake errors breaking connections.
+- [x] Implement QR Code Login (using mobile HMAC-SHA256 signature).
 - [ ] Stabilize Steam API endpoints for trade confirmations.
 - [ ] Improve API session refresh reliability.
 - [ ] **Only API support for now** (No major UI redesigns or new non-essential features planned currently).
