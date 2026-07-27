@@ -783,7 +783,7 @@ namespace Steam_Desktop_Authenticator
             updateClient.DownloadStringCompleted += UpdateClient_DownloadStringCompleted;
             updateClient.Headers.Add("Content-Type", "application/json");
             updateClient.Headers.Add("User-Agent", "Astro Steam Desktop Assistant");
-            updateClient.DownloadStringAsync(new Uri("https://api.github.com/repos/AstroZer01/Rework-Steam-Desktop-Assistant/releases/latest"));
+            updateClient.DownloadStringAsync(new Uri("https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest"));
         }
 
         private void compareVersions()

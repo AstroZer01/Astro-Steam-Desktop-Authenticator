@@ -93,7 +93,7 @@ namespace Steam_Desktop_Authenticator
                     {
                         // An maFile was encrypted, we're fucked.
                         MessageBox.Show("Sorry, but Astro was unable to recover your accounts since you used encryption.\nYou'll need to recover your Steam accounts by removing the authenticator.\nClick OK to view instructions.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        System.Diagnostics.Process.Start(@"https://github.com/AstroZer01/Rework-Steam-Desktop-Assistant/wiki/Help!-I'm-locked-out-of-my-account");
+                        System.Diagnostics.Process.Start(@"https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/wiki/Help!-I'm-locked-out-of-my-account");
                         this.Close();
                         return;
                     }
