@@ -9,7 +9,7 @@
 </p>
 
 ## About This Project
-This is a continuation of the original [Steam Desktop Authenticator](https://github.com/Jessecar96/SteamDesktopAuthenticator) created by **Jessecar96**. Astro Steam Desktop Assistant is an actively maintained fork that serves to keep the tool functional, secure, and compatible with Steam's modern API changes.
+This is a continuation of the original [Astro Steam Desktop Authenticator]([https://github.com/Jessecar96/SteamDesktopAuthenticator](https://github.com/AstroZer01/Rework-Steam-Desktop-Assistant/releases/)) created by **Jessecar96**. Astro Steam Desktop Assistant is an actively maintained fork that serves to keep the tool functional, secure, and compatible with Steam's modern API changes.
 
 All credit for the original design and implementation goes to Jessecar96 and the original contributors.
 
