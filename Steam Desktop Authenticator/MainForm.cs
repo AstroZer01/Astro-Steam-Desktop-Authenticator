@@ -822,7 +822,15 @@ namespace Steam_Desktop_Authenticator
             }
             catch (Exception)
             {
-                MessageBox.Show("Failed to check for updates.");
+                if (!startupUpdateCheck)
+                {
+                    MessageBox.Show("Failed to check for updates.");
+                }
+            }
+            finally
+            {
+                updateClient = null;
+                startupUpdateCheck = false;
             }
         }
 
