@@ -372,3 +372,6 @@ project_setup_and_issues.md
 # Keys and Environments
 .env
 *.keys
+# Agent Workspace and Scratch
+.dev_scratch/
+.agents/
