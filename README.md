@@ -8,8 +8,14 @@
   A continuation of the Steam Desktop Authenticator app.
 </p>
 
+<p align="center">
+  <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
+    <img src="https://img.shields.io/badge/Download_Latest_Release-Windows_10+-blue?style=for-the-badge&logo=windows" alt="Download Latest Release" />
+  </a>
+</p>
+
 ## About This Project
-This is a continuation of the original [Astro Steam Desktop Authenticator]([https://github.com/Jessecar96/SteamDesktopAuthenticator](https://github.com/AstroZer01/Rework-Steam-Desktop-Authenticator/releases/)) created by **Jessecar96**. Astro Steam Desktop Authenticator is an actively maintained fork that serves to keep the tool functional, secure, and compatible with Steam's modern API changes.
+This is a continuation of the original [Steam Desktop Authenticator](https://github.com/Jessecar96/SteamDesktopAuthenticator) created by **Jessecar96**. Astro Steam Desktop Authenticator is an actively maintained fork that serves to keep the tool functional, secure, and compatible with Steam's modern API changes.
 
 All credit for the original design and implementation goes to Jessecar96 and the original contributors.
 
