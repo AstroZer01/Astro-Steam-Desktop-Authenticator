@@ -794,7 +794,7 @@ namespace Steam_Desktop_Authenticator
                 DialogResult updateDialog = MessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
                 if (updateDialog == DialogResult.Yes)
                 {
-                    Process.Start(updateUrl);
+                    Process.Start(new ProcessStartInfo(updateUrl) { UseShellExecute = true });
                 }
             }
             else
