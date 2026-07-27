@@ -78,8 +78,6 @@ namespace Steam_Desktop_Authenticator
                 }
             }
 
-            // Warning that this software is no longer supported
-            MessageBox.Show("Astro Steam Desktop Assistant is a continuation of the unsupported Steam Desktop Authenticator. You should only use Steam's official mobile app to login to your account. Using this or any other tool is dangerous and puts your account at risk.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
 
             if (man.FirstRun)
             {
