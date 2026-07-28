@@ -27,7 +27,9 @@ Currently, this rework is strictly focused on maintaining and fixing the underly
 - [x] Implement QR Code Login (using mobile HMAC-SHA256 signature).
 - [ ] Stabilize Steam API endpoints for trade confirmations.
 - [ ] Improve API session refresh reliability.
-- [ ] **Only API support for now** (No major UI redesigns or new non-essential features planned currently).
+- [ ] API support for confirming/declining offers.
+- [ ] Proxy support.
+- [ ] UI rehaul.
 
 ## Disclaimer
 We provide no warranty for using this tool. You use this program at your own risk, and accept the responsibility to make backups of your `maFiles` (which contain your 2FA secrets) and prevent unauthorized access to your computer.
