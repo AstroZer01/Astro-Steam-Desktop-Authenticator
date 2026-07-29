@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="icon.png" height="64" width="64" />
+  <img src="ASDA-icon.png" height="64" width="64" />
   <br/>
   Astro Steam Desktop Authenticator
 </h1>
@@ -54,3 +54,5 @@ All credit for the original design and implementation goes to Jessecar96 and the
 
 ## Disclaimer
 We provide no warranty for using this tool. You use this program at your own risk, and accept the responsibility to make backups of your `maFiles` (which contain your 2FA secrets) and prevent unauthorized access to your computer.
+
+**Notice:** Astro Steam Desktop Authenticator is an unofficial tool and is not affiliated with, endorsed by, or associated with Valve Corporation or the official Steam Guard in any way.
