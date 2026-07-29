@@ -19,6 +19,13 @@ This is a continuation of the original [Steam Desktop Authenticator](https://git
 
 All credit for the original design and implementation goes to Jessecar96 and the original contributors.
 
+## Screenshots
+
+| Main Page | Settings |
+| :---: | :---: |
+| <img src="screenshot%20main%20page.png" width="400"> | <img src="screenshot%20settings.png" width="400"> |
+
+
 ## Current Focus & To-Do
 
 ### To-Do List
