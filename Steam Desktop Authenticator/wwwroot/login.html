@@ -1,0 +1,62 @@
+<!DOCTYPE html><html class="dark" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Astro SDA - Login</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+body { background-color: #0b1326; color: #dae2fd; font-family: 'Inter', sans-serif; overflow: hidden; }
+.glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
+input { background: #131B2E !important; color: white !important; border: 1px solid rgba(255, 255, 255, 0.2) !important; border-radius: 8px !important; padding: 12px !important; width: 100%; outline: none; transition: border-color 0.2s; }
+input:focus { border-color: #00daf3 !important; }
+</style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+<div class="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] bg-[#00E5FF]/5 rounded-full blur-[120px] pointer-events-none"></div>
+
+<div class="glass-panel w-full max-w-sm p-8 rounded-2xl flex flex-col gap-5 shadow-2xl relative z-10">
+    <div class="flex flex-col items-center mb-2">
+        <h1 class="text-2xl font-bold text-[#c3f5ff] text-center">Steam Login</h1>
+        <p id="explanation-text" class="text-sm text-[#bac9cc] text-center mt-2 leading-relaxed">This will activate Astro Steam Desktop Assistant on your Steam account.</p>
+    </div>
+    
+    <div class="flex flex-col gap-2">
+        <label class="text-sm text-[#849396] font-medium">Username</label>
+        <input type="text" id="username" placeholder="Steam Username" />
+    </div>
+    
+    <div class="flex flex-col gap-2">
+        <label class="text-sm text-[#849396] font-medium">Password</label>
+        <input type="password" id="password" placeholder="Steam Password" />
+    </div>
+
+    <button id="btn-login" class="mt-4 bg-[#00E5FF] hover:bg-[#9cf0ff] text-[#00363D] font-bold py-3 rounded-lg w-full transition-colors shadow-lg shadow-[#00E5FF]/20">LOGIN</button>
+</div>
+<script>
+    document.getElementById('btn-login').addEventListener('click', () => {
+        let u = document.getElementById('username').value;
+        let p = document.getElementById('password').value;
+        window.chrome.webview.postMessage({ action: 'login', user: u, pass: p });
+    });
+    
+    function setExplanation(text) {
+        document.getElementById('explanation-text').innerText = text;
+    }
+    
+    function setUsername(text, disable) {
+        let u = document.getElementById('username');
+        u.value = text;
+        if(disable) {
+            u.disabled = true;
+            u.style.opacity = '0.5';
+        }
+    }
+    
+    function setButtonState(text, disabled) {
+        let b = document.getElementById('btn-login');
+        b.innerText = text;
+        b.disabled = disabled;
+        b.style.opacity = disabled ? '0.5' : '1';
+    }
+</script>
+</body></html>

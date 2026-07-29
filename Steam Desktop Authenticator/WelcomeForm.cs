@@ -18,6 +18,12 @@ namespace Steam_Desktop_Authenticator
         public WelcomeForm()
         {
             InitializeComponent();
+            AstroTheme.ApplyTheme(this);
+
+            // Style buttons as primary
+            AstroTheme.StylePrimaryButton(btnImportConfig);
+            AstroTheme.StylePrimaryButton(btnJustStart);
+
             man = Manifest.GetManifest();
         }
 
@@ -55,7 +61,7 @@ namespace Steam_Desktop_Authenticator
                 else
                 {
                     // Could not find either.
-                    MessageBox.Show("This folder does not contain either a manifest.json or an maFiles folder.\nPlease select the location where you had Astro Steam Desktop Assistant installed.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    AstroMessageBox.Show("This folder does not contain either a manifest.json or an maFiles folder.\nPlease select the location where you had Astro Steam Desktop Assistant installed.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
 
@@ -86,13 +92,13 @@ namespace Steam_Desktop_Authenticator
                     // Manifest file was corrupted, generate a new one.
                     try
                     {
-                        MessageBox.Show("Your settings were unexpectedly corrupted and were reset to defaults.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                        AstroMessageBox.Show("Your settings were unexpectedly corrupted and were reset to defaults.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                         man = Manifest.GenerateNewManifest(true);
                     }
                     catch (MaFileEncryptedException)
                     {
                         // An maFile was encrypted, we're fucked.
-                        MessageBox.Show("Sorry, but Astro was unable to recover your accounts since you used encryption.\nYou'll need to recover your Steam accounts by removing the authenticator.\nClick OK to view instructions.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        AstroMessageBox.Show("Sorry, but Astro was unable to recover your accounts since you used encryption.\nYou'll need to recover your Steam accounts by removing the authenticator.\nClick OK to view instructions.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(@"https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/wiki/Help!-I'm-locked-out-of-my-account") { UseShellExecute = true });
                         this.Close();
                         return;
@@ -100,7 +106,7 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 // All done!
-                MessageBox.Show("All accounts and settings have been imported! Click OK to continue.", "Import accounts", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                AstroMessageBox.Show("All accounts and settings have been imported! Click OK to continue.", "Import accounts", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 showMainForm();
             }
 

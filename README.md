@@ -20,16 +20,29 @@ This is a continuation of the original [Steam Desktop Authenticator](https://git
 All credit for the original design and implementation goes to Jessecar96 and the original contributors.
 
 ## Current Focus & To-Do
-Currently, this rework is strictly focused on maintaining and fixing the underlying API support to ensure logins, session management, and trade confirmations remain functional.
 
 ### To-Do List
+
+#### Core API & Session
 - [x] Fix SSL/TLS 1.2+ handshake errors breaking connections.
 - [x] Implement QR Code Login (using mobile HMAC-SHA256 signature).
-- [ ] Stabilize Steam API endpoints for trade confirmations.
-- [ ] Improve API session refresh reliability.
-- [ ] API support for confirming/declining offers.
-- [ ] Proxy support.
-- [ ] UI rehaul.
+- [x] Stabilize Steam API endpoints for trade confirmations — fetch, accept, and decline are all functional.
+- [x] API support for confirming/declining trade offers — implemented via `AcceptConfirmation` / `DenyConfirmation`.
+- [x] Improve API session refresh reliability — `IsRefreshTokenExpired` + `RefreshAccessToken` checks are in place with user-facing alerts on expiry.
+
+#### UI Rehaul
+- [x] Full UI rehaul — replaced original WinForms UI with a modern WebView2-based interface (dark theme, Tailwind CSS, glassmorphism).
+- [x] Animated startup loading screen with spinner and live status text.
+- [x] Dark mode title bar (inherits Windows theme via DwmSetWindowAttribute).
+- [x] Steam Guard code display with copy button and animated progress bar.
+- [x] Account list with search/filter, scroll support, and one-click switching.
+- [x] Trade Confirmations tab — list view with Accept/Decline per confirmation, per-account switcher dropdown, and refresh button.
+- [x] Settings tab — periodic check toggle, check interval, auto-confirm options, with saved feedback.
+- [x] Proxy Settings section (UI layout — Coming Soon, pending backend implementation).
+
+#### In Progress / Remaining
+- [ ] Proxy support backend implementation.
+- [ ] Auto-confirm popup notifications reliability improvements.
 
 ## Disclaimer
 We provide no warranty for using this tool. You use this program at your own risk, and accept the responsibility to make backups of your `maFiles` (which contain your 2FA secrets) and prevent unauthorized access to your computer.

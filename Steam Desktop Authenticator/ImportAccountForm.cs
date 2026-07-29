@@ -21,6 +21,7 @@ namespace Steam_Desktop_Authenticator
         public ImportAccountForm()
         {
             InitializeComponent();
+            AstroTheme.ApplyTheme(this);
             this.mManifest = Manifest.GetManifest();
         }
 

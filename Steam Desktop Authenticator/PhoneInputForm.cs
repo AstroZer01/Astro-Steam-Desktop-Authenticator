@@ -1,7 +1,8 @@
-﻿using SteamAuth;
+using SteamAuth;
 using System;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using System.Drawing;
 
 namespace Steam_Desktop_Authenticator
 {
@@ -16,6 +17,12 @@ namespace Steam_Desktop_Authenticator
         {
             this.Account = account;
             InitializeComponent();
+            AstroTheme.ApplyTheme(this);
+            this.Size = new Size(400, 250);
+            this.MinimumSize = new Size(400, 250);
+            this.MaximumSize = new Size(400, 250);
+            this.MaximizeBox = false;
+            this.FormBorderStyle = FormBorderStyle.FixedSingle;
         }
 
         private void btnSubmit_Click(object sender, EventArgs e)
@@ -25,7 +32,7 @@ namespace Steam_Desktop_Authenticator
 
             if (this.PhoneNumber[0] != '+')
             {
-                MessageBox.Show("Phone number must start with + and country code.", "Phone Number", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AstroMessageBox.Show("Phone number must start with + and country code.", "Phone Number", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 

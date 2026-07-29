@@ -1,0 +1,69 @@
+<!DOCTYPE html><html class="dark" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Astro SDA - Input</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+body { background-color: #0b1326; color: #dae2fd; font-family: 'Inter', sans-serif; overflow: hidden; }
+.glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
+input { background: #131B2E !important; color: white !important; border: 1px solid rgba(255, 255, 255, 0.2) !important; border-radius: 8px !important; padding: 12px !important; width: 100%; outline: none; transition: border-color 0.2s; }
+input:focus { border-color: #00daf3 !important; }
+.btn-primary { background: #00E5FF; color: #00363D; font-weight: bold; padding: 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s; border: none; }
+.btn-primary:hover { background: #9cf0ff; }
+.btn-secondary { background: #2D3449; color: #DAE2FD; font-weight: bold; padding: 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s; border: none; border: 1px solid rgba(255, 255, 255, 0.1); }
+.btn-secondary:hover { background: #31394D; }
+</style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+<div class="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-[#00E5FF]/5 rounded-full blur-[120px] pointer-events-none"></div>
+
+<div class="glass-panel w-full max-w-sm p-8 rounded-2xl flex flex-col gap-6 shadow-2xl relative z-10">
+    <div class="flex flex-col mb-2">
+        <h1 class="text-xl font-bold text-[#c3f5ff]">Input Required</h1>
+        <p id="label-text" class="text-sm text-[#bac9cc] mt-2">Please enter the required information.</p>
+    </div>
+    
+    <div class="flex flex-col gap-2">
+        <input type="text" id="input-box" placeholder="..." />
+    </div>
+
+    <div class="flex gap-4 mt-2">
+        <button id="btn-cancel" class="btn-secondary flex-1 shadow-lg">CANCEL</button>
+        <button id="btn-accept" class="btn-primary flex-1 shadow-lg shadow-[#00E5FF]/20">ACCEPT</button>
+    </div>
+</div>
+<script>
+    document.getElementById('btn-accept').addEventListener('click', () => {
+        let val = document.getElementById('input-box').value;
+        window.chrome.webview.postMessage({ action: 'accept', value: val });
+    });
+    
+    document.getElementById('btn-cancel').addEventListener('click', () => {
+        window.chrome.webview.postMessage({ action: 'cancel' });
+    });
+
+    document.getElementById('input-box').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+            document.getElementById('btn-accept').click();
+        }
+    });
+    
+    const resizeObserver = new ResizeObserver(entries => {
+        for (let entry of entries) {
+            let h = entry.target.offsetHeight + 40; // 32px for body p-4 padding + 8px extra buffer
+            window.chrome.webview.postMessage({ action: 'resize', height: h });
+        }
+    });
+
+    function setupInput(label, isPassword) {
+        document.getElementById('label-text').innerText = label;
+        if(isPassword) {
+            document.getElementById('input-box').type = 'password';
+        }
+        document.getElementById('input-box').focus();
+        
+        resizeObserver.observe(document.querySelector('.glass-panel'));
+    }
+</script>
+</body></html>

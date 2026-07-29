@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
@@ -7,6 +7,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+using Newtonsoft.Json.Linq;
 
 namespace Steam_Desktop_Authenticator
 {
@@ -18,12 +21,89 @@ namespace Steam_Desktop_Authenticator
         public InputForm(string label, bool password = false)
         {
             InitializeComponent();
+            AstroTheme.ApplyTheme(this);
+
             this.labelText.Text = label;
 
             if (password)
             {
                 this.txtBox.PasswordChar = '*';
             }
+            
+            SetupModernUI(label, password);
+        }
+
+        private WebView2 webView;
+        private async void SetupModernUI(string label, bool isPassword)
+        {
+            this.Size = new Size(400, 300);
+            this.MinimumSize = new Size(400, 100);
+            this.MaximumSize = new Size(400, 1000);
+            this.MaximizeBox = false;
+            this.FormBorderStyle = FormBorderStyle.FixedSingle;
+            this.BackColor = Color.FromArgb(11, 19, 38);
+            this.Text = "Astro SDA - Input";
+
+            Panel loadingPanel = new Panel();
+            loadingPanel.Dock = DockStyle.Fill;
+            loadingPanel.BackColor = Color.FromArgb(11, 19, 38);
+            Label lblLoading = new Label() { Text = "Loading...", ForeColor = Color.White, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+            loadingPanel.Controls.Add(lblLoading);
+            this.Controls.Add(loadingPanel);
+            loadingPanel.BringToFront();
+
+            webView = new WebView2();
+            webView.Dock = DockStyle.Fill;
+            webView.Visible = false;
+            this.Controls.Add(webView);
+            webView.BringToFront();
+
+            await webView.EnsureCoreWebView2Async(null);
+
+            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+            webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+            webView.CoreWebView2.WebMessageReceived += (sender, e) =>
+            {
+                string message = e.WebMessageAsJson;
+                if (string.IsNullOrEmpty(message)) return;
+
+                JObject payload = JObject.Parse(message);
+                string action = (string)payload["action"];
+
+                if (action == "accept")
+                {
+                    this.txtBox.Text = (string)payload["value"];
+                    btnAccept_Click(this, EventArgs.Empty);
+                }
+                else if (action == "cancel")
+                {
+                    btnCancel_Click(this, EventArgs.Empty);
+                }
+                else if (action == "resize")
+                {
+                    int height = (int)payload["height"];
+                    this.ClientSize = new Size(this.ClientSize.Width, height);
+                }
+            };
+
+            webView.NavigationCompleted += (sender, args) =>
+            {
+                loadingPanel.Visible = false;
+                foreach (Control c in this.Controls)
+                {
+                    if (c != webView && c != loadingPanel)
+                        c.Visible = false;
+                }
+                webView.Visible = true;
+
+                string jsLabel = label.Replace("'", "\\'");
+                string isPassStr = isPassword ? "true" : "false";
+                webView.CoreWebView2.ExecuteScriptAsync($"setupInput('{jsLabel}', {isPassStr})");
+            };
+
+            string htmlPath = System.IO.Path.Combine(Application.StartupPath, "wwwroot", "input.html");
+            webView.Source = new Uri(htmlPath);
         }
 
         private void btnAccept_Click(object sender, EventArgs e)

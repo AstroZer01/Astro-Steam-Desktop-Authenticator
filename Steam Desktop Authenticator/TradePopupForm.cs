@@ -1,4 +1,4 @@
-﻿using SteamAuth;
+using SteamAuth;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -20,6 +20,12 @@ namespace Steam_Desktop_Authenticator
         public TradePopupForm()
         {
             InitializeComponent();
+            AstroTheme.ApplyTheme(this);
+
+            // Style trade buttons with Stitch accept/deny design
+            AstroTheme.StyleAcceptButton(btnAccept);
+            AstroTheme.StyleDenyButton(btnDeny);
+
             lblStatus.Text = "";
         }
 
@@ -46,7 +52,7 @@ namespace Steam_Desktop_Authenticator
             {
                 // Allow user to confirm first
                 lblStatus.Text = "Press Accept again to confirm";
-                btnAccept.BackColor = Color.FromArgb(128, 255, 128);
+                btnAccept.BackColor = AstroTheme.SecondaryContainer;
                 accept2 = true;
             }
             else
@@ -63,7 +69,7 @@ namespace Steam_Desktop_Authenticator
             if (!deny2)
             {
                 lblStatus.Text = "Press Deny again to confirm";
-                btnDeny.BackColor = Color.FromArgb(255, 255, 128);
+                btnDeny.BackColor = AstroTheme.ErrorContainer;
                 deny2 = true;
             }
             else
@@ -79,8 +85,8 @@ namespace Steam_Desktop_Authenticator
         {
             deny2 = false;
             accept2 = false;
-            btnAccept.BackColor = Color.FromArgb(192, 255, 192);
-            btnDeny.BackColor = Color.FromArgb(255, 255, 192);
+            AstroTheme.StyleAcceptButton(btnAccept);
+            AstroTheme.StyleDenyButton(btnDeny);
 
             btnAccept.Text = "Accept";
             btnDeny.Text = "Deny";

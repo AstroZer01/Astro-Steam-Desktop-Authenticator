@@ -43,7 +43,7 @@ namespace Steam_Desktop_Authenticator
             // run the program only once
             if (PriorProcess() != null)
             {
-                MessageBox.Show("Another instance of the app is already running.");
+                AstroMessageBox.Show("Another instance of the app is already running.");
                 return;
             }
 
@@ -66,13 +66,13 @@ namespace Steam_Desktop_Authenticator
                 // Manifest file was corrupted, generate a new one.
                 try
                 {
-                    MessageBox.Show("Your settings were unexpectedly corrupted and were reset to defaults.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                    AstroMessageBox.Show("Your settings were unexpectedly corrupted and were reset to defaults.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                     man = Manifest.GenerateNewManifest(true);
                 }
                 catch (MaFileEncryptedException)
                 {
                     // An maFile was encrypted, we're fucked.
-                    MessageBox.Show("Sorry, but Astro was unable to recover your accounts since you used encryption.\nYou'll need to recover your Steam accounts by removing the authenticator.\nClick OK to view instructions.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    AstroMessageBox.Show("Sorry, but Astro was unable to recover your accounts since you used encryption.\nYou'll need to recover your Steam accounts by removing the authenticator.\nClick OK to view instructions.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     Process.Start(new ProcessStartInfo(@"https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/wiki/Help!-I'm-locked-out-of-my-account") { UseShellExecute = true });
                     return;
                 }

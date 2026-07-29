@@ -16,6 +16,9 @@ using ZXing.Common;
 using ZXing;
 using ZXing.Windows.Compatibility;
 using System.Threading.Tasks;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+using Newtonsoft.Json.Linq;
 
 namespace Steam_Desktop_Authenticator
 {
@@ -68,7 +71,7 @@ namespace Steam_Desktop_Authenticator
             }
             catch (ManifestParseException)
             {
-                MessageBox.Show("Unable to read your settings. Try restating Astro Steam Desktop Assistant.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AstroMessageBox.Show("Unable to read your settings. Try restating Astro Steam Desktop Assistant.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 this.Close();
             }
 
@@ -110,9 +113,51 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        // Custom progress bar that replaces the standard one
+        private AstroProgressBar astroProgressBar;
+
         private void MainForm_Load(object sender, EventArgs e)
         {
             trayIcon.Icon = this.Icon;
+
+            // Apply the Astro dark theme to all controls
+            AstroTheme.ApplyTheme(this);
+
+            // Style the tray context menu
+            AstroTheme.StyleContextMenuStrip(menuStripTray);
+
+            // Form-specific overrides for special controls
+            // Login token textbox should use monospace font with cyan text
+            txtLoginToken.Font = AstroTheme.FontLoginToken;
+            txtLoginToken.ForeColor = AstroTheme.Primary;
+            txtLoginToken.BackColor = AstroTheme.SurfaceContainerLowest;
+
+            // Style specific buttons that need custom treatment
+            AstroTheme.StylePrimaryButton(btnSteamLogin);
+            AstroTheme.StylePrimaryButton(btnManageEncryption);
+            AstroTheme.StyleSurfaceButton(btnTradeConfirmations);
+            AstroTheme.StyleSurfaceButton(btnLoginViaQr);
+            AstroTheme.StyleSurfaceButton(btnCopy);
+
+            // Replace the standard ProgressBar with AstroProgressBar
+            astroProgressBar = new AstroProgressBar();
+            astroProgressBar.Name = "astroProgressBar";
+            astroProgressBar.Location = pbTimeout.Location;
+            astroProgressBar.Size = pbTimeout.Size;
+            astroProgressBar.Anchor = pbTimeout.Anchor;
+            astroProgressBar.Minimum = pbTimeout.Minimum;
+            astroProgressBar.Maximum = pbTimeout.Maximum;
+            astroProgressBar.Value = pbTimeout.Value;
+
+            // Add the custom progress bar and remove the old one
+            pbTimeout.Parent.Controls.Add(astroProgressBar);
+            pbTimeout.Visible = false;
+
+            // Label overrides
+            lblStatus.ForeColor = AstroTheme.OnSurfaceVariant;
+
+            // Restructure UI into Modern Tabs (Phase 1 & 2)
+            SetupModernUI();
         }
 
         private void MainForm_Resize(object sender, EventArgs e)
@@ -156,7 +201,7 @@ namespace Steam_Desktop_Authenticator
             this.btnLoginViaQr.Enabled = false;
             string originalText = this.btnLoginViaQr.Text;
 
-            MessageBox.Show("Move your cursor over the Steam QR code and press RIGHT CTRL to sign in.", "Scan QR Code", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            AstroMessageBox.Show("Move your cursor over the Steam QR code and press RIGHT CTRL to sign in.", "Scan QR Code", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
             bool keyPressed = false;
             for (int i = 300; i > 0; i--)
@@ -170,6 +215,8 @@ namespace Steam_Desktop_Authenticator
                 if (i % 10 == 0)
                 {
                     this.btnLoginViaQr.Text = $"Press Right CTRL ({i / 10}s)";
+                    if (webView != null && webView.CoreWebView2 != null)
+                        webView.CoreWebView2.ExecuteScriptAsync($"updateQrButtonText('Press Right CTRL ({i / 10}s)')");
                 }
 
                 await Task.Delay(100);
@@ -177,10 +224,12 @@ namespace Steam_Desktop_Authenticator
 
             this.btnLoginViaQr.Text = originalText;
             this.btnLoginViaQr.Enabled = true;
+            if (webView != null && webView.CoreWebView2 != null)
+                webView.CoreWebView2.ExecuteScriptAsync($"updateQrButtonText('{originalText}')");
 
             if (!keyPressed)
             {
-                MessageBox.Show("QR Code scan cancelled (timeout).", "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                AstroMessageBox.Show("QR Code scan cancelled (timeout).", "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             
@@ -200,7 +249,7 @@ namespace Steam_Desktop_Authenticator
 
                 if (result == null)
                 {
-                    MessageBox.Show("No QR code detected. Make sure your cursor is exactly over the QR code.", "Scan Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    AstroMessageBox.Show("No QR code detected. Make sure your cursor is exactly over the QR code.", "Scan Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
                 
@@ -217,7 +266,7 @@ namespace Steam_Desktop_Authenticator
                 
                 if (string.IsNullOrEmpty(idOfQR))
                 {
-                    MessageBox.Show("Can't get ID of QR code. Steam might have changed their QR format.", "Wrong QR code.", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    AstroMessageBox.Show("Can't get ID of QR code. Steam might have changed their QR format.", "Wrong QR code.", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
 
@@ -225,27 +274,20 @@ namespace Steam_Desktop_Authenticator
                 {
                     string response = await currentAccount.SignInViaQR(idOfQR);
                     if (response != "1")
-                        MessageBox.Show($"Can't log in to account.\n\nDebug Info:\nID: {idOfQR}\nEResult: {response}\n\nTry refreshing the Steam login page and scan again.", "Something went wrong!", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        AstroMessageBox.Show($"Can't log in to account.\n\nDebug Info:\nID: {idOfQR}\nEResult: {response}\n\nTry refreshing the Steam login page and scan again.", "Something went wrong!", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     else
-                        MessageBox.Show("Successfully logged in via QR code!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        AstroMessageBox.Show("Successfully logged in via QR code!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"Exception during QR Login:\n\nID: {idOfQR}\nError: {ex.Message}", "API Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    AstroMessageBox.Show($"Exception during QR Login:\n\nID: {idOfQR}\nError: {ex.Message}", "API Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
 
         private void btnTradeConfirmations_Click(object sender, EventArgs e)
         {
-            if (currentAccount == null) return;
-
-            string oText = btnTradeConfirmations.Text;
-            btnTradeConfirmations.Text = "Loading...";
-            btnTradeConfirmations.Text = oText;
-
-            ConfirmationFormWeb confirms = new ConfirmationFormWeb(currentAccount);
-            confirms.Show();
+            // Now handled by WebView2
         }
 
         private void btnManageEncryption_Click(object sender, EventArgs e)
@@ -283,7 +325,7 @@ namespace Steam_Desktop_Authenticator
 
                 if (newPassKey != confirmPassKey)
                 {
-                    MessageBox.Show("Passkeys do not match.");
+                    AstroMessageBox.Show("Passkeys do not match.");
                     return;
                 }
 
@@ -295,11 +337,11 @@ namespace Steam_Desktop_Authenticator
                 string action = newPassKey == null ? "remove" : "change";
                 if (!manifest.ChangeEncryptionKey(curPassKey, newPassKey))
                 {
-                    MessageBox.Show("Unable to " + action + " passkey.");
+                    AstroMessageBox.Show("Unable to " + action + " passkey.");
                 }
                 else
                 {
-                    MessageBox.Show("Passkey successfully " + action + "d.");
+                    AstroMessageBox.Show("Passkey successfully " + action + "d.");
                     this.loadAccountsList();
                 }
             }
@@ -339,15 +381,15 @@ namespace Steam_Desktop_Authenticator
         {
             if (manifest.Encrypted)
             {
-                MessageBox.Show("You cannot remove accounts from the manifest file while it is encrypted.", "Remove from manifest", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AstroMessageBox.Show("You cannot remove accounts from the manifest file while it is encrypted.", "Remove from manifest", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             else
             {
-                DialogResult res = MessageBox.Show("This will remove the selected account from the manifest file.\nUse this to move a maFile to another computer.\nThis will NOT delete your maFile.", "Remove from manifest", MessageBoxButtons.OKCancel);
+                DialogResult res = AstroMessageBox.Show("This will remove the selected account from the manifest file.\nUse this to move a maFile to another computer.\nThis will NOT delete your maFile.", "Remove from manifest", MessageBoxButtons.OKCancel);
                 if (res == DialogResult.OK)
                 {
                     manifest.RemoveAccount(currentAccount, false);
-                    MessageBox.Show("Account removed from manifest.\nYou can now move its maFile to another computer and import it using the File menu.", "Remove from manifest");
+                    AstroMessageBox.Show("Account removed from manifest.\nYou can now move its maFile to another computer and import it using the File menu.", "Remove from manifest");
                     loadAccountsList();
                 }
             }
@@ -367,9 +409,7 @@ namespace Steam_Desktop_Authenticator
 
         private void menuSettings_Click(object sender, EventArgs e)
         {
-            new SettingsForm().ShowDialog();
-            manifest = Manifest.GetManifest(true);
-            loadSettings();
+            // Now handled by WebView2
         }
 
         private async void menuDeactivateAuthenticator_Click(object sender, EventArgs e)
@@ -379,7 +419,7 @@ namespace Steam_Desktop_Authenticator
             // Check for a valid refresh token first
             if (currentAccount.Session.IsRefreshTokenExpired())
             {
-                MessageBox.Show("Your session has expired. Use the login again button under the selected account menu.", "Deactivate Authenticator", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AstroMessageBox.Show("Your session has expired. Use the login again button under the selected account menu.", "Deactivate Authenticator", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
@@ -392,12 +432,12 @@ namespace Steam_Desktop_Authenticator
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show(ex.Message, "Deactivate Authenticator Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    AstroMessageBox.Show(ex.Message, "Deactivate Authenticator Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
             }
 
-            DialogResult res = MessageBox.Show("Would you like to remove Steam Guard completely?\nYes - Remove Steam Guard completely.\nNo - Switch back to Email authentication.", "Deactivate Authenticator: " + currentAccount.AccountName, MessageBoxButtons.YesNoCancel);
+            DialogResult res = AstroMessageBox.Show("Would you like to remove Steam Guard completely?\nYes - Remove Steam Guard completely.\nNo - Switch back to Email authentication.", "Deactivate Authenticator: " + currentAccount.AccountName, MessageBoxButtons.YesNoCancel);
             int scheme = 0;
             if (res == DialogResult.Yes)
             {
@@ -426,25 +466,25 @@ namespace Steam_Desktop_Authenticator
                 string enteredCode = confirmationDialog.txtBox.Text.ToUpper();
                 if (enteredCode != confCode)
                 {
-                    MessageBox.Show("Confirmation codes do not match. Steam Guard not removed.");
+                    AstroMessageBox.Show("Confirmation codes do not match. Steam Guard not removed.");
                     return;
                 }
 
                 bool success = await currentAccount.DeactivateAuthenticator(scheme);
                 if (success)
                 {
-                    MessageBox.Show(String.Format("Steam Guard {0}. maFile will be deleted after hitting okay. If you need to make a backup, now's the time.", (scheme == 2 ? "removed completely" : "switched to emails")));
+                    AstroMessageBox.Show(String.Format("Steam Guard {0}. maFile will be deleted after hitting okay. If you need to make a backup, now's the time.", (scheme == 2 ? "removed completely" : "switched to emails")));
                     this.manifest.RemoveAccount(currentAccount);
                     this.loadAccountsList();
                 }
                 else
                 {
-                    MessageBox.Show("Steam Guard failed to deactivate.");
+                    AstroMessageBox.Show("Steam Guard failed to deactivate.");
                 }
             }
             else
             {
-                MessageBox.Show("Steam Guard was not removed. No action was taken.");
+                AstroMessageBox.Show("Steam Guard was not removed. No action was taken.");
             }
         }
 
@@ -531,7 +571,14 @@ namespace Steam_Desktop_Authenticator
             loadAccountInfo();
             if (currentAccount != null)
             {
-                pbTimeout.Value = 30 - secondsUntilChange;
+                int val = 30 - secondsUntilChange;
+                if (pbTimeout != null) pbTimeout.Value = val;
+                if (astroProgressBar != null) astroProgressBar.Value = val;
+
+                if (webView != null && webView.CoreWebView2 != null)
+                {
+                    webView.CoreWebView2.ExecuteScriptAsync($"updateProgressBar({val})");
+                }
             }
         }
 
@@ -558,7 +605,7 @@ namespace Steam_Desktop_Authenticator
                     // Check for a valid refresh token first
                     if (acc.Session.IsRefreshTokenExpired())
                     {
-                        MessageBox.Show("Your session for account " + acc.AccountName + " has expired. You will be prompted to login again.", "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        AstroMessageBox.Show("Your session for account " + acc.AccountName + " has expired. You will be prompted to login again.", "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         PromptRefreshLogin(acc);
                         break;
                     }
@@ -574,7 +621,7 @@ namespace Steam_Desktop_Authenticator
                         }
                         catch (Exception ex)
                         {
-                            MessageBox.Show(ex.Message, "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            AstroMessageBox.Show(ex.Message, "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             break;
                         }
                     }
@@ -643,7 +690,7 @@ namespace Steam_Desktop_Authenticator
         {
             if (account == null)
             {
-                MessageBox.Show("Please select an account first.", "Login Again", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                AstroMessageBox.Show("Please select an account first.", "Login Again", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -662,8 +709,15 @@ namespace Steam_Desktop_Authenticator
             if (currentAccount != null && steamTime != 0)
             {
                 popupFrm.Account = currentAccount;
-                txtLoginToken.Text = currentAccount.GenerateSteamGuardCodeForTime(steamTime);
+                string token = currentAccount.GenerateSteamGuardCodeForTime(steamTime);
+                txtLoginToken.Text = token;
                 groupAccount.Text = "Account: " + currentAccount.AccountName;
+
+                if (webView != null && webView.CoreWebView2 != null)
+                {
+                    webView.CoreWebView2.ExecuteScriptAsync($"updateToken('{token}')");
+                    webView.CoreWebView2.ExecuteScriptAsync($"updateCurrentAccount('{currentAccount.AccountName}')");
+                }
             }
         }
 
@@ -698,6 +752,13 @@ namespace Steam_Desktop_Authenticator
                 trayAccountList.Sorted = true;
             }
             menuDeactivateAuthenticator.Enabled = btnTradeConfirmations.Enabled = btnLoginViaQr.Enabled = allAccounts.Length > 0;
+
+            if (webView != null && webView.CoreWebView2 != null)
+            {
+                var names = allAccounts.Select(a => a.AccountName).ToArray();
+                string jsonNames = JsonConvert.SerializeObject(names);
+                webView.CoreWebView2.ExecuteScriptAsync($"updateAccountList({jsonNames})");
+            }
         }
 
         private void listAccounts_KeyDown(object sender, KeyEventArgs e)
@@ -791,7 +852,7 @@ namespace Steam_Desktop_Authenticator
             if (newVersion > currentVersion)
             {
                 labelUpdate.Text = "Download new version"; // Show the user a new version is available if they press no
-                DialogResult updateDialog = MessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
+                DialogResult updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
                 if (updateDialog == DialogResult.Yes)
                 {
                     Process.Start(new ProcessStartInfo(updateUrl) { UseShellExecute = true });
@@ -801,7 +862,7 @@ namespace Steam_Desktop_Authenticator
             {
                 if (!startupUpdateCheck)
                 {
-                    MessageBox.Show(String.Format("You are using the latest version: {0}", Application.ProductVersion));
+                    AstroMessageBox.Show(String.Format("You are using the latest version: {0}", Application.ProductVersion));
                 }
             }
 
@@ -824,7 +885,7 @@ namespace Steam_Desktop_Authenticator
             {
                 if (!startupUpdateCheck)
                 {
-                    MessageBox.Show("Failed to check for updates.");
+                    AstroMessageBox.Show("Failed to check for updates.");
                 }
             }
             finally
@@ -852,6 +913,258 @@ namespace Steam_Desktop_Authenticator
                 but.Width = panelButtons.Width / totButtons;
                 but.Location = curPos;
                 curPos = new Point(curPos.X + but.Width, 0);
+            }
+        }
+
+        // --- Astro Modern UI Restructuring (WebView2) ---
+        private WebView2 webView;
+
+        private async void SetupModernUI()
+        {
+            this.Size = new Size(450, 750);
+            this.MinimumSize = new Size(450, 750);
+            this.MaximumSize = new Size(450, 750);
+            this.MaximizeBox = false;
+            this.FormBorderStyle = FormBorderStyle.FixedSingle;
+            this.BackColor = Color.FromArgb(11, 19, 38); // Dark background
+            this.Text = "Astro SDA";
+
+            // Create loading screen
+            Panel loadingPanel = new Panel();
+            loadingPanel.Dock = DockStyle.Fill;
+            loadingPanel.BackColor = Color.FromArgb(11, 19, 38);
+            
+            Label lblLoading = new Label();
+            lblLoading.Text = "Loading Astro UI...";
+            lblLoading.ForeColor = Color.FromArgb(186, 201, 204);
+            lblLoading.AutoSize = false;
+            lblLoading.Size = new Size(400, 30);
+            lblLoading.TextAlign = ContentAlignment.MiddleCenter;
+            lblLoading.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
+            loadingPanel.Controls.Add(lblLoading);
+
+            int spinnerAngle = 0;
+            loadingPanel.Paint += (s, e) => {
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                int size = 44;
+                int x = (loadingPanel.Width - size) / 2;
+                int y = (loadingPanel.Height - size) / 2 - 20;
+                
+                using (Pen bgPen = new Pen(Color.FromArgb(40, 255, 255, 255), 4))
+                {
+                    e.Graphics.DrawEllipse(bgPen, x, y, size, size);
+                }
+                using (Pen fgPen = new Pen(Color.FromArgb(0, 229, 255), 4)) // Primary color
+                {
+                    fgPen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                    fgPen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                    e.Graphics.DrawArc(fgPen, x, y, size, size, spinnerAngle, 100);
+                }
+                spinnerAngle = (spinnerAngle + 12) % 360;
+            };
+
+            System.Windows.Forms.Timer loadingTimer = new System.Windows.Forms.Timer();
+            loadingTimer.Interval = 30;
+            loadingTimer.Tick += (s, e) => {
+                if (lblStatus.Text != "") lblLoading.Text = lblStatus.Text;
+                else lblLoading.Text = "Loading Astro UI...";
+                
+                lblLoading.Location = new Point((loadingPanel.Width - lblLoading.Width) / 2, loadingPanel.Height / 2 + 15);
+                loadingPanel.Invalidate();
+            };
+            loadingTimer.Start();
+            
+            this.Controls.Add(loadingPanel);
+            loadingPanel.BringToFront();
+
+            // Initialize WebView2 but keep it hidden until loaded
+            webView = new WebView2();
+            webView.Dock = DockStyle.Fill;
+            webView.Visible = false;
+            this.Controls.Add(webView);
+            webView.BringToFront();
+
+            // Hide old UI immediately during loading
+            foreach (Control c in this.Controls)
+            {
+                if (c != webView && c != loadingPanel)
+                {
+                    c.Visible = false;
+                }
+            }
+
+            // Wait for WebView2 runtime to be initialized
+            await webView.EnsureCoreWebView2Async(null);
+
+            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+            webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+            // Wire up message receiving from JS
+            webView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
+
+            // When navigation is done, we swap out the old UI for the new one
+            webView.NavigationCompleted += (sender, args) =>
+            {
+                loadingTimer.Stop();
+                loadingTimer.Dispose();
+                loadingPanel.Visible = false;
+                webView.Visible = true;
+
+                // Push initial data to JS now that it's ready
+                loadAccountsList();
+                loadAccountInfo();
+            };
+
+            // Load local html file
+            string htmlPath = System.IO.Path.Combine(Application.StartupPath, "wwwroot", "index.html");
+            webView.Source = new Uri(htmlPath);
+        }
+
+        private SteamAuth.Confirmation[] currentConfirmations;
+
+        private void CoreWebView2_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            string message = e.WebMessageAsJson;
+            if (string.IsNullOrEmpty(message)) return;
+
+            JObject payload = JObject.Parse(message);
+            string action = (string)payload["action"];
+
+            if (action == "copy_token")
+            {
+                CopyLoginToken();
+            }
+            else if (action == "setup_account")
+            {
+                this.BeginInvoke((MethodInvoker)delegate { btnSteamLogin_Click(this, EventArgs.Empty); });
+            }
+            else if (action == "setup_encryption")
+            {
+                this.BeginInvoke((MethodInvoker)delegate { btnManageEncryption_Click(this, EventArgs.Empty); });
+            }
+
+            else if (action == "login_qr")
+            {
+                this.BeginInvoke((MethodInvoker)delegate { btnLoginViaQr_Click(this, EventArgs.Empty); });
+            }
+            else if (action == "switch_account")
+            {
+                string accName = (string)payload["accountName"];
+                for (int i = 0; i < allAccounts.Length; i++)
+                {
+                    if (allAccounts[i].AccountName == accName)
+                    {
+                        currentAccount = allAccounts[i];
+                        loadAccountInfo();
+                        break;
+                    }
+                }
+            }
+            else if (action == "load_settings")
+            {
+                var settings = new JObject();
+                settings["checkConfirmations"] = manifest.PeriodicChecking;
+                settings["checkInterval"] = manifest.PeriodicCheckingInterval;
+                settings["checkAllAccounts"] = manifest.CheckAllAccounts;
+                settings["autoConfirmMarket"] = manifest.AutoConfirmMarketTransactions;
+                settings["autoConfirmTrades"] = manifest.AutoConfirmTrades;
+
+                webView.CoreWebView2.ExecuteScriptAsync($"loadSettings({settings.ToString(Newtonsoft.Json.Formatting.None)})");
+            }
+            else if (action == "save_settings")
+            {
+                manifest.PeriodicChecking = (bool)payload["checkConfirmations"];
+                manifest.PeriodicCheckingInterval = (int)payload["checkInterval"];
+                manifest.CheckAllAccounts = (bool)payload["checkAllAccounts"];
+                manifest.AutoConfirmMarketTransactions = (bool)payload["autoConfirmMarket"];
+                manifest.AutoConfirmTrades = (bool)payload["autoConfirmTrades"];
+                manifest.Save();
+                webView.CoreWebView2.ExecuteScriptAsync("settingsSaved()");
+            }
+            else if (action == "load_trades")
+            {
+                LoadTradesAsync();
+            }
+            else if (action == "accept_trade" || action == "reject_trade")
+            {
+                string idStr = (string)payload["id"];
+                if (ulong.TryParse(idStr, out ulong confId))
+                {
+                    var conf = currentConfirmations?.FirstOrDefault(c => c.ID == confId);
+                    if (conf != null && currentAccount != null)
+                    {
+                        Task.Run(async () =>
+                        {
+                            if (action == "accept_trade")
+                                await currentAccount.AcceptConfirmation(conf);
+                            else
+                                await currentAccount.DenyConfirmation(conf);
+
+                            this.BeginInvoke((MethodInvoker)delegate { LoadTradesAsync(); });
+                        });
+                    }
+                    else
+                    {
+                        webView.CoreWebView2.ExecuteScriptAsync("hideSpinner()");
+                    }
+                }
+                else
+                {
+                    webView.CoreWebView2.ExecuteScriptAsync("hideSpinner()");
+                }
+            }
+        }
+
+        private async void LoadTradesAsync()
+        {
+            if (currentAccount == null)
+            {
+                await webView.CoreWebView2.ExecuteScriptAsync("loadConfirmations('[]')");
+                return;
+            }
+
+            if (currentAccount.Session.IsRefreshTokenExpired())
+            {
+                AstroMessageBox.Show("Your session has expired. Use the login again button.", "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                await webView.CoreWebView2.ExecuteScriptAsync("hideSpinner()");
+                return;
+            }
+
+            if (currentAccount.Session.IsAccessTokenExpired())
+            {
+                try
+                {
+                    await currentAccount.Session.RefreshAccessToken();
+                }
+                catch (Exception ex)
+                {
+                    AstroMessageBox.Show(ex.Message, "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    await webView.CoreWebView2.ExecuteScriptAsync("hideSpinner()");
+                    return;
+                }
+            }
+
+            try
+            {
+                currentConfirmations = await currentAccount.FetchConfirmationsAsync();
+                var settings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
+                
+                object projected = currentConfirmations == null ? (object)Array.Empty<object>() : currentConfirmations.Select(c => new {
+                    Id = c.ID.ToString(),
+                    Headline = c.Headline,
+                    Creator = c.Creator.ToString(),
+                    Icon = c.Icon,
+                    Summary = c.Summary
+                });
+
+                string jsonStr = JsonConvert.SerializeObject(projected, settings);
+                string jsEscaped = jsonStr.Replace("'", "\\'");
+                
+                await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations('{jsEscaped}')");
+            }
+            catch (Exception ex)
+            {
+                await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations('[]')");
             }
         }
     }

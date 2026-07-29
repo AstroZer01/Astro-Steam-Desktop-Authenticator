@@ -172,7 +172,7 @@ namespace Steam_Desktop_Authenticator
                     passKeyValid = this.VerifyPasskey(passKey);
                     if (!passKeyValid)
                     {
-                        MessageBox.Show("That passkey is invalid.");
+                        AstroMessageBox.Show("That passkey is invalid.");
                     }
                 }
                 else
@@ -189,7 +189,7 @@ namespace Steam_Desktop_Authenticator
             newPassKeyForm.ShowDialog();
             if (newPassKeyForm.Canceled || newPassKeyForm.txtBox.Text.Length == 0)
             {
-                MessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
+                AstroMessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
                 return null;
             }
 
@@ -197,7 +197,7 @@ namespace Steam_Desktop_Authenticator
             newPassKeyForm2.ShowDialog();
             if (newPassKeyForm2.Canceled)
             {
-                MessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
+                AstroMessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
                 return null;
             }
 
@@ -206,18 +206,18 @@ namespace Steam_Desktop_Authenticator
 
             if (newPassKey != confirmPassKey)
             {
-                MessageBox.Show("Passkeys do not match.");
+                AstroMessageBox.Show("Passkeys do not match.");
                 return null;
             }
 
             if (!this.ChangeEncryptionKey(null, newPassKey))
             {
-                MessageBox.Show("Unable to set passkey.");
+                AstroMessageBox.Show("Unable to set passkey.");
                 return null;
             }
             else
             {
-                MessageBox.Show("Passkey successfully set.");
+                AstroMessageBox.Show("Passkey successfully set.");
             }
 
             return newPassKey;

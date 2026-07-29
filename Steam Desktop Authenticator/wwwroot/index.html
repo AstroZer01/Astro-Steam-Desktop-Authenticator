@@ -1,0 +1,419 @@
+<!DOCTYPE html><html class="dark" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Astro Steam Authenticator - Dashboard</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script id="tailwind-config">
+tailwind.config = {
+    darkMode: "class",
+    theme: {
+        extend: {
+            "colors": {
+                "surface-variant": "#2d3449",
+                "on-surface": "#dae2fd",
+                "primary": "#c3f5ff",
+                "primary-fixed": "#9cf0ff",
+                "background": "#0b1326",
+                "surface-container-low": "#131b2e",
+                "surface-container": "#171f33",
+                "surface-container-high": "#222a3d",
+                "primary-container": "#00e5ff",
+                "on-surface-variant": "#bac9cc",
+                "surface-container-lowest": "#060e20",
+                "surface-container-highest": "#2d3449",
+                "surface": "#0b1326",
+                "on-primary": "#00363d",
+                "secondary": "#4edea3",
+                "on-secondary": "#003824",
+                "surface-bright": "#31394d",
+                "error": "#ff5449",
+                "on-error": "#690005",
+                "error-container": "#93000a",
+                "on-error-container": "#ffb4ab"
+            }
+        }
+    }
+}
+</script>
+<style>
+body { background-color: theme('colors.background'); color: theme('colors.on-surface'); font-family: 'Inter', sans-serif; min-height: max(884px, 100dvh); user-select: none; -webkit-user-select: none; }
+input, textarea { user-select: text; -webkit-user-select: text; }
+.glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
+.btn-primary { background: #00E5FF; color: #00363D; font-weight: bold; cursor: pointer; transition: background 0.2s; border: none; }
+.btn-primary:hover { background: #9cf0ff; }
+.loader { border: 4px solid rgba(255,255,255,0.1); border-left-color: #00E5FF; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+input[type="checkbox"]:checked {
+    background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='%230b1326' xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e%3c/svg%3e") !important;
+    background-color: theme('colors.secondary') !important;
+    border-color: theme('colors.secondary') !important;
+    color: theme('colors.secondary') !important;
+}
+</style>
+</head>
+<body class="min-h-screen flex flex-col antialiased selection:bg-primary-container selection:text-on-primary-container relative pb-20 pt-4 bg-surface overflow-x-hidden">
+
+
+
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-2 py-3 bg-surface/80 backdrop-blur-lg border-t border-white/10 shadow-xl rounded-t-xl" id="mobile-nav">
+    <a onclick="switchTab('authenticator')" data-tab="authenticator" class="tab-link flex flex-col items-center justify-center bg-secondary-container/20 text-secondary rounded-xl px-3 py-1 transition-all duration-200 cursor-pointer min-w-[72px]">
+        <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">home</span>
+        <span class="text-xs mt-1">Home</span>
+    </a>
+    <a onclick="switchTab('trades')" data-tab="trades" class="tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
+        <span class="material-symbols-outlined">swap_horizontal_circle</span>
+        <span class="text-xs mt-1">Trade</span>
+    </a>
+    <a onclick="switchTab('settings')" data-tab="settings" class="tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
+        <span class="material-symbols-outlined">settings</span>
+        <span class="text-xs mt-1">Settings</span>
+    </a>
+</nav>
+
+<main class="flex-1 p-4 md:p-6 lg:p-8 max-w-container-max mx-auto w-full relative z-10">
+    <div class="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] bg-primary/5 rounded-full blur-[120px] pointer-events-none"></div>
+
+    <!-- Global Loading Spinner -->
+    <div id="global-spinner" class="hidden absolute inset-0 flex items-center justify-center bg-surface/50 backdrop-blur-sm z-50 rounded-xl">
+        <div class="loader"></div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 relative">
+        
+        <!-- Authenticator View -->
+        <section id="view-authenticator" class="lg:col-span-8 lg:col-start-3 flex flex-col gap-4">
+            <div class="grid grid-cols-2 gap-4">
+                <button id="btn-setup-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-xl transition-colors shadow-sm">Setup New Account</button>
+                <button id="btn-setup-encryption" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-xl transition-colors shadow-sm">Setup Encryption</button>
+            </div>
+            
+            <div class="glass-panel rounded-xl p-4 flex flex-col gap-4">
+                <div class="text-on-surface-variant text-xs uppercase tracking-wider">Login Token</div>
+                <div class="flex gap-4">
+                    <div class="flex-1 bg-surface-container-lowest border border-white/10 rounded-lg flex items-center justify-center py-4">
+                        <span id="login-token-text" class="text-[40px] tracking-widest text-primary">-----</span>
+                    </div>
+                    <button id="btn-copy" class="bg-surface-variant hover:bg-surface-bright border border-white/10 rounded-lg px-6 w-24 transition-colors text-on-surface text-sm">Copy</button>
+                </div>
+                <div class="w-full bg-surface-variant rounded-full h-4 mt-2 overflow-hidden border border-white/10">
+                    <div id="progress-bar-fill" class="bg-gradient-to-r from-[#00a572] to-[#4edea3] h-full rounded-full transition-all duration-1000" style="width: 100%"></div>
+                </div>
+            </div>
+            
+            <div class="glass-panel rounded-xl p-4 flex flex-col gap-4">
+                <div id="account-title" class="text-on-surface-variant text-xs uppercase tracking-wider">Account: ...</div>
+                <button id="btn-login-qr" class="bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-sm">Login via QR</button>
+            </div>
+            
+            <div class="glass-panel rounded-xl p-4 flex flex-col gap-4 flex-1 min-h-[300px]">
+                <div id="account-list-container" class="bg-surface-container-lowest border border-white/10 rounded-lg flex-1 overflow-y-auto overflow-x-hidden"></div>
+                <div class="flex items-center gap-3 pt-2">
+                    <span class="text-on-surface-variant text-sm">Filter:</span>
+                    <input id="filter-input" class="flex-1 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-1.5 px-3 focus:ring-1 focus:ring-[#00daf3] focus:outline-none h-8" type="text">
+                </div>
+            </div>
+        </section>
+
+        <!-- Trades View -->
+        <section id="view-trades" class="hidden lg:col-span-8 lg:col-start-3 flex flex-col gap-4">
+            <header class="mb-2 flex justify-between items-center">
+                <h1 class="text-2xl font-bold text-on-surface">Confirmations</h1>
+                <div class="flex items-center gap-2">
+                    <select id="trade-account-select" class="bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-1.5 px-2 focus:outline-none focus:ring-1 focus:ring-primary w-40 cursor-pointer">
+                    </select>
+                    <button id="btn-refresh-trades" class="p-2 hover:bg-surface-variant rounded-lg flex items-center justify-center transition-colors text-on-surface-variant" title="Refresh">
+                        <span class="material-symbols-outlined">refresh</span>
+                    </button>
+                </div>
+            </header>
+            <div class="glass-panel rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col min-h-[300px]">
+                <div id="trades-container" class="flex-1 overflow-y-auto divide-y divide-white/5"></div>
+                <div id="empty-state" class="hidden p-8 flex-col items-center justify-center text-center flex-1">
+                    <span class="text-on-surface-variant text-sm">No confirmations</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Settings View -->
+        <section id="view-settings" class="hidden lg:col-span-8 lg:col-start-3 flex flex-col gap-4">
+            <header class="mb-2">
+                <h1 class="text-3xl font-bold text-on-surface">Settings</h1>
+                <p class="text-on-surface-variant mt-1">Manage account security and app preferences.</p>
+            </header>
+            <div class="glass-panel rounded-xl p-5 space-y-5">
+                <div class="flex items-start gap-3">
+                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="check-confirmations" type="checkbox"/>
+                    <label class="text-on-surface" for="check-confirmations">Periodically check for new confirmations and show a popup</label>
+                </div>
+                <div class="flex items-center gap-3 pl-8">
+                    <input class="w-20 rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2 focus:ring-primary" id="check-interval" type="number" value="5"/>
+                    <span class="text-on-surface-variant">Seconds between checking</span>
+                </div>
+                <div class="flex items-start gap-3">
+                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="check-all-accounts" type="checkbox"/>
+                    <label class="text-on-surface" for="check-all-accounts">Check all accounts for confirmations</label>
+                </div>
+                <div class="flex items-start gap-3">
+                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-confirm-market" type="checkbox"/>
+                    <label class="text-on-surface" for="auto-confirm-market">Auto-confirm market transactions</label>
+                </div>
+                <div class="flex items-start gap-3">
+                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-confirm-trades" type="checkbox"/>
+                    <label class="text-on-surface" for="auto-confirm-trades">Auto-confirm trades</label>
+                </div>
+                <hr class="border-white/10 my-4">
+                
+                <div>
+                    <button onclick="document.getElementById('proxy-settings-content').classList.toggle('hidden')" class="flex items-center justify-between w-full text-left p-2 -mx-2 hover:bg-white/5 rounded-lg transition-colors group">
+                        <div class="flex items-center gap-2">
+                            <h2 class="text-lg font-semibold text-on-surface">Proxy Settings</h2>
+                            <span class="text-primary text-xs font-bold uppercase tracking-wider bg-primary/10 border border-primary/20 px-2 py-0.5 rounded-full">Coming Soon</span>
+                        </div>
+                        <span class="material-symbols-outlined text-on-surface-variant group-hover:text-on-surface transition-colors">expand_more</span>
+                    </button>
+                    
+                    <div id="proxy-settings-content" class="hidden space-y-4 opacity-50 mt-4 pointer-events-none pb-2">
+                        <div class="flex items-start gap-3">
+                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="enable-proxy" type="checkbox" disabled/>
+                            <label class="text-on-surface" for="enable-proxy">Enable Proxy for this session</label>
+                        </div>
+                        
+                        <div class="grid grid-cols-2 gap-4 pl-8">
+                            <div>
+                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-host">Host</label>
+                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-host" type="text" placeholder="127.0.0.1" disabled/>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-port">Port</label>
+                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-port" type="number" placeholder="8080" disabled/>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-user">Username</label>
+                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-user" type="text" placeholder="Optional" disabled/>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-pass">Password</label>
+                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-pass" type="password" placeholder="Optional" disabled/>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="pt-4">
+                    <button id="btn-save-settings" class="w-full py-3 rounded-lg btn-primary shadow-lg shadow-[#00e5ff]/20">Save Settings</button>
+                </div>
+            </div>
+        </section>
+
+    </div>
+</main>
+
+<script>
+    document.addEventListener('contextmenu', event => {
+        if (event.target.tagName !== 'INPUT' && event.target.tagName !== 'TEXTAREA') {
+            event.preventDefault();
+        }
+    });
+
+    // Tab Switching Logic
+    function switchTab(tabId) {
+        document.querySelectorAll('section[id^="view-"]').forEach(s => s.classList.add('hidden'));
+        document.getElementById('view-' + tabId).classList.remove('hidden');
+
+        document.querySelectorAll('.tab-link').forEach(l => {
+            const isDesktop = l.parentElement.id === 'desktop-nav';
+            if (l.dataset.tab === tabId) {
+                if (isDesktop) {
+                    l.className = "tab-link flex items-center gap-3 px-4 py-3 rounded-lg bg-primary/10 text-primary border-l-4 border-primary transition-all duration-300 cursor-pointer";
+                } else {
+                    l.className = "tab-link flex flex-col items-center justify-center bg-secondary-container/20 text-secondary rounded-xl px-3 py-1 transition-all duration-200 cursor-pointer min-w-[72px]";
+                    l.querySelector('span').style.fontVariationSettings = "'FILL' 1";
+                }
+            } else {
+                if (isDesktop) {
+                    let extra = l.dataset.tab === 'settings' ? " mt-8 border-t border-white/5 pt-4" : "";
+                    l.className = "tab-link flex items-center gap-3 px-4 py-3 rounded-lg text-on-surface-variant hover:bg-white/5 transition-all duration-300 cursor-pointer border-l-4 border-transparent" + extra;
+                } else {
+                    l.className = "tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]";
+                    l.querySelector('span').style.fontVariationSettings = "'FILL' 0";
+                }
+            }
+        });
+
+        if (tabId === 'trades') {
+            showSpinner();
+            window.chrome.webview.postMessage({ action: 'load_trades' });
+        } else if (tabId === 'settings') {
+            showSpinner();
+            window.chrome.webview.postMessage({ action: 'load_settings' });
+        }
+    }
+
+    function showSpinner() {
+        document.getElementById('global-spinner').classList.remove('hidden');
+    }
+    function hideSpinner() {
+        document.getElementById('global-spinner').classList.add('hidden');
+    }
+
+    // Authenticator Actions
+    document.getElementById('btn-setup-account').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'setup_account' }); });
+    document.getElementById('btn-setup-encryption').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'setup_encryption' }); });
+    document.getElementById('btn-copy').addEventListener('click', (e) => { 
+        window.chrome.webview.postMessage({ action: 'copy_token' }); 
+        let btn = e.currentTarget;
+        let originalText = btn.innerText;
+        btn.innerText = "Copied!";
+        btn.classList.add('bg-secondary', 'text-on-secondary');
+        setTimeout(() => {
+            btn.innerText = "Copy";
+            btn.classList.remove('bg-secondary', 'text-on-secondary');
+        }, 1500);
+    });
+    document.getElementById('btn-login-qr').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'login_qr' }); });
+
+    let currentAcc = "";
+    function updateToken(token) { 
+        let el = document.getElementById('login-token-text');
+        if (el.innerText !== token) el.innerText = token;
+    }
+    function updateCurrentAccount(accName) {
+        currentAcc = accName;
+        document.getElementById('account-title').innerText = "Account: " + accName;
+        renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+        let sel = document.getElementById('trade-account-select');
+        if (sel) sel.value = accName;
+    }
+    function updateProgressBar(secondsRemaining) {
+        let pct = (secondsRemaining / 30.0) * 100;
+        document.getElementById('progress-bar-fill').style.width = pct + "%";
+    }
+    let allAccs = [];
+    function updateAccountList(names) {
+        allAccs = names;
+        renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+        
+        let sel = document.getElementById('trade-account-select');
+        if (sel) {
+            sel.innerHTML = '';
+            names.forEach(n => {
+                let opt = document.createElement('option');
+                opt.value = n;
+                opt.innerText = n;
+                if (n === currentAcc) opt.selected = true;
+                sel.appendChild(opt);
+            });
+        }
+    }
+    function renderAccountList(filterText = "") {
+        const container = document.getElementById('account-list-container');
+        container.innerHTML = "";
+        allAccs.forEach(acc => {
+            if (filterText && !acc.toLowerCase().includes(filterText)) return;
+            const div = document.createElement('div');
+            if (acc === currentAcc) {
+                div.className = "bg-primary-container/20 text-white px-3 py-2 cursor-pointer border-l-2 border-primary font-bold overflow-hidden whitespace-nowrap text-ellipsis";
+            } else {
+                div.className = "text-white px-3 py-2 hover:bg-surface-variant cursor-pointer transition-colors overflow-hidden whitespace-nowrap text-ellipsis";
+            }
+            div.innerText = acc;
+            div.onclick = () => { window.chrome.webview.postMessage({ action: 'switch_account', accountName: acc }); };
+            container.appendChild(div);
+        });
+    }
+
+    document.getElementById('filter-input').addEventListener('input', (e) => {
+        renderAccountList(e.target.value.toLowerCase());
+    });
+
+    // Trade Actions
+    document.getElementById('btn-refresh-trades').addEventListener('click', () => {
+        showSpinner();
+        window.chrome.webview.postMessage({ action: 'load_trades' });
+    });
+    document.getElementById('trade-account-select').addEventListener('change', (e) => {
+        window.chrome.webview.postMessage({ action: 'switch_account', accountName: e.target.value });
+        showSpinner();
+        window.chrome.webview.postMessage({ action: 'load_trades' });
+    });
+    
+    function loadConfirmations(confirmsStr) {
+        hideSpinner();
+        const confirms = JSON.parse(confirmsStr);
+        const container = document.getElementById('trades-container');
+        const emptyState = document.getElementById('empty-state');
+        container.innerHTML = '';
+        if (!confirms || confirms.length === 0) {
+            emptyState.style.display = 'flex';
+            return;
+        }
+        emptyState.style.display = 'none';
+        confirms.forEach(c => {
+            const isMarket = c.Headline && c.Headline.toLowerCase().includes('sell');
+            const typeText = isMarket ? 'Market' : 'Trade';
+            const div = document.createElement('div');
+            div.className = 'flex items-center gap-4 p-3 hover:bg-surface-variant/50 transition-colors';
+            div.innerHTML = `
+                <img src="${c.Icon || ''}" class="w-10 h-10 object-contain rounded bg-surface-container-low" onerror="this.style.display='none'">
+                <div class="flex-1 min-w-0">
+                    <div class="text-sm text-on-surface font-medium truncate">${c.Headline || 'Confirmation'}</div>
+                    <div class="text-xs text-on-surface-variant truncate mt-0.5">${c.Creator || typeText}</div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="sendTradeAction('${c.Id}', 'accept_trade')" class="px-3 py-1.5 rounded bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30">Accept</button>
+                    <button onclick="sendTradeAction('${c.Id}', 'reject_trade')" class="px-3 py-1.5 rounded bg-error-container/30 hover:bg-error-container/60 text-error text-sm font-medium transition-colors border border-error/30">Cancel</button>
+                </div>
+            `;
+            container.appendChild(div);
+        });
+    }
+
+    function sendTradeAction(id, act) {
+        showSpinner();
+        window.chrome.webview.postMessage({ action: act, id: id });
+    }
+
+    // Settings Actions
+    document.getElementById('btn-save-settings').addEventListener('click', () => {
+        showSpinner();
+        window.chrome.webview.postMessage({
+            action: 'save_settings',
+            checkConfirmations: document.getElementById('check-confirmations').checked,
+            checkInterval: parseInt(document.getElementById('check-interval').value) || 5,
+            checkAllAccounts: document.getElementById('check-all-accounts').checked,
+            autoConfirmMarket: document.getElementById('auto-confirm-market').checked,
+            autoConfirmTrades: document.getElementById('auto-confirm-trades').checked
+        });
+    });
+
+    function loadSettings(settings) {
+        hideSpinner();
+        document.getElementById('check-confirmations').checked = settings.checkConfirmations;
+        document.getElementById('check-interval').value = settings.checkInterval;
+        document.getElementById('check-all-accounts').checked = settings.checkAllAccounts;
+        document.getElementById('auto-confirm-market').checked = settings.autoConfirmMarket;
+        document.getElementById('auto-confirm-trades').checked = settings.autoConfirmTrades;
+    }
+
+    function updateQrButtonText(text) {
+        let btn = document.getElementById('btn-login-qr');
+        if (btn) btn.innerText = text;
+    }
+
+    function settingsSaved() {
+        hideSpinner();
+        let btn = document.getElementById('btn-save-settings');
+        if (btn) {
+            let original = btn.innerText;
+            btn.innerText = "Saved!";
+            btn.classList.add('bg-secondary', 'text-on-secondary');
+            setTimeout(() => {
+                btn.innerText = "Save Settings";
+                btn.classList.remove('bg-secondary', 'text-on-secondary');
+            }, 1500);
+        }
+    }
+</script>
+</body></html>
