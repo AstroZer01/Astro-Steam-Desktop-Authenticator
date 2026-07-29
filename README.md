@@ -41,6 +41,7 @@ All credit for the original design and implementation goes to Jessecar96 and the
 - [x] Proxy Settings section (UI layout — Coming Soon, pending backend implementation).
 
 #### In Progress / Remaining
+- [ ] API endpoint for trading automation
 - [ ] Proxy support backend implementation.
 - [ ] Auto-confirm popup notifications reliability improvements.
 

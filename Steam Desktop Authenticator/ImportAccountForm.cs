@@ -18,11 +18,35 @@ namespace Steam_Desktop_Authenticator
     {
         private Manifest mManifest;
 
+        [System.Runtime.InteropServices.DllImport("Gdi32.dll", EntryPoint = "CreateRoundRectRgn")]
+        private static extern IntPtr CreateRoundRectRgn(
+            int nLeftRect,
+            int nTopRect,
+            int nRightRect,
+            int nBottomRect,
+            int nWidthEllipse,
+            int nHeightEllipse
+        );
+
         public ImportAccountForm()
         {
             InitializeComponent();
             AstroTheme.ApplyTheme(this);
             this.mManifest = Manifest.GetManifest();
+
+            // Style textbox
+            txtBox.BorderStyle = BorderStyle.None;
+            txtBox.AutoSize = false;
+            txtBox.Height = 33;
+            // Pad it a bit from the top to look centered
+            txtBox.Controls.Add(new Label() { Height = 4, Dock = DockStyle.Top, BackColor = txtBox.BackColor });
+
+            // Round borders
+            btnImport.FlatAppearance.BorderSize = 0;
+            btnCancel.FlatAppearance.BorderSize = 0;
+            btnImport.Region = System.Drawing.Region.FromHrgn(CreateRoundRectRgn(0, 0, btnImport.Width, btnImport.Height, 8, 8));
+            btnCancel.Region = System.Drawing.Region.FromHrgn(CreateRoundRectRgn(0, 0, btnCancel.Width, btnCancel.Height, 8, 8));
+            txtBox.Region = System.Drawing.Region.FromHrgn(CreateRoundRectRgn(0, 0, txtBox.Width, txtBox.Height, 8, 8));
         }
 
         private void btnImport_Click(object sender, EventArgs e)

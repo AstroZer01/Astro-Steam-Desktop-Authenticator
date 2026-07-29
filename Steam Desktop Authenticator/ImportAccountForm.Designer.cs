@@ -31,26 +31,26 @@ namespace Steam_Desktop_Authenticator
             // 
             // txtBox
             // 
-            this.txtBox.Font = new System.Drawing.Font("Segoe UI", 14.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.txtBox.Font = new System.Drawing.Font("Segoe UI", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.txtBox.Location = new System.Drawing.Point(15, 42);
             this.txtBox.Name = "txtBox";
-            this.txtBox.Size = new System.Drawing.Size(307, 33);
+            this.txtBox.Size = new System.Drawing.Size(307, 29);
             this.txtBox.TabIndex = 1;
             // 
             // btnImport
             // 
-            this.btnImport.Location = new System.Drawing.Point(135, 131);
+            this.btnImport.Location = new System.Drawing.Point(25, 131);
             this.btnImport.Name = "btnImport";
             this.btnImport.Size = new System.Drawing.Size(187, 28);
             this.btnImport.TabIndex = 3;
-            this.btnImport.Text = "Select .maFile file to Import";
+            this.btnImport.Text = "Select .maFile to Import";
             this.btnImport.UseVisualStyleBackColor = true;
             this.btnImport.Click += new System.EventHandler(this.btnImport_Click);
             // 
             // btnCancel
             // 
             this.btnCancel.DialogResult = System.Windows.Forms.DialogResult.Cancel;
-            this.btnCancel.Location = new System.Drawing.Point(41, 131);
+            this.btnCancel.Location = new System.Drawing.Point(222, 131);
             this.btnCancel.Name = "btnCancel";
             this.btnCancel.Size = new System.Drawing.Size(88, 28);
             this.btnCancel.TabIndex = 4;

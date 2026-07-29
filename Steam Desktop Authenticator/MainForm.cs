@@ -1042,6 +1042,14 @@ namespace Steam_Desktop_Authenticator
             {
                 this.BeginInvoke((MethodInvoker)delegate { btnManageEncryption_Click(this, EventArgs.Empty); });
             }
+            else if (action == "import_account")
+            {
+                this.BeginInvoke((MethodInvoker)delegate { 
+                    ImportAccountForm importForm = new ImportAccountForm();
+                    importForm.ShowDialog();
+                    this.loadAccountsList();
+                });
+            }
 
             else if (action == "login_qr")
             {

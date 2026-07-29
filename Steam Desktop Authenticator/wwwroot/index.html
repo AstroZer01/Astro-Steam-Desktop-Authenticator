@@ -84,9 +84,10 @@ input[type="checkbox"]:checked {
         
         <!-- Authenticator View -->
         <section id="view-authenticator" class="lg:col-span-8 lg:col-start-3 flex flex-col gap-4">
-            <div class="grid grid-cols-2 gap-4">
-                <button id="btn-setup-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-xl transition-colors shadow-sm">Setup New Account</button>
-                <button id="btn-setup-encryption" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-xl transition-colors shadow-sm">Setup Encryption</button>
+            <div class="grid grid-cols-3 gap-4">
+                <button id="btn-setup-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-sm">Setup New Account</button>
+                <button id="btn-import-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-sm">Import Account</button>
+                <button id="btn-setup-encryption" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-sm">Setup Encryption</button>
             </div>
             
             <div class="glass-panel rounded-xl p-4 flex flex-col gap-4">
@@ -260,6 +261,7 @@ input[type="checkbox"]:checked {
 
     // Authenticator Actions
     document.getElementById('btn-setup-account').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'setup_account' }); });
+    document.getElementById('btn-import-account').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'import_account' }); });
     document.getElementById('btn-setup-encryption').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'setup_encryption' }); });
     document.getElementById('btn-copy').addEventListener('click', (e) => { 
         window.chrome.webview.postMessage({ action: 'copy_token' }); 
