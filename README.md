@@ -24,8 +24,7 @@
 ## About This Project
 This is a continuation of the original [Steam Desktop Authenticator](https://github.com/Jessecar96/SteamDesktopAuthenticator) created by **Jessecar96**. Astro Steam Desktop Authenticator is an actively maintained fork that serves to keep the desktop authenticator tool functional, secure, and compatible with Steam's modern API changes. 
 
-If you need a reliable way to manage **Steam Guard**, handle **2FA (Two-Factor Authentication)**, and automatically accept or decline **trade confirmations** directly in C# without using a mobile phone, this project is for you.
-
+A reliable way to manage **Steam Guard**, handle **2FA (Two-Factor Authentication)**, and automatically accept or decline **trade confirmations** directly on you're pc without using a mobile phone.
 All credit for the original design and implementation goes to Jessecar96 and the original contributors.
 
 ## Screenshots
@@ -52,6 +51,17 @@ If you prefer to compile the program from source rather than downloading the pre
    ```
    *Alternatively, you can open `SteamDesktopAuthenticator.sln` in **Visual Studio 2022** and build the solution.*
 4. **Run the Application**: The compiled executable will be located in `Launcher/bin/Release/net8.0-windows/win-x64/publish/` (or similar depending on your build configuration).
+
+
+<p align="center">
+  <strong>
+    ❕ Alternatively you can download the latest version without technical knowledge and run it directly
+    <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
+      Click here to Download
+    </a>
+  </strong>
+</p>
+
 
 ## Current Focus & To-Do
 
