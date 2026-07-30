@@ -46,6 +46,18 @@ namespace Steam_Desktop_Authenticator
             this.Location = (Point)Size.Subtract(Screen.GetWorkingArea(this).Size, this.Size);
         }
 
+        // Prevent the form from being disposed when the user closes it.
+        // If it were disposed, subsequent attempts to show it again would throw
+        // "Cannot access a disposed object".
+        private void TradePopupForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                this.Hide();
+            }
+        }
+
         private void btnAccept_Click(object sender, EventArgs e)
         {
             if (!accept2)
@@ -90,7 +102,6 @@ namespace Steam_Desktop_Authenticator
 
             btnAccept.Text = "Accept";
             btnDeny.Text = "Deny";
-            lblAccount.Text = "";
             lblStatus.Text = "";
 
             if (confirms.Count == 0)
@@ -99,12 +110,20 @@ namespace Steam_Desktop_Authenticator
             }
             else
             {
-                string description = confirms[0].Headline;
-                if (confirms[0].Summary != null && confirms[0].Summary.Count > 0)
+                var conf = confirms[0];
+
+                // Line 1: trader/offer name from Headline
+                lblAccount.Text = !string.IsNullOrEmpty(conf.Headline) ? conf.Headline.Trim() : "New Confirmation";
+
+                // Remaining lines: summary with overflow ellipsis
+                if (conf.Summary != null && conf.Summary.Count > 0)
                 {
-                    description += "\n" + string.Join("\n", confirms[0].Summary);
+                    lblDesc.Text = string.Join(" · ", conf.Summary);
                 }
-                lblDesc.Text = !string.IsNullOrEmpty(description) ? description.Trim() : "Confirmation";
+                else
+                {
+                    lblDesc.Text = "";
+                }
             }
         }
 

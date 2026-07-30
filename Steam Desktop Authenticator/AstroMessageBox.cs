@@ -27,5 +27,15 @@ namespace Steam_Desktop_Authenticator
                 return form.ShowDialog();
             }
         }
+
+        public static DialogResult Show(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText, out bool isChecked)
+        {
+            using (AstroMessageBoxForm form = new AstroMessageBoxForm(text, caption, buttons, icon, checkboxText))
+            {
+                DialogResult result = form.ShowDialog();
+                isChecked = form.IsChecked;
+                return result;
+            }
+        }
     }
 }

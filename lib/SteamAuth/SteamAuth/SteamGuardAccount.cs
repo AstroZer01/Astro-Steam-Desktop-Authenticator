@@ -192,6 +192,7 @@ namespace SteamAuth
                 throw new Exception("Needs Authentication");
             }
 
+
             return confirmationsResponse.Confirmations;
         }
 

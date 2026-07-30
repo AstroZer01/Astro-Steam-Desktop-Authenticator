@@ -42,6 +42,9 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("minimize_to_tray")]
         public bool MinimizeToTray { get; set; } = false;
 
+        [JsonProperty("check_for_updates")]
+        public bool CheckForUpdates { get; set; } = true;
+
         private static Manifest _manifest { get; set; }
 
         public static string GetExecutableDir()

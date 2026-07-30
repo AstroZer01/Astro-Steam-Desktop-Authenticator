@@ -403,7 +403,7 @@ input[type="checkbox"]:checked {
         confirms.forEach(c => {
             const isMarket = c.Headline && c.Headline.toLowerCase().includes('sell');
             const div = document.createElement('div');
-            div.className = 'flex items-center gap-4 p-3 hover:bg-surface-variant/50 transition-colors';
+            div.className = 'flex items-center gap-4 p-3 bg-surface-container hover:bg-surface-container-high transition-colors';
             
             let summaryHtml = '';
             if (c.Summary && c.Summary.length > 0) {

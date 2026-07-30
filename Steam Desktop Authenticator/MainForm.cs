@@ -177,7 +177,12 @@ namespace Steam_Desktop_Authenticator
         {
             if (this.WindowState == FormWindowState.Minimized)
             {
-                this.Hide();
+                // Only hide to system tray when the user has that option enabled.
+                // Otherwise keep the window in the taskbar as a normal minimized app.
+                if (manifest != null && manifest.MinimizeToTray)
+                {
+                    this.Hide();
+                }
             }
         }
 
@@ -489,6 +494,9 @@ namespace Steam_Desktop_Authenticator
         {
             this.Show();
             this.WindowState = FormWindowState.Normal;
+            // Bring the window to the foreground so it isn't hidden behind other apps.
+            this.Activate();
+            this.BringToFront();
         }
 
         private void trayQuit_Click(object sender, EventArgs e)
@@ -664,6 +672,9 @@ namespace Steam_Desktop_Authenticator
             {
                 lblStatus.Text = "";
             }
+
+            // Auto-refresh the trades tab if new confirmations were fetched
+            this.BeginInvoke((MethodInvoker)delegate { LoadTradesAsync(); });
 
             confirmationsSemaphore.Release();
         }
@@ -851,6 +862,13 @@ namespace Steam_Desktop_Authenticator
         private async void checkForUpdates()
         {
             if (isCheckingForUpdates) return;
+            
+            if (startupUpdateCheck && !Manifest.GetManifest().CheckForUpdates)
+            {
+                startupUpdateCheck = false;
+                return;
+            }
+
             isCheckingForUpdates = true;
 
             try
@@ -888,7 +906,26 @@ namespace Steam_Desktop_Authenticator
             if (newVersion > currentVersion)
             {
                 labelUpdate.Text = "Download new version"; // Show the user a new version is available if they press no
-                DialogResult updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
+                
+                string checkboxText = startupUpdateCheck ? "Don't check for updates on launch" : null;
+                bool isChecked = false;
+                
+                DialogResult updateDialog;
+                if (checkboxText != null)
+                {
+                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out isChecked);
+                }
+                else
+                {
+                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
+                }
+
+                if (startupUpdateCheck && isChecked)
+                {
+                    Manifest.GetManifest().CheckForUpdates = false;
+                    Manifest.GetManifest().Save();
+                }
+
                 if (updateDialog == DialogResult.Yes)
                 {
                     Process.Start(new ProcessStartInfo(updateUrl) { UseShellExecute = true });

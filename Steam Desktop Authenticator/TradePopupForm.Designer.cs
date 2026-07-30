@@ -1,4 +1,4 @@
-﻿namespace Steam_Desktop_Authenticator
+namespace Steam_Desktop_Authenticator
 {
     partial class TradePopupForm
     {
@@ -38,6 +38,7 @@
             // 
             // lblDesc
             // 
+            this.lblDesc.AutoEllipsis = true;
             this.lblDesc.Font = new System.Drawing.Font("Segoe UI", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.lblDesc.Location = new System.Drawing.Point(12, 23);
             this.lblDesc.Name = "lblDesc";
@@ -107,6 +108,7 @@
             this.Text = "New confirmation";
             this.TopMost = true;
             this.Load += new System.EventHandler(this.TradePopupForm_Load);
+            this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.TradePopupForm_FormClosing);
             this.ResumeLayout(false);
 
         }

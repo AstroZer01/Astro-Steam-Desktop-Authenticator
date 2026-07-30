@@ -8,10 +8,12 @@ namespace Steam_Desktop_Authenticator
     {
         private Label lblMessage;
         private FlowLayoutPanel buttonPanel;
+        private CheckBox chkOption;
         
         public DialogResult Result { get; private set; } = DialogResult.None;
+        public bool IsChecked => chkOption != null && chkOption.Checked;
 
-        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon)
+        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null)
         {
             this.Text = caption;
             this.Size = new Size(400, 200);
@@ -33,9 +35,15 @@ namespace Steam_Desktop_Authenticator
             layout.AutoSize = true;
             layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             layout.Dock = DockStyle.Fill;
-            layout.RowCount = 2;
+            layout.RowCount = string.IsNullOrEmpty(checkboxText) ? 2 : 3;
             layout.ColumnCount = 1;
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            
+            if (!string.IsNullOrEmpty(checkboxText))
+            {
+                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            }
+            
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50f));
             layout.Padding = new Padding(15);
             this.Controls.Add(layout);
@@ -49,11 +57,25 @@ namespace Steam_Desktop_Authenticator
             lblMessage.MaximumSize = new Size(350, 0); // Allow text wrapping
             layout.Controls.Add(lblMessage, 0, 0);
 
+            int currentRow = 1;
+
+            if (!string.IsNullOrEmpty(checkboxText))
+            {
+                chkOption = new CheckBox();
+                chkOption.Text = checkboxText;
+                chkOption.AutoSize = true;
+                chkOption.Dock = DockStyle.Left;
+                chkOption.Margin = new Padding(10, 10, 0, 0);
+                chkOption.Font = new Font("Segoe UI", 9f, FontStyle.Regular);
+                layout.Controls.Add(chkOption, 0, currentRow);
+                currentRow++;
+            }
+
             buttonPanel = new FlowLayoutPanel();
             buttonPanel.Dock = DockStyle.Fill;
             buttonPanel.FlowDirection = FlowDirection.RightToLeft;
             buttonPanel.WrapContents = false;
-            layout.Controls.Add(buttonPanel, 0, 1);
+            layout.Controls.Add(buttonPanel, 0, currentRow);
 
             SetupButtons(buttons);
         }
