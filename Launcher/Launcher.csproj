@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Steam Desktop Authenticator</AssemblyName>
+    <ApplicationIcon>..\Steam Desktop Authenticator\ASDA-icon.ico</ApplicationIcon>
+    <DebugType>portable</DebugType>
+    <SupportedOSPlatformVersion>7.0</SupportedOSPlatformVersion>
+  </PropertyGroup>
+
+  <Target Name="PublishMainApp" AfterTargets="Publish">
+    <Exec Command="dotnet publish &quot;..\Steam Desktop Authenticator\Steam Desktop Authenticator.csproj&quot; -c $(Configuration) --self-contained false -o &quot;$(PublishDir)bin&quot;" />
+    
+    <!-- Move the Launcher's PDB to the bin folder to keep the root clean -->
+    <Move SourceFiles="$(PublishDir)Steam Desktop Authenticator.pdb" DestinationFolder="$(PublishDir)bin" Condition="Exists('$(PublishDir)Steam Desktop Authenticator.pdb')" />
+  </Target>
+
+</Project>

@@ -39,11 +39,33 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("auto_confirm_trades")]
         public bool AutoConfirmTrades { get; set; } = false;
 
+        [JsonProperty("minimize_to_tray")]
+        public bool MinimizeToTray { get; set; } = false;
+
         private static Manifest _manifest { get; set; }
 
         public static string GetExecutableDir()
         {
-            return Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
+            string dir = AppContext.BaseDirectory;
+            if (string.IsNullOrEmpty(dir)) 
+            {
+                dir = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
+            }
+
+            // Remove trailing slashes
+            dir = dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+            // If we are running inside the "bin" folder, the mafiles are actually one folder up
+            if (string.Equals(Path.GetFileName(dir), "bin", StringComparison.OrdinalIgnoreCase))
+            {
+                string parentDir = Path.GetDirectoryName(dir);
+                if (!string.IsNullOrEmpty(parentDir))
+                {
+                    return parentDir;
+                }
+            }
+
+            return dir;
         }
 
         public static Manifest GetManifest(bool forceLoad = false)

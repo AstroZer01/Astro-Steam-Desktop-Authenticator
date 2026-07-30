@@ -4,13 +4,14 @@
     <OutputType>WinExe</OutputType>
     <RootNamespace>Steam_Desktop_Authenticator</RootNamespace>
     <ApplicationRevision>0</ApplicationRevision>
-    <ApplicationVersion>0.2.2.%2a</ApplicationVersion>
+    <ApplicationVersion>1.0.21.0</ApplicationVersion>
     <UseApplicationTrust>false</UseApplicationTrust>
     <BootstrapperEnabled>true</BootstrapperEnabled>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>
     <ImportWindowsDesktopTargets>true</ImportWindowsDesktopTargets>
+    <SupportedOSPlatformVersion>7.0</SupportedOSPlatformVersion>
   </PropertyGroup>
   <PropertyGroup>
     <ApplicationIcon>ASDA-icon.ico</ApplicationIcon>

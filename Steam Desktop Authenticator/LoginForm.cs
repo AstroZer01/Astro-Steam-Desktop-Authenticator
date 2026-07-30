@@ -144,7 +144,7 @@ namespace Steam_Desktop_Authenticator
             btnSteamLogin.Enabled = true;
             btnSteamLogin.Text = "Login";
             if (webView != null && webView.CoreWebView2 != null)
-                webView.CoreWebView2.ExecuteScriptAsync("setButtonState('LOGIN', false)");
+                _ = webView.CoreWebView2.ExecuteScriptAsync("setButtonState('LOGIN', false)");
         }
 
         private async void btnSteamLogin_Click(object sender, EventArgs e)
@@ -153,7 +153,7 @@ namespace Steam_Desktop_Authenticator
             btnSteamLogin.Enabled = false;
             btnSteamLogin.Text = "Logging in...";
             if (webView != null && webView.CoreWebView2 != null)
-                webView.CoreWebView2.ExecuteScriptAsync("setButtonState('LOGGING IN...', true)");
+                _ = webView.CoreWebView2.ExecuteScriptAsync("setButtonState('LOGGING IN...', true)");
 
             string username = txtUsername.Text;
             string password = txtPassword.Text;

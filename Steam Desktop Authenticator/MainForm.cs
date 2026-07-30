@@ -5,6 +5,7 @@ using SteamAuth;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using System.Net;
+using System.Net.Http;
 using Newtonsoft.Json;
 using System.Threading;
 using System.Drawing;
@@ -125,6 +126,18 @@ namespace Steam_Desktop_Authenticator
 
             // Style the tray context menu
             AstroTheme.StyleContextMenuStrip(menuStripTray);
+            trayAccountList.BackColor = AstroTheme.SurfaceContainer;
+            trayAccountList.ForeColor = AstroTheme.OnSurface;
+            trayAccountList.FlatStyle = FlatStyle.Flat;
+
+            // Handle left click on tray icon to restore
+            trayIcon.MouseClick += (s, ev) =>
+            {
+                if (ev.Button == MouseButtons.Left)
+                {
+                    trayRestore_Click(s, ev);
+                }
+            };
 
             // Form-specific overrides for special controls
             // Login token textbox should use monospace font with cyan text
@@ -170,7 +183,15 @@ namespace Steam_Desktop_Authenticator
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
-            Application.Exit();
+            if (e.CloseReason == CloseReason.UserClosing && manifest != null && manifest.MinimizeToTray)
+            {
+                e.Cancel = true;
+                this.Hide();
+            }
+            else
+            {
+                Application.Exit();
+            }
         }
 
 
@@ -216,7 +237,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     this.btnLoginViaQr.Text = $"Press Right CTRL ({i / 10}s)";
                     if (webView != null && webView.CoreWebView2 != null)
-                        webView.CoreWebView2.ExecuteScriptAsync($"updateQrButtonText('Press Right CTRL ({i / 10}s)')");
+                        _ = webView.CoreWebView2.ExecuteScriptAsync($"updateQrButtonText('Press Right CTRL ({i / 10}s)')");
                 }
 
                 await Task.Delay(100);
@@ -225,7 +246,7 @@ namespace Steam_Desktop_Authenticator
             this.btnLoginViaQr.Text = originalText;
             this.btnLoginViaQr.Enabled = true;
             if (webView != null && webView.CoreWebView2 != null)
-                webView.CoreWebView2.ExecuteScriptAsync($"updateQrButtonText('{originalText}')");
+                _ = webView.CoreWebView2.ExecuteScriptAsync($"updateQrButtonText('{originalText}')");
 
             if (!keyPressed)
             {
@@ -577,7 +598,7 @@ namespace Steam_Desktop_Authenticator
 
                 if (webView != null && webView.CoreWebView2 != null)
                 {
-                    webView.CoreWebView2.ExecuteScriptAsync($"updateProgressBar({val})");
+                    _ = webView.CoreWebView2.ExecuteScriptAsync($"updateProgressBar({val})");
                 }
             }
         }
@@ -831,20 +852,47 @@ namespace Steam_Desktop_Authenticator
         }
 
         // Logic for version checking
+        // Logic for version checking
         private Version newVersion = null;
         private Version currentVersion = null;
-        private WebClient updateClient = null;
+        private static readonly HttpClient updateClient = new HttpClient();
         private string updateUrl = null;
         private bool startupUpdateCheck = true;
+        private bool isCheckingForUpdates = false;
 
-        private void checkForUpdates()
+        private async void checkForUpdates()
         {
-            if (updateClient != null) return;
-            updateClient = new WebClient();
-            updateClient.DownloadStringCompleted += UpdateClient_DownloadStringCompleted;
-            updateClient.Headers.Add("Content-Type", "application/json");
-            updateClient.Headers.Add("User-Agent", "Astro Steam Desktop Assistant");
-            updateClient.DownloadStringAsync(new Uri("https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest"));
+            if (isCheckingForUpdates) return;
+            isCheckingForUpdates = true;
+
+            try
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest");
+                request.Headers.Add("User-Agent", "Astro Steam Desktop Assistant");
+                request.Headers.Add("Accept", "application/json");
+                
+                var response = await updateClient.SendAsync(request);
+                response.EnsureSuccessStatusCode();
+                
+                string result = await response.Content.ReadAsStringAsync();
+                dynamic resultObject = JsonConvert.DeserializeObject(result);
+                newVersion = new Version(resultObject.tag_name.Value);
+                currentVersion = new Version(Application.ProductVersion);
+                updateUrl = resultObject.assets.First.browser_download_url.Value;
+                compareVersions();
+            }
+            catch (Exception)
+            {
+                if (!startupUpdateCheck)
+                {
+                    AstroMessageBox.Show("Failed to check for updates.");
+                }
+            }
+            finally
+            {
+                isCheckingForUpdates = false;
+                startupUpdateCheck = false; // Set when it's done checking on startup
+            }
         }
 
         private void compareVersions()
@@ -867,33 +915,8 @@ namespace Steam_Desktop_Authenticator
             }
 
             newVersion = null; // Check the api again next time they check for updates
-            updateClient = null; // Set to null to indicate it's done checking
-            startupUpdateCheck = false; // Set when it's done checking on startup
         }
 
-        private void UpdateClient_DownloadStringCompleted(object sender, DownloadStringCompletedEventArgs e)
-        {
-            try
-            {
-                dynamic resultObject = JsonConvert.DeserializeObject(e.Result);
-                newVersion = new Version(resultObject.tag_name.Value);
-                currentVersion = new Version(Application.ProductVersion);
-                updateUrl = resultObject.assets.First.browser_download_url.Value;
-                compareVersions();
-            }
-            catch (Exception)
-            {
-                if (!startupUpdateCheck)
-                {
-                    AstroMessageBox.Show("Failed to check for updates.");
-                }
-            }
-            finally
-            {
-                updateClient = null;
-                startupUpdateCheck = false;
-            }
-        }
 
         private void MainForm_KeyDown(object sender, KeyEventArgs e)
         {
@@ -1013,6 +1036,18 @@ namespace Steam_Desktop_Authenticator
                 // Push initial data to JS now that it's ready
                 loadAccountsList();
                 loadAccountInfo();
+                
+                // Set app version
+                webView.ExecuteScriptAsync($"setAppVersion('{Application.ProductVersion}');");
+                
+                // Set autostart checkbox
+                bool isAutoStart = false;
+                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", false))
+                {
+                    if (key?.GetValue(Application.ProductName) != null)
+                        isAutoStart = true;
+                }
+                webView.ExecuteScriptAsync($"setAutoStart({isAutoStart.ToString().ToLower()});");
             };
 
             // Load local html file
@@ -1076,6 +1111,7 @@ namespace Steam_Desktop_Authenticator
                 settings["checkAllAccounts"] = manifest.CheckAllAccounts;
                 settings["autoConfirmMarket"] = manifest.AutoConfirmMarketTransactions;
                 settings["autoConfirmTrades"] = manifest.AutoConfirmTrades;
+                settings["minimizeToTray"] = manifest.MinimizeToTray;
 
                 webView.CoreWebView2.ExecuteScriptAsync($"loadSettings({settings.ToString(Newtonsoft.Json.Formatting.None)})");
             }
@@ -1086,8 +1122,24 @@ namespace Steam_Desktop_Authenticator
                 manifest.CheckAllAccounts = (bool)payload["checkAllAccounts"];
                 manifest.AutoConfirmMarketTransactions = (bool)payload["autoConfirmMarket"];
                 manifest.AutoConfirmTrades = (bool)payload["autoConfirmTrades"];
+                manifest.MinimizeToTray = (bool)payload["minimizeToTray"];
                 manifest.Save();
                 webView.CoreWebView2.ExecuteScriptAsync("settingsSaved()");
+            }
+            else if (action == "toggle_autostart")
+            {
+                bool enable = (bool)payload["enabled"];
+                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
+                {
+                    if (enable)
+                    {
+                        key.SetValue(Application.ProductName, Application.ExecutablePath);
+                    }
+                    else
+                    {
+                        key.DeleteValue(Application.ProductName, false);
+                    }
+                }
             }
             else if (action == "load_trades")
             {
@@ -1170,7 +1222,7 @@ namespace Steam_Desktop_Authenticator
                 
                 await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations('{jsEscaped}')");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations('[]')");
             }

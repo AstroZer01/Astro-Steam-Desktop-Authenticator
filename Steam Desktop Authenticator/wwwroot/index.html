@@ -202,8 +202,20 @@ input[type="checkbox"]:checked {
                     </div>
                 </div>
 
-                <div class="pt-4">
+                <div class="pt-4 border-t border-white/10 mt-4">
+                    <div class="flex items-start gap-3 mb-4">
+                        <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-start-windows" type="checkbox"/>
+                        <label class="text-on-surface" for="auto-start-windows">Start with Windows (Auto-start)</label>
+                    </div>
+                    <div class="flex items-start gap-3 mb-6">
+                        <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="close-to-tray" type="checkbox"/>
+                        <label class="text-on-surface" for="close-to-tray">Close to System Tray (Keep running in background)</label>
+                    </div>
                     <button id="btn-save-settings" class="w-full py-3 rounded-lg btn-primary shadow-lg shadow-[#00e5ff]/20">Save Settings</button>
+                    
+                    <div class="text-center mt-6">
+                        <p id="app-version-text" class="text-xs text-on-surface-variant/50 font-mono tracking-wider">Astro Steam Desktop Authenticator v...</p>
+                    </div>
                 </div>
             </div>
         </section>
@@ -386,7 +398,8 @@ input[type="checkbox"]:checked {
             checkInterval: parseInt(document.getElementById('check-interval').value) || 5,
             checkAllAccounts: document.getElementById('check-all-accounts').checked,
             autoConfirmMarket: document.getElementById('auto-confirm-market').checked,
-            autoConfirmTrades: document.getElementById('auto-confirm-trades').checked
+            autoConfirmTrades: document.getElementById('auto-confirm-trades').checked,
+            minimizeToTray: document.getElementById('close-to-tray').checked
         });
     });
 
@@ -397,6 +410,7 @@ input[type="checkbox"]:checked {
         document.getElementById('check-all-accounts').checked = settings.checkAllAccounts;
         document.getElementById('auto-confirm-market').checked = settings.autoConfirmMarket;
         document.getElementById('auto-confirm-trades').checked = settings.autoConfirmTrades;
+        document.getElementById('close-to-tray').checked = settings.minimizeToTray;
     }
 
     function updateQrButtonText(text) {
@@ -417,5 +431,20 @@ input[type="checkbox"]:checked {
             }, 1500);
         }
     }
+
+    // New functions for App Version and Auto-Start
+    function setAppVersion(version) {
+        let el = document.getElementById('app-version-text');
+        if (el) el.innerText = "Astro Steam Desktop Authenticator v" + version;
+    }
+
+    function setAutoStart(enabled) {
+        let cb = document.getElementById('auto-start-windows');
+        if (cb) cb.checked = enabled;
+    }
+
+    document.getElementById('auto-start-windows').addEventListener('change', (e) => {
+        window.chrome.webview.postMessage({ action: 'toggle_autostart', enabled: e.target.checked });
+    });
 </script>
 </body></html>
