@@ -37,7 +37,7 @@ jobs:
       run: Compress-Archive -Path Launcher\bin\Release\net8.0-windows\* -DestinationPath SDA-v${{ github.event.inputs.version }}.zip
 
     - name: Create Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: v${{ github.event.inputs.version }}
         name: Release v${{ github.event.inputs.version }}
