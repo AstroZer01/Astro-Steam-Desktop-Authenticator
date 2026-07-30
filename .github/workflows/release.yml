@@ -38,6 +38,36 @@ jobs:
     - name: Setup MSBuild.exe
       uses: microsoft/setup-msbuild@v3
 
+    - name: Update Version Numbers
+      run: |
+        $version = "${{ github.event.inputs.version }}"
+        
+        # Update .csproj
+        $csprojPath = "Steam Desktop Authenticator\Steam Desktop Authenticator.csproj"
+        $csprojContent = Get-Content $csprojPath
+        $csprojContent = $csprojContent -replace "<ApplicationVersion>.*</ApplicationVersion>", "<ApplicationVersion>$version.0</ApplicationVersion>"
+        Set-Content -Path $csprojPath -Value $csprojContent
+
+        # Update AssemblyInfo.cs
+        $assemblyInfoPath = "Steam Desktop Authenticator\Properties\AssemblyInfo.cs"
+        $assemblyInfoContent = Get-Content $assemblyInfoPath
+        $assemblyInfoContent = $assemblyInfoContent -replace '\[assembly: AssemblyVersion\(".*"\)\]', "[assembly: AssemblyVersion(`"$version`")]"
+        $assemblyInfoContent = $assemblyInfoContent -replace '\[assembly: AssemblyFileVersion\(".*"\)\]', "[assembly: AssemblyFileVersion(`"$version`")]"
+        Set-Content -Path $assemblyInfoPath -Value $assemblyInfoContent
+
+    - name: Commit Version Bump
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add "Steam Desktop Authenticator\Steam Desktop Authenticator.csproj" "Steam Desktop Authenticator\Properties\AssemblyInfo.cs"
+        # Only commit if there are changes
+        if (git diff --cached --quiet) {
+            Write-Host "No version changes to commit."
+        } else {
+            git commit -m "Bump version to ${{ github.event.inputs.version }}"
+            git push
+        }
+
     - name: Restore the application
       run: msbuild $env:Solution_Name /t:Restore /p:Configuration=Release
 
