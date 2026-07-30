@@ -5,7 +5,7 @@
 </h1>
 
 <p align="center">
-  A continuation of the Steam Desktop Authenticator app.
+  A modernized, actively maintained continuation of the Steam Desktop Authenticator app. Manage your Steam Guard 2FA, trade confirmations, and secure your account right from your desktop.
 </p>
 
 <p align="center">
@@ -14,8 +14,17 @@
   </a>
 </p>
 
+<p align="center">
+  <img src="https://img.shields.io/github/v/release/AstroZer01/Astro-Steam-Desktop-Authenticator" alt="Latest Release" />
+  <img src="https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet" alt=".NET 8.0" />
+  <img src="https://img.shields.io/github/license/AstroZer01/Astro-Steam-Desktop-Authenticator" alt="License" />
+  <img src="https://img.shields.io/github/stars/AstroZer01/Astro-Steam-Desktop-Authenticator?style=social" alt="Stars" />
+</p>
+
 ## About This Project
-This is a continuation of the original [Steam Desktop Authenticator](https://github.com/Jessecar96/SteamDesktopAuthenticator) created by **Jessecar96**. Astro Steam Desktop Authenticator is an actively maintained fork that serves to keep the tool functional, secure, and compatible with Steam's modern API changes.
+This is a continuation of the original [Steam Desktop Authenticator](https://github.com/Jessecar96/SteamDesktopAuthenticator) created by **Jessecar96**. Astro Steam Desktop Authenticator is an actively maintained fork that serves to keep the desktop authenticator tool functional, secure, and compatible with Steam's modern API changes. 
+
+If you need a reliable way to manage **Steam Guard**, handle **2FA (Two-Factor Authentication)**, and automatically accept or decline **trade confirmations** directly in C# without using a mobile phone, this project is for you.
 
 All credit for the original design and implementation goes to Jessecar96 and the original contributors.
 
@@ -25,6 +34,24 @@ All credit for the original design and implementation goes to Jessecar96 and the
 | :---: | :---: |
 | <img src="screenshot%20main%20page.png" width="400"> | <img src="screenshot%20settings.png" width="400"> |
 
+
+## How to Compile / Build
+
+If you prefer to compile the program from source rather than downloading the pre-built binaries, follow these steps:
+
+1. **Install Prerequisites**: You must have the **[.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)** installed on your machine.
+2. **Clone the Repository**:
+   ```bash
+   git clone https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator.git
+   cd Astro-Steam-Desktop-Authenticator
+   ```
+3. **Build the Application**:
+   We have bundled a convenient MSBuild pipeline. You can build the entire project including the launcher by running:
+   ```bash
+   dotnet publish "Launcher/Launcher.csproj" -c Release
+   ```
+   *Alternatively, you can open `SteamDesktopAuthenticator.sln` in **Visual Studio 2022** and build the solution.*
+4. **Run the Application**: The compiled executable will be located in `Launcher/bin/Release/net8.0-windows/win-x64/publish/` (or similar depending on your build configuration).
 
 ## Current Focus & To-Do
 
