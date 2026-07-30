@@ -41,11 +41,11 @@ jobs:
     - name: Restore the application
       run: msbuild $env:Solution_Name /t:Restore /p:Configuration=Release
 
-    - name: Build the application
-      run: msbuild $env:Solution_Name /p:Configuration=Release
+    - name: Build and Publish the application
+      run: dotnet publish Launcher\Launcher.csproj -c Release
 
     - name: Zip Build Output
-      run: Compress-Archive -Path Launcher\bin\Release\net8.0-windows\* -DestinationPath ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
+      run: Compress-Archive -Path Launcher\bin\Release\net8.0-windows\publish\* -DestinationPath ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
 
     - name: Create Release
       uses: softprops/action-gh-release@v3
