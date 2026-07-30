@@ -127,41 +127,45 @@ namespace Steam_Desktop_Authenticator
             newManifest.FirstRun = true;
 
             // Take a pre-manifest version and generate a manifest for it.
-            if (scanDir)
+            if (!scanDir)
             {
-                string maDir = Manifest.GetExecutableDir() + "/maFiles/";
-                if (Directory.Exists(maDir))
+                return newManifest;
+            }
+
+            string maDir = Manifest.GetExecutableDir() + "/maFiles/";
+            if (!Directory.Exists(maDir))
+            {
+                return newManifest;
+            }
+
+            DirectoryInfo dir = new DirectoryInfo(maDir);
+            var files = dir.GetFiles();
+
+            foreach (var file in files)
+            {
+                if (file.Extension != ".maFile") continue;
+
+                string contents = File.ReadAllText(file.FullName);
+                try
                 {
-                    DirectoryInfo dir = new DirectoryInfo(maDir);
-                    var files = dir.GetFiles();
-
-                    foreach (var file in files)
+                    SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents);
+                    ManifestEntry newEntry = new ManifestEntry()
                     {
-                        if (file.Extension != ".maFile") continue;
-
-                        string contents = File.ReadAllText(file.FullName);
-                        try
-                        {
-                            SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents);
-                            ManifestEntry newEntry = new ManifestEntry()
-                            {
-                                Filename = file.Name,
-                                SteamID = account.Session.SteamID
-                            };
-                            newManifest.Entries.Add(newEntry);
-                        }
-                        catch (Exception)
-                        {
-                            throw new MaFileEncryptedException();
-                        }
-                    }
-
-                    if (newManifest.Entries.Count > 0)
-                    {
-                        newManifest.Save();
-                        newManifest.PromptSetupPassKey("This version of SDA has encryption. Please enter a passkey below, or hit cancel to remain unencrypted");
-                    }
+                        Filename = file.Name,
+                        SteamID = account.Session.SteamID
+                    };
+                    newManifest.Entries.Add(newEntry);
                 }
+                catch (Exception)
+                {
+                    throw new MaFileEncryptedException();
+                }
+            }
+
+            if (newManifest.Entries.Count > 0)
+            {
+                newManifest.Save();
+                newManifest.PromptSetupPassKey("This version of SDA has encryption. Please enter a passkey below, or hit cancel to remain unencrypted");
             }
 
             if (newManifest.Save())

@@ -25,8 +25,9 @@ namespace Steam_Desktop_Authenticator
             this.MinimizeBox = false;
             this.ShowIcon = false;
             this.ShowInTaskbar = false;
-            this.BackColor = Color.FromArgb(11, 19, 38);
-            this.ForeColor = Color.FromArgb(218, 226, 253);
+            this.BackColor = AstroTheme.Background;
+            this.ForeColor = AstroTheme.OnSurface;
+            AstroTheme.ApplyDarkTitleBar(this);
 
             TableLayoutPanel layout = new TableLayoutPanel();
             layout.AutoSize = true;
@@ -101,43 +102,12 @@ namespace Steam_Desktop_Authenticator
             
             if (isPrimary)
             {
-                btn.BackColor = Color.FromArgb(0, 229, 255); // #00E5FF
-                btn.ForeColor = Color.FromArgb(0, 54, 61); // #00363D
-                btn.FlatAppearance.BorderColor = Color.FromArgb(0, 229, 255);
+                AstroTheme.StylePrimaryButton(btn);
             }
             else
             {
-                btn.BackColor = Color.FromArgb(45, 52, 73); // surface-variant
-                btn.ForeColor = Color.FromArgb(218, 226, 253);
-                btn.FlatAppearance.BorderColor = Color.FromArgb(80, 80, 90);
+                AstroTheme.StyleSecondaryButton(btn);
             }
-
-            btn.FlatAppearance.BorderSize = 0;
-            btn.BackColor = Color.Transparent;
-
-            btn.Paint += (sender, e) =>
-            {
-                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                e.Graphics.Clear(Color.FromArgb(11, 19, 38)); // Match the form background
-                
-                System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath();
-                int radius = 6;
-                path.AddArc(0, 0, radius * 2, radius * 2, 180, 90);
-                path.AddArc(btn.Width - 1 - radius * 2, 0, radius * 2, radius * 2, 270, 90);
-                path.AddArc(btn.Width - 1 - radius * 2, btn.Height - 1 - radius * 2, radius * 2, radius * 2, 0, 90);
-                path.AddArc(0, btn.Height - 1 - radius * 2, radius * 2, radius * 2, 90, 90);
-                path.CloseFigure();
-
-                Color bgColor = isPrimary ? Color.FromArgb(0, 229, 255) : Color.FromArgb(45, 52, 73);
-                Color fgColor = isPrimary ? Color.FromArgb(0, 54, 61) : Color.FromArgb(218, 226, 253);
-
-                using (SolidBrush brush = new SolidBrush(bgColor))
-                {
-                    e.Graphics.FillPath(brush, path);
-                }
-                
-                TextRenderer.DrawText(e.Graphics, btn.Text, btn.Font, btn.ClientRectangle, fgColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            };
             btn.Click += (sender, e) =>
             {
                 this.Result = result;

@@ -79,24 +79,14 @@ namespace Steam_Desktop_Authenticator
             }
 
 
-            if (man.FirstRun)
+            if (man.FirstRun && man.Entries.Count == 0)
             {
-                if (man.Entries.Count > 0)
-                {
-                    // Already has accounts, just run
-                    MainForm mf = new MainForm();
-                    mf.SetEncryptionKey(options.EncryptionKey);
-                    mf.StartSilent(options.Silent);
-                    Application.Run(mf);
-                }
-                else
-                {
-                    // No accounts, run welcome form
-                    Application.Run(new WelcomeForm());
-                }
+                // No accounts, run welcome form
+                Application.Run(new WelcomeForm());
             }
             else
             {
+                // Already has accounts, or not first run
                 MainForm mf = new MainForm();
                 mf.SetEncryptionKey(options.EncryptionKey);
                 mf.StartSilent(options.Silent);

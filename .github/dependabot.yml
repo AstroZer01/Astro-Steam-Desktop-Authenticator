@@ -9,3 +9,9 @@ updates:
     # Check for updates once a week
     schedule:
       interval: "weekly"
+
+  # Enable version updates for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

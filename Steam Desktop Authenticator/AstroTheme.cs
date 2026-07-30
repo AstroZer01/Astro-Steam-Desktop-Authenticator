@@ -244,6 +244,16 @@ namespace Steam_Desktop_Authenticator
             button.Cursor = Cursors.Hand;
         }
 
+        public static void StyleDisabledGlassButton(Button button)
+        {
+            button.FlatStyle = FlatStyle.Flat;
+            button.BackColor = Color.Transparent;
+            button.ForeColor = Color.FromArgb(100, OnSurface);
+            button.FlatAppearance.BorderColor = Color.FromArgb(50, OutlineVariant);
+            button.FlatAppearance.BorderSize = 1;
+            button.Cursor = Cursors.Default;
+        }
+
         public static void StyleAcceptButton(Button button)
         {
             button.FlatStyle = FlatStyle.Flat;

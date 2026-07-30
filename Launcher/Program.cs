@@ -21,7 +21,7 @@ if (File.Exists(binPath))
     {
         Process.Start(processInfo);
     }
-    catch (Exception ex)
+    catch (Exception)
     {
         // Ignore or log error
     }

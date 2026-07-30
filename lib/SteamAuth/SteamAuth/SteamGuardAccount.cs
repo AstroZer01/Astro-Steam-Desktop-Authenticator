@@ -146,24 +146,20 @@ namespace SteamAuth
                 time >>= 8;
             }
 
-            HMACSHA1 hmacGenerator = new HMACSHA1();
-            hmacGenerator.Key = sharedSecretArray;
-            byte[] hashedData = hmacGenerator.ComputeHash(timeArray);
-            byte[] codeArray = new byte[5];
-            try
+            byte[] hashedData;
+            using (HMACSHA1 hmacGenerator = new HMACSHA1())
             {
-                byte b = (byte)(hashedData[19] & 0xF);
-                int codePoint = (hashedData[b] & 0x7F) << 24 | (hashedData[b + 1] & 0xFF) << 16 | (hashedData[b + 2] & 0xFF) << 8 | (hashedData[b + 3] & 0xFF);
-
-                for (int i = 0; i < 5; ++i)
-                {
-                    codeArray[i] = steamGuardCodeTranslations[codePoint % steamGuardCodeTranslations.Length];
-                    codePoint /= steamGuardCodeTranslations.Length;
-                }
+                hmacGenerator.Key = sharedSecretArray;
+                hashedData = hmacGenerator.ComputeHash(timeArray);
             }
-            catch (Exception)
+            byte[] codeArray = new byte[5];
+            byte b = (byte)(hashedData[19] & 0xF);
+            int codePoint = (hashedData[b] & 0x7F) << 24 | (hashedData[b + 1] & 0xFF) << 16 | (hashedData[b + 2] & 0xFF) << 8 | (hashedData[b + 3] & 0xFF);
+
+            for (int i = 0; i < 5; ++i)
             {
-                return null; //Change later, catch-alls are bad!
+                codeArray[i] = steamGuardCodeTranslations[codePoint % steamGuardCodeTranslations.Length];
+                codePoint /= steamGuardCodeTranslations.Length;
             }
             return Encoding.UTF8.GetString(codeArray);
         }
@@ -344,18 +340,13 @@ namespace SteamAuth
                 Array.Copy(Encoding.UTF8.GetBytes(tag), 0, array, 8, n2 - 8);
             }
 
-            try
+            using (HMACSHA1 hmacGenerator = new HMACSHA1())
             {
-                HMACSHA1 hmacGenerator = new HMACSHA1();
                 hmacGenerator.Key = decode;
                 byte[] hashedData = hmacGenerator.ComputeHash(array);
                 string encodedData = Convert.ToBase64String(hashedData, Base64FormattingOptions.None);
                 string hash = WebUtility.UrlEncode(encodedData);
                 return hash;
-            }
-            catch
-            {
-                return null;
             }
         }
 

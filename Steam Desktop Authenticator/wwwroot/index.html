@@ -304,10 +304,46 @@ input[type="checkbox"]:checked {
         let pct = (secondsRemaining / 30.0) * 100;
         document.getElementById('progress-bar-fill').style.width = pct + "%";
     }
+    function updateEncryptionState(isEncrypted, hasAccounts) {
+        let btn = document.getElementById('btn-setup-encryption');
+        if (isEncrypted) {
+            btn.innerText = "Remove Encryption";
+        } else {
+            btn.innerText = "Setup Encryption";
+        }
+        
+        btn.disabled = !hasAccounts;
+        if (!hasAccounts) {
+            btn.className = "bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed rounded-xl text-sm py-3 px-2 shadow-sm transition-colors";
+        } else {
+            btn.className = "glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-sm";
+        }
+    }
+
     let allAccs = [];
     function updateAccountList(names) {
         allAccs = names;
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+        
+        let hasAccounts = names.length > 0;
+        let btnCopy = document.getElementById('btn-copy');
+        let btnLoginQr = document.getElementById('btn-login-qr');
+        
+        let disabledStyle = "bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm transition-colors";
+        
+        btnCopy.disabled = !hasAccounts;
+        if (!hasAccounts) {
+            btnCopy.className = disabledStyle + " rounded-lg px-6 w-24";
+        } else {
+            btnCopy.className = "bg-surface-variant hover:bg-surface-bright border border-white/10 rounded-lg px-6 w-24 transition-colors text-on-surface text-sm";
+        }
+        
+        btnLoginQr.disabled = !hasAccounts;
+        if (!hasAccounts) {
+            btnLoginQr.className = disabledStyle + " py-3 px-4 rounded-lg shadow-sm";
+        } else {
+            btnLoginQr.className = "bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-sm";
+        }
         
         let sel = document.getElementById('trade-account-select');
         if (sel) {

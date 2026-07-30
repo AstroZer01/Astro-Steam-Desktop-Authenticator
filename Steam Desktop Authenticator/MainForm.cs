@@ -94,7 +94,7 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
-                btnManageEncryption.Text = "Manage Encryption";
+                btnManageEncryption.Text = "Remove Encryption";
             }
             else
             {
@@ -275,7 +275,7 @@ namespace Steam_Desktop_Authenticator
                 }
                 
                 string idOfQR = null;
-                try
+                if (!string.IsNullOrEmpty(result.Text))
                 {
                     string[] parts = result.Text.Split('/');
                     if (parts.Length > 5)
@@ -283,7 +283,6 @@ namespace Steam_Desktop_Authenticator
                         idOfQR = parts[5];
                     }
                 }
-                catch { }
                 
                 if (string.IsNullOrEmpty(idOfQR))
                 {
@@ -315,7 +314,7 @@ namespace Steam_Desktop_Authenticator
         {
             if (manifest.Encrypted)
             {
-                InputForm currentPassKeyForm = new InputForm("Enter current passkey", true);
+                InputForm currentPassKeyForm = new InputForm("Enter current passkey to remove encryption", true);
                 currentPassKeyForm.ShowDialog();
 
                 if (currentPassKeyForm.Canceled)
@@ -325,51 +324,22 @@ namespace Steam_Desktop_Authenticator
 
                 string curPassKey = currentPassKeyForm.txtBox.Text;
 
-                InputForm changePassKeyForm = new InputForm("Enter new passkey, or leave blank to remove encryption.");
-                changePassKeyForm.ShowDialog();
-
-                if (changePassKeyForm.Canceled && !string.IsNullOrEmpty(changePassKeyForm.txtBox.Text))
+                if (!manifest.ChangeEncryptionKey(curPassKey, null))
                 {
-                    return;
-                }
-
-                InputForm changePassKeyForm2 = new InputForm("Confirm new passkey, or leave blank to remove encryption.");
-                changePassKeyForm2.ShowDialog();
-
-                if (changePassKeyForm2.Canceled && !string.IsNullOrEmpty(changePassKeyForm.txtBox.Text))
-                {
-                    return;
-                }
-
-                string newPassKey = changePassKeyForm.txtBox.Text;
-                string confirmPassKey = changePassKeyForm2.txtBox.Text;
-
-                if (newPassKey != confirmPassKey)
-                {
-                    AstroMessageBox.Show("Passkeys do not match.");
-                    return;
-                }
-
-                if (newPassKey.Length == 0)
-                {
-                    newPassKey = null;
-                }
-
-                string action = newPassKey == null ? "remove" : "change";
-                if (!manifest.ChangeEncryptionKey(curPassKey, newPassKey))
-                {
-                    AstroMessageBox.Show("Unable to " + action + " passkey.");
+                    AstroMessageBox.Show("Unable to remove passkey. Incorrect passkey?");
                 }
                 else
                 {
-                    AstroMessageBox.Show("Passkey successfully " + action + "d.");
+                    AstroMessageBox.Show("Encryption successfully removed.");
                     this.loadAccountsList();
+                    btnManageEncryption.Text = "Setup Encryption";
                 }
             }
             else
             {
                 passKey = manifest.PromptSetupPassKey();
                 this.loadAccountsList();
+                if (manifest.Encrypted) btnManageEncryption.Text = "Remove Encryption";
             }
         }
 
@@ -423,7 +393,7 @@ namespace Steam_Desktop_Authenticator
 
         private void menuImportAccount_Click(object sender, EventArgs e)
         {
-            ImportAccountForm currentImport_maFile_Form = new ImportAccountForm();
+            ImportAccountForm currentImport_maFile_Form = new ImportAccountForm(this.passKey);
             currentImport_maFile_Form.ShowDialog();
             loadAccountsList();
         }
@@ -621,51 +591,56 @@ namespace Steam_Desktop_Authenticator
             {
                 lblStatus.Text = "Checking confirmations...";
 
-                foreach (var acc in accs)
+                var fetchTasks = accs.Select(async acc =>
                 {
-                    // Check for a valid refresh token first
-                    if (acc.Session.IsRefreshTokenExpired())
-                    {
-                        AstroMessageBox.Show("Your session for account " + acc.AccountName + " has expired. You will be prompted to login again.", "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        PromptRefreshLogin(acc);
-                        break;
-                    }
+                    bool isExpired = acc.Session.IsRefreshTokenExpired();
+                    Exception error = null;
+                    Confirmation[] tmpConfs = null;
 
-                    // Check for a valid access token, refresh it if needed
-                    if (acc.Session.IsAccessTokenExpired())
+                    if (!isExpired)
                     {
                         try
                         {
-                            lblStatus.Text = "Refreshing session...";
-                            await acc.Session.RefreshAccessToken();
-                            lblStatus.Text = "Checking confirmations...";
+                            if (acc.Session.IsAccessTokenExpired())
+                            {
+                                await acc.Session.RefreshAccessToken();
+                            }
+                            tmpConfs = await acc.FetchConfirmationsAsync();
                         }
                         catch (Exception ex)
                         {
-                            AstroMessageBox.Show(ex.Message, "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            break;
+                            error = ex;
                         }
                     }
 
-                    try
+                    return new { Account = acc, IsExpired = isExpired, Error = error, Confirmations = tmpConfs };
+                }).ToList();
+
+                var results = await Task.WhenAll(fetchTasks);
+
+                foreach (var res in results)
+                {
+                    if (res.IsExpired)
                     {
-                        Confirmation[] tmp = await acc.FetchConfirmationsAsync();
-                        foreach (var conf in tmp)
+                        AstroMessageBox.Show("Your session for account " + res.Account.AccountName + " has expired. You will be prompted to login again.", "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        PromptRefreshLogin(res.Account);
+                        break;
+                    }
+
+                    if (res.Confirmations != null)
+                    {
+                        foreach (var conf in res.Confirmations)
                         {
                             if ((conf.ConfType == Confirmation.EMobileConfirmationType.MarketListing && manifest.AutoConfirmMarketTransactions) ||
                                 (conf.ConfType == Confirmation.EMobileConfirmationType.Trade && manifest.AutoConfirmTrades))
                             {
-                                if (!autoAcceptConfirmations.ContainsKey(acc))
-                                    autoAcceptConfirmations[acc] = new List<Confirmation>();
-                                autoAcceptConfirmations[acc].Add(conf);
+                                if (!autoAcceptConfirmations.ContainsKey(res.Account))
+                                    autoAcceptConfirmations[res.Account] = new List<Confirmation>();
+                                autoAcceptConfirmations[res.Account].Add(conf);
                             }
                             else
                                 confs.Add(conf);
                         }
-                    }
-                    catch (Exception)
-                    {
-
                     }
                 }
 
@@ -772,13 +747,26 @@ namespace Steam_Desktop_Authenticator
                 listAccounts.Sorted = true;
                 trayAccountList.Sorted = true;
             }
-            menuDeactivateAuthenticator.Enabled = btnTradeConfirmations.Enabled = btnLoginViaQr.Enabled = allAccounts.Length > 0;
+            bool hasAccounts = allAccounts.Length > 0;
+            menuDeactivateAuthenticator.Enabled = btnTradeConfirmations.Enabled = btnLoginViaQr.Enabled = btnCopy.Enabled = hasAccounts;
+
+            if (hasAccounts)
+            {
+                AstroTheme.StyleSurfaceButton(btnLoginViaQr);
+                AstroTheme.StyleSurfaceButton(btnCopy);
+            }
+            else
+            {
+                AstroTheme.StyleDisabledGlassButton(btnLoginViaQr);
+                AstroTheme.StyleDisabledGlassButton(btnCopy);
+            }
 
             if (webView != null && webView.CoreWebView2 != null)
             {
                 var names = allAccounts.Select(a => a.AccountName).ToArray();
                 string jsonNames = JsonConvert.SerializeObject(names);
                 webView.CoreWebView2.ExecuteScriptAsync($"updateAccountList({jsonNames})");
+                webView.CoreWebView2.ExecuteScriptAsync($"updateEncryptionState({manifest.Encrypted.ToString().ToLower()}, {hasAccounts.ToString().ToLower()})");
             }
         }
 
@@ -1080,7 +1068,7 @@ namespace Steam_Desktop_Authenticator
             else if (action == "import_account")
             {
                 this.BeginInvoke((MethodInvoker)delegate { 
-                    ImportAccountForm importForm = new ImportAccountForm();
+                    ImportAccountForm importForm = new ImportAccountForm(this.passKey);
                     importForm.ShowDialog();
                     this.loadAccountsList();
                 });

@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using System;
 using System.Collections.Specialized;
 using System.Linq;
@@ -145,13 +145,16 @@ namespace SteamAuth
 
         private static string GetRandomHexNumber(int digits)
         {
-            Random random = new Random();
-            byte[] buffer = new byte[digits / 2];
-            random.NextBytes(buffer);
+            int bytesNeeded = (digits + 1) / 2;
+            byte[] buffer = new byte[bytesNeeded];
+            using (var rng = System.Security.Cryptography.RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(buffer);
+            }
             string result = String.Concat(buffer.Select(x => x.ToString("X2")).ToArray());
             if (digits % 2 == 0)
                 return result;
-            return result + random.Next(16).ToString("X");
+            return result.Substring(0, digits);
         }
 
         private class SteamAccessToken
@@ -162,7 +165,7 @@ namespace SteamAuth
         private class GenerateAccessTokenForAppResponse
         {
             [JsonProperty("response")]
-            public GenerateAccessTokenForAppResponseResponse Response;
+            public GenerateAccessTokenForAppResponseResponse Response { get; set; }
         }
 
         private class GenerateAccessTokenForAppResponseResponse

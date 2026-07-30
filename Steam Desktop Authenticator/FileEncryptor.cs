@@ -53,8 +53,6 @@ namespace Steam_Desktop_Authenticator
 
         /// <summary>
         /// Generates an encryption key derived using a password, a random salt, and specified number of rounds of PBKDF2
-        /// 
-        /// TODO: pass in password via SecureString?
         /// </summary>
         /// <param name="password"></param>
         /// <param name="salt"></param>
