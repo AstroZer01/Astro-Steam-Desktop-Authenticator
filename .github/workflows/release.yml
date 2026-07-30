@@ -7,6 +7,17 @@ on:
         description: 'Version Number (e.g. 1.2.0)'
         required: true
         default: '1.0.0'
+      release_type:
+        description: 'Release Type (Beta or Release)'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+        - Release
+        - Beta
+
+permissions:
+  contents: write
 
 jobs:
   build_and_release:
@@ -34,15 +45,15 @@ jobs:
       run: msbuild $env:Solution_Name /p:Configuration=Release
 
     - name: Zip Build Output
-      run: Compress-Archive -Path Launcher\bin\Release\net8.0-windows\* -DestinationPath SDA-v${{ github.event.inputs.version }}.zip
+      run: Compress-Archive -Path Launcher\bin\Release\net8.0-windows\* -DestinationPath ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
 
     - name: Create Release
       uses: softprops/action-gh-release@v3
       with:
-        tag_name: v${{ github.event.inputs.version }}
-        name: Release v${{ github.event.inputs.version }}
-        files: SDA-v${{ github.event.inputs.version }}.zip
+        tag_name: ${{ github.event.inputs.version }}
+        name: ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}
+        files: ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
         draft: false
-        prerelease: false
+        prerelease: ${{ github.event.inputs.release_type == 'Beta' }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
