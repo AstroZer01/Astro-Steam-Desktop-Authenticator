@@ -366,14 +366,32 @@ input[type="checkbox"]:checked {
         emptyState.style.display = 'none';
         confirms.forEach(c => {
             const isMarket = c.Headline && c.Headline.toLowerCase().includes('sell');
-            const typeText = isMarket ? 'Market' : 'Trade';
             const div = document.createElement('div');
             div.className = 'flex items-center gap-4 p-3 hover:bg-surface-variant/50 transition-colors';
+            
+            let summaryHtml = '';
+            if (c.Summary && c.Summary.length > 0) {
+                summaryHtml = c.Summary.join('<br>');
+            }
+
+            let centerHtml = '';
+            if (isMarket) {
+                centerHtml = `
+                    <div class="text-sm text-on-surface font-medium">${c.Headline || 'Market Listing'}</div>
+                    <div class="text-xs text-on-surface-variant mt-0.5">${summaryHtml}</div>
+                `;
+            } else {
+                let tradeWith = c.Headline ? c.Headline.replace('Trade with', 'You are trading with') : 'Trade';
+                centerHtml = `
+                    <div class="text-sm text-on-surface font-medium">${tradeWith}</div>
+                    <div class="text-xs text-on-surface-variant mt-0.5">${summaryHtml}</div>
+                `;
+            }
+
             div.innerHTML = `
                 <img src="${c.Icon || ''}" class="w-10 h-10 object-contain rounded bg-surface-container-low" onerror="this.style.display='none'">
                 <div class="flex-1 min-w-0">
-                    <div class="text-sm text-on-surface font-medium truncate">${c.Headline || 'Confirmation'}</div>
-                    <div class="text-xs text-on-surface-variant truncate mt-0.5">${c.Creator || typeText}</div>
+                    ${centerHtml}
                 </div>
                 <div class="flex items-center gap-2">
                     <button onclick="sendTradeAction('${c.Id}', 'accept_trade')" class="px-3 py-1.5 rounded bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30">Accept</button>

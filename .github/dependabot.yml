@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Enable version updates for NuGet packages
+  - package-ecosystem: "nuget"
+    
+    # Look for NuGet package manifests (csproj/sln) in the root directory
+    directory: "/"
+    
+    # Check for updates once a week
+    schedule:
+      interval: "weekly"

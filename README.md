@@ -55,7 +55,7 @@ If you prefer to compile the program from source rather than downloading the pre
 
 <p align="center">
   <strong>
-    ❕ Alternatively you can download the latest version without technical knowledge and run it directly
+    ❕ Alternatively you can download the latest version without technical knowledge and run it directly<br>
     <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
       Click here to Download
     </a>

@@ -1207,6 +1207,17 @@ namespace Steam_Desktop_Authenticator
             try
             {
                 currentConfirmations = await currentAccount.FetchConfirmationsAsync();
+                
+                // TEMPORARY DEBUG: Log confirmations to file for analysis. Will be removed later.
+                if (currentConfirmations != null)
+                {
+                    foreach (var c in currentConfirmations)
+                    {
+                        string debugPath = System.IO.Path.Combine(Application.StartupPath, $"debug_conf_{c.ID}.json");
+                        System.IO.File.WriteAllText(debugPath, Newtonsoft.Json.JsonConvert.SerializeObject(c, Newtonsoft.Json.Formatting.Indented));
+                    }
+                }
+
                 var settings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
                 
                 object projected = currentConfirmations == null ? (object)Array.Empty<object>() : currentConfirmations.Select(c => new {

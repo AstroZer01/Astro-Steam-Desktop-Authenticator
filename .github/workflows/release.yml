@@ -1,0 +1,48 @@
+name: Publish Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version Number (e.g. 1.2.0)'
+        required: true
+        default: '1.0.0'
+
+jobs:
+  build_and_release:
+    runs-on: windows-latest
+    
+    env:
+      Solution_Name: SteamDesktopAuthenticator.sln
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install .NET Core
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Setup MSBuild.exe
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Restore the application
+      run: msbuild $env:Solution_Name /t:Restore /p:Configuration=Release
+
+    - name: Build the application
+      run: msbuild $env:Solution_Name /p:Configuration=Release
+
+    - name: Zip Build Output
+      run: Compress-Archive -Path Launcher\bin\Release\net8.0-windows\* -DestinationPath SDA-v${{ github.event.inputs.version }}.zip
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ github.event.inputs.version }}
+        name: Release v${{ github.event.inputs.version }}
+        files: SDA-v${{ github.event.inputs.version }}.zip
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
