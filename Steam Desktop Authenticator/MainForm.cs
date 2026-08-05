@@ -420,6 +420,35 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == Program.RestoreExistingInstanceMessage)
+            {
+                try
+                {
+                    BeginInvoke((MethodInvoker)RestoreWindowFromActivation);
+                }
+                catch (InvalidOperationException)
+                {
+                    // The form is shutting down and cannot accept an activation request.
+                }
+                return;
+            }
+
+            base.WndProc(ref m);
+        }
+
+        private void RestoreWindowFromActivation()
+        {
+            if (IsDisposed)
+                return;
+
+            Show();
+            WindowState = FormWindowState.Normal;
+            Activate();
+            BringToFront();
+        }
+
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
             if (e.CloseReason == CloseReason.UserClosing && manifest != null && manifest.MinimizeToTray)
@@ -728,11 +757,7 @@ namespace Steam_Desktop_Authenticator
 
         private void trayRestore_Click(object sender, EventArgs e)
         {
-            this.Show();
-            this.WindowState = FormWindowState.Normal;
-            // Bring the window to the foreground so it isn't hidden behind other apps.
-            this.Activate();
-            this.BringToFront();
+            RestoreWindowFromActivation();
         }
 
         private void trayQuit_Click(object sender, EventArgs e)
