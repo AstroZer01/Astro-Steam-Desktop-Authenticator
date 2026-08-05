@@ -176,6 +176,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     Username = username,
                     Password = password,
+                    DeviceFriendlyName = "AstroSDA",
                     IsPersistentSession = false,
                     PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_MobileApp,
                     ClientOSType = EOSType.Android9,

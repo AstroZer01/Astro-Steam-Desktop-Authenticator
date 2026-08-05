@@ -182,15 +182,19 @@ namespace SteamAuth
         {
             var confirmationsResponse = JsonConvert.DeserializeObject<ConfirmationsResponse>(response);
 
-            if (confirmationsResponse == null || !confirmationsResponse.Success)
-            {
-                throw new Exception(confirmationsResponse.Message);
-            }
+            if (confirmationsResponse == null)
+                throw new InvalidOperationException("Steam returned an invalid confirmation response.");
 
+            // Steam returns { success: false, needauth: true } for an expired or
+            // rejected Community session. Check it before the general failure so
+            // callers can refresh the access token and retry safely.
             if (confirmationsResponse.NeedAuthentication)
-            {
-                throw new Exception("Needs Authentication");
-            }
+                throw new WGTokenInvalidException();
+
+            if (!confirmationsResponse.Success)
+                throw new Exception(String.IsNullOrWhiteSpace(confirmationsResponse.Message)
+                    ? "Steam could not load confirmations."
+                    : confirmationsResponse.Message);
 
 
             return confirmationsResponse.Confirmations;

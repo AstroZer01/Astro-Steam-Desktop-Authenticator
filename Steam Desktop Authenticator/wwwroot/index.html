@@ -62,9 +62,14 @@ input[type="checkbox"]:checked {
         <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">home</span>
         <span class="text-xs mt-1">Home</span>
     </a>
-    <a onclick="switchTab('trades')" data-tab="trades" class="tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
+    <a onclick="switchTab('trades')" data-tab="trades" class="tab-link relative flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
         <span class="material-symbols-outlined">swap_horizontal_circle</span>
+        <span id="trade-pending-badge" class="hidden absolute top-0 right-2 min-w-4 h-4 px-1 rounded-full bg-error text-[10px] leading-4 text-on-error font-bold text-center" aria-label="Pending trade confirmations"></span>
         <span class="text-xs mt-1">Trade</span>
+    </a>
+    <a onclick="switchTab('login-actions')" data-tab="login-actions" class="tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
+        <span class="material-symbols-outlined">shield_person</span>
+        <span class="text-xs mt-1">Logins</span>
     </a>
     <a onclick="switchTab('settings')" data-tab="settings" class="tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
         <span class="material-symbols-outlined">settings</span>
@@ -119,22 +124,78 @@ input[type="checkbox"]:checked {
 
         <!-- Trades View -->
         <section id="view-trades" class="hidden lg:col-span-8 lg:col-start-3 flex flex-col gap-4">
-            <header class="mb-2 flex justify-between items-center">
-                <h1 class="text-2xl font-bold text-on-surface">Confirmations</h1>
-                <div class="flex items-center gap-2">
-                    <select id="trade-account-select" class="bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-1.5 px-2 focus:outline-none focus:ring-1 focus:ring-primary w-40 cursor-pointer">
+            <header class="mb-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    <h1 class="text-2xl font-bold text-on-surface">Confirmations</h1>
+                    <p id="trade-confirmations-count" class="text-sm text-on-surface-variant mt-1">Review pending Steam confirmations.</p>
+                </div>
+                <div class="flex items-center gap-2 w-full sm:w-auto">
+                    <select id="trade-account-select" class="min-w-0 flex-1 sm:w-44 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-2 focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer">
+                        <option value="all">All accounts</option>
                     </select>
                     <button id="btn-refresh-trades" class="p-2 hover:bg-surface-variant rounded-lg flex items-center justify-center transition-colors text-on-surface-variant" title="Refresh">
                         <span class="material-symbols-outlined">refresh</span>
                     </button>
                 </div>
             </header>
+            <div id="trade-load-error" class="hidden rounded-xl border border-error/30 bg-error-container/20 p-3 text-sm text-error" role="alert"></div>
             <div class="glass-panel rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col min-h-[300px]">
-                <div id="trades-container" class="flex-1 overflow-y-auto divide-y divide-white/5"></div>
+                <div id="trades-container" class="flex-1 overflow-y-auto p-3 space-y-3"></div>
                 <div id="empty-state" class="hidden p-8 flex-col items-center justify-center text-center flex-1">
-                    <span class="text-on-surface-variant text-sm">No confirmations</span>
+                    <span class="material-symbols-outlined text-on-surface-variant text-3xl mb-2">inventory_2</span>
+                    <span class="text-on-surface font-medium">No pending confirmations</span>
+                    <span class="text-on-surface-variant text-sm mt-1">Trade and market confirmations will appear here.</span>
                 </div>
             </div>
+        </section>
+
+        <!-- Login Actions View -->
+        <section id="view-login-actions" class="hidden lg:col-span-8 lg:col-start-3 flex flex-col gap-4">
+            <header class="mb-1 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    <h1 class="text-2xl font-bold text-on-surface">Login Actions</h1>
+                    <p id="login-actions-count" class="text-sm text-on-surface-variant mt-1">Review pending Steam login requests.</p>
+                </div>
+                <div class="flex items-center gap-2 w-full sm:w-auto">
+                    <select id="login-account-select" class="min-w-0 flex-1 sm:w-44 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-2 focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer">
+                        <option value="all">All accounts</option>
+                    </select>
+                    <button id="btn-refresh-login-actions" class="shrink-0 p-2 hover:bg-surface-variant rounded-lg flex items-center justify-center transition-colors text-on-surface-variant" title="Refresh login requests" aria-label="Refresh login requests">
+                        <span class="material-symbols-outlined">refresh</span>
+                    </button>
+                </div>
+            </header>
+
+            <div id="automatic-login-action-banner" class="hidden rounded-xl border border-primary/30 bg-primary/10 p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div class="flex items-start gap-3">
+                    <span class="material-symbols-outlined text-primary mt-0.5">policy</span>
+                    <div>
+                        <p class="font-semibold text-on-surface">Automatic login action enabled</p>
+                        <p id="automatic-login-action-text" class="text-sm text-on-surface-variant mt-1"></p>
+                    </div>
+                </div>
+                <button id="btn-configure-login-actions" class="shrink-0 px-3 py-2 rounded-lg bg-surface-variant hover:bg-surface-bright border border-white/10 text-on-surface text-sm transition-colors">Configure rules</button>
+            </div>
+
+            <div id="login-actions-unavailable" class="hidden rounded-xl border border-error/30 bg-error-container/20 p-4 space-y-3"></div>
+
+            <div class="glass-panel rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col min-h-[300px]">
+                <div id="login-actions-container" class="flex-1 overflow-y-auto p-3 space-y-3"></div>
+                <div id="login-actions-empty" class="hidden p-8 flex-col items-center justify-center text-center flex-1">
+                    <span class="material-symbols-outlined text-on-surface-variant text-3xl mb-2">verified_user</span>
+                    <span class="text-on-surface font-medium">No pending login requests</span>
+                    <span class="text-on-surface-variant text-sm mt-1">New Steam login attempts that need approval will appear here.</span>
+                </div>
+            </div>
+
+            <section class="glass-panel rounded-xl p-3 space-y-3">
+                <div class="flex items-center justify-between">
+                    <h2 class="font-semibold text-on-surface">Recent attempts</h2>
+                    <span class="text-xs text-on-surface-variant">Last 3 completed or expired</span>
+                </div>
+                <div id="recent-login-attempts" class="grid grid-cols-3 gap-2"></div>
+                <p id="recent-login-attempts-empty" class="text-sm text-on-surface-variant py-2">Completed and expired login attempts will appear here.</p>
+            </section>
         </section>
 
         <!-- Settings View -->
@@ -165,7 +226,52 @@ input[type="checkbox"]:checked {
                     <label class="text-on-surface" for="auto-confirm-trades">Auto-confirm trades</label>
                 </div>
                 <hr class="border-white/10 my-4">
-                
+
+                <div id="login-actions-settings" tabindex="-1" class="rounded-xl border border-white/10 bg-surface-container-low p-4 space-y-4 scroll-mt-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-on-surface">Login Actions</h2>
+                        <p class="text-sm text-on-surface-variant mt-1">Review and respond to Steam login approvals across all accounts.</p>
+                    </div>
+                    <div class="flex items-start gap-3">
+                        <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="login-action-monitoring-enabled" type="checkbox"/>
+                        <div>
+                            <label class="text-on-surface" for="login-action-monitoring-enabled">Monitor pending login requests and show notifications</label>
+                            <p class="text-sm text-on-surface-variant mt-1">Checks all accounts every 5 seconds. Monitoring never takes automatic action by default.</p>
+                        </div>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="block text-sm text-on-surface" for="login-action-mode">Automatic login action</label>
+                        <select id="login-action-mode" class="w-full bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-3 focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer">
+                            <option value="manual">Manual — do nothing automatically</option>
+                            <option value="approve_persistent">Auto-approve all requests with persistent sign-in</option>
+                            <option value="deny">Auto-deny all requests</option>
+                        </select>
+                        <p class="text-sm text-error mt-2">Automatic rules apply to every managed account, including requests already pending when enabled.</p>
+                    </div>
+                    <div id="login-auto-allow-ip-settings" class="hidden rounded-lg border border-white/10 bg-surface-container p-3 space-y-3">
+                        <div class="flex items-start gap-3">
+                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="login-action-auto-allow-ip-enabled" type="checkbox"/>
+                            <div>
+                                <label class="text-on-surface" for="login-action-auto-allow-ip-enabled">Enable login IP whitelist</label>
+                                <p class="text-sm text-on-surface-variant mt-1">All other login requests will be denied. A matching whitelisted request is approved with a persistent sign-in.</p>
+                            </div>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary disabled:cursor-not-allowed disabled:opacity-50" id="login-action-auto-allow-current-device-ip" type="checkbox" disabled/>
+                            <div>
+                                <label class="text-on-surface" for="login-action-auto-allow-current-device-ip">Whitelist current device IP</label>
+                                <p class="text-sm text-on-surface-variant mt-1">Looks up this device's current public IP for each pending login, so dynamic IP changes are handled automatically.</p>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm text-on-surface mb-1" for="login-action-auto-allow-ip">Additional whitelisted public IPv4 address</label>
+                            <input id="login-action-auto-allow-ip" class="w-full rounded border border-white/10 bg-surface-variant text-on-surface px-3 py-2 disabled:cursor-not-allowed disabled:opacity-50" type="text" inputmode="numeric" autocomplete="off" placeholder="Optional, for example 203.0.113.5" disabled/>
+                            <p class="text-xs text-on-surface-variant mt-1">Optional. It must match Steam's reported login IP exactly; leaving it blank does not allow any additional IP.</p>
+                        </div>
+                    </div>
+                </div>
+                <hr class="border-white/10 my-4">
+
                 <div>
                     <button onclick="document.getElementById('proxy-settings-content').classList.toggle('hidden')" class="flex items-center justify-between w-full text-left p-2 -mx-2 hover:bg-white/5 rounded-lg transition-colors group">
                         <div class="flex items-center gap-2">
@@ -211,6 +317,15 @@ input[type="checkbox"]:checked {
                         <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="close-to-tray" type="checkbox"/>
                         <label class="text-on-surface" for="close-to-tray">Close to System Tray (Keep running in background)</label>
                     </div>
+                    <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6">
+                        <div class="flex items-start gap-3">
+                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="diagnostic-error-logging-enabled" type="checkbox"/>
+                            <div>
+                                <label class="text-on-surface" for="diagnostic-error-logging-enabled">Enable diagnostic error logging</label>
+                                <p class="text-sm text-on-surface-variant mt-1">Off by default. Saves local debugging information to <span class="font-mono text-xs">%LOCALAPPDATA%\Astro Steam Desktop Authenticator\Logs</span>. It is never sent anywhere by Astro SDA.</p>
+                            </div>
+                        </div>
+                    </div>
                     <button id="btn-save-settings" class="w-full py-3 rounded-lg btn-primary shadow-lg shadow-[#00e5ff]/20">Save Settings</button>
                     
                     <div class="text-center mt-6">
@@ -222,6 +337,21 @@ input[type="checkbox"]:checked {
 
     </div>
 </main>
+
+<div id="recent-login-attempt-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="recent-login-attempt-title">
+    <div class="w-full max-w-md max-h-[80vh] overflow-y-auto rounded-xl border border-white/10 bg-surface-container shadow-2xl p-4 space-y-4">
+        <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+                <h2 id="recent-login-attempt-title" class="font-semibold text-on-surface">Login attempt</h2>
+                <p id="recent-login-attempt-outcome" class="text-sm text-secondary mt-1"></p>
+            </div>
+            <button id="btn-close-recent-login-attempt" class="shrink-0 p-1 rounded hover:bg-surface-variant text-on-surface-variant" aria-label="Close login attempt details">
+                <span class="material-symbols-outlined">close</span>
+            </button>
+        </div>
+        <div id="recent-login-attempt-details" class="grid grid-cols-1 gap-3"></div>
+    </div>
+</div>
 
 <script>
     document.addEventListener('contextmenu', event => {
@@ -256,8 +386,12 @@ input[type="checkbox"]:checked {
         });
 
         if (tabId === 'trades') {
+            beginTradeLoad();
             showSpinner();
-            window.chrome.webview.postMessage({ action: 'load_trades' });
+            window.chrome.webview.postMessage({ action: 'load_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
+        } else if (tabId === 'login-actions') {
+            showSpinner();
+            window.chrome.webview.postMessage({ action: 'load_login_actions' });
         } else if (tabId === 'settings') {
             showSpinner();
             window.chrome.webview.postMessage({ action: 'load_settings' });
@@ -297,8 +431,10 @@ input[type="checkbox"]:checked {
         currentAcc = accName;
         document.getElementById('account-title').innerText = "Account: " + accName;
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
-        let sel = document.getElementById('trade-account-select');
-        if (sel) sel.value = accName;
+        const tradeSelect = document.getElementById('trade-account-select');
+        const loginSelect = document.getElementById('login-account-select');
+        if (tradeSelect && tradeSelect.value !== 'all') tradeSelect.value = accName;
+        if (loginSelect && loginSelect.value !== 'all') loginSelect.value = accName;
     }
     function updateProgressBar(secondsRemaining) {
         let pct = (secondsRemaining / 30.0) * 100;
@@ -347,14 +483,36 @@ input[type="checkbox"]:checked {
         
         let sel = document.getElementById('trade-account-select');
         if (sel) {
+            const previous = sel.value || 'all';
             sel.innerHTML = '';
+            const allOption = document.createElement('option');
+            allOption.value = 'all';
+            allOption.innerText = 'All accounts';
+            sel.appendChild(allOption);
             names.forEach(n => {
                 let opt = document.createElement('option');
                 opt.value = n;
                 opt.innerText = n;
-                if (n === currentAcc) opt.selected = true;
                 sel.appendChild(opt);
             });
+            sel.value = names.includes(previous) || previous === 'all' ? previous : 'all';
+        }
+
+        let loginSelect = document.getElementById('login-account-select');
+        if (loginSelect) {
+            const previous = loginSelect.value || 'all';
+            loginSelect.innerHTML = '';
+            const allOption = document.createElement('option');
+            allOption.value = 'all';
+            allOption.innerText = 'All accounts';
+            loginSelect.appendChild(allOption);
+            names.forEach(n => {
+                const opt = document.createElement('option');
+                opt.value = n;
+                opt.innerText = n;
+                loginSelect.appendChild(opt);
+            });
+            loginSelect.value = names.includes(previous) || previous === 'all' ? previous : 'all';
         }
     }
     function renderAccountList(filterText = "") {
@@ -380,68 +538,432 @@ input[type="checkbox"]:checked {
 
     // Trade Actions
     document.getElementById('btn-refresh-trades').addEventListener('click', () => {
+        beginTradeLoad();
         showSpinner();
-        window.chrome.webview.postMessage({ action: 'load_trades' });
+        window.chrome.webview.postMessage({ action: 'load_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
     });
     document.getElementById('trade-account-select').addEventListener('change', (e) => {
-        window.chrome.webview.postMessage({ action: 'switch_account', accountName: e.target.value });
+        const selectedAccount = e.target.value;
+        const loginSelect = document.getElementById('login-account-select');
+        if (loginSelect) {
+            loginSelect.value = selectedAccount;
+            renderLoginActions();
+        }
+        if (selectedAccount !== 'all') {
+            window.chrome.webview.postMessage({ action: 'switch_account', accountName: selectedAccount });
+        }
+        beginTradeLoad();
         showSpinner();
-        window.chrome.webview.postMessage({ action: 'load_trades' });
+        window.chrome.webview.postMessage({ action: 'load_trades', accountName: selectedAccount });
     });
+
+    function beginTradeLoad() {
+        const error = document.getElementById('trade-load-error');
+        error.textContent = '';
+        error.classList.add('hidden');
+    }
     
-    function loadConfirmations(confirmsStr) {
+    function loadConfirmations(confirmsStr, errorMessage) {
         hideSpinner();
-        const confirms = JSON.parse(confirmsStr);
+        const confirms = JSON.parse(confirmsStr || '[]');
         const container = document.getElementById('trades-container');
         const emptyState = document.getElementById('empty-state');
+        const count = document.getElementById('trade-confirmations-count');
+        const error = document.getElementById('trade-load-error');
+        error.textContent = errorMessage || '';
+        error.classList.toggle('hidden', !errorMessage);
         container.innerHTML = '';
+        count.textContent = confirms.length === 1 ? '1 pending confirmation' : confirms.length + ' pending confirmations';
         if (!confirms || confirms.length === 0) {
-            emptyState.style.display = 'flex';
+            container.classList.add('hidden');
+            emptyState.classList.remove('hidden');
+            emptyState.classList.add('flex');
             return;
         }
-        emptyState.style.display = 'none';
+        container.classList.remove('hidden');
+        emptyState.classList.add('hidden');
+        emptyState.classList.remove('flex');
         confirms.forEach(c => {
-            const isMarket = c.Headline && c.Headline.toLowerCase().includes('sell');
-            const div = document.createElement('div');
-            div.className = 'flex items-center gap-4 p-3 bg-surface-container hover:bg-surface-container-high transition-colors';
-            
-            let summaryHtml = '';
-            if (c.Summary && c.Summary.length > 0) {
-                summaryHtml = c.Summary.join('<br>');
+            const card = document.createElement('article');
+            card.className = 'rounded-xl border border-white/10 bg-surface-container-low p-3 space-y-3';
+            const content = document.createElement('div');
+            content.className = 'flex gap-3 min-w-0';
+            if (c.Icon) {
+                const image = document.createElement('img');
+                image.src = c.Icon;
+                image.alt = '';
+                image.className = 'w-11 h-11 shrink-0 object-contain rounded-lg bg-surface-container-lowest border border-white/5';
+                image.onerror = () => image.remove();
+                content.appendChild(image);
             }
-
-            let centerHtml = '';
-            if (isMarket) {
-                centerHtml = `
-                    <div class="text-sm text-on-surface font-medium">${c.Headline || 'Market Listing'}</div>
-                    <div class="text-xs text-on-surface-variant mt-0.5">${summaryHtml}</div>
-                `;
-            } else {
-                let tradeWith = c.Headline ? c.Headline.replace('Trade with', 'You are trading with') : 'Trade';
-                centerHtml = `
-                    <div class="text-sm text-on-surface font-medium">${tradeWith}</div>
-                    <div class="text-xs text-on-surface-variant mt-0.5">${summaryHtml}</div>
-                `;
-            }
-
-            div.innerHTML = `
-                <img src="${c.Icon || ''}" class="w-10 h-10 object-contain rounded bg-surface-container-low" onerror="this.style.display='none'">
-                <div class="flex-1 min-w-0">
-                    ${centerHtml}
-                </div>
-                <div class="flex items-center gap-2">
-                    <button onclick="sendTradeAction('${c.Id}', 'accept_trade')" class="px-3 py-1.5 rounded bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30">Accept</button>
-                    <button onclick="sendTradeAction('${c.Id}', 'reject_trade')" class="px-3 py-1.5 rounded bg-error-container/30 hover:bg-error-container/60 text-error text-sm font-medium transition-colors border border-error/30">Cancel</button>
-                </div>
-            `;
-            container.appendChild(div);
+            const details = document.createElement('div');
+            details.className = 'min-w-0 flex-1';
+            const top = document.createElement('div');
+            top.className = 'flex items-start justify-between gap-2';
+            const headline = document.createElement('h2');
+            headline.className = 'min-w-0 truncate font-medium text-on-surface';
+            headline.textContent = c.Headline || (c.Type === 'MarketListing' ? 'Market listing' : 'Steam trade');
+            headline.title = headline.textContent;
+            const type = document.createElement('span');
+            type.className = 'shrink-0 rounded-full border border-white/10 bg-surface-variant px-2 py-0.5 text-xs text-on-surface-variant';
+            type.textContent = c.Type === 'MarketListing' ? 'Market' : 'Trade';
+            top.appendChild(headline);
+            top.appendChild(type);
+            const account = document.createElement('p');
+            account.className = 'text-xs text-primary mt-1';
+            account.textContent = 'Account: ' + (c.AccountName || 'Unknown account');
+            const summary = document.createElement('p');
+            summary.className = 'text-sm text-on-surface-variant mt-2 whitespace-pre-line break-words';
+            summary.textContent = Array.isArray(c.Summary) && c.Summary.length ? c.Summary.join('\n') : 'Review this Steam confirmation before taking action.';
+            details.appendChild(top);
+            details.appendChild(account);
+            details.appendChild(summary);
+            content.appendChild(details);
+            const actions = document.createElement('div');
+            actions.className = 'flex flex-col-reverse gap-2 sm:flex-row sm:justify-end';
+            const cancel = document.createElement('button');
+            cancel.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-error-container/30 hover:bg-error-container/60 text-error text-sm font-medium transition-colors border border-error/30';
+            cancel.textContent = 'Cancel';
+            cancel.onclick = () => sendTradeAction(c.Id, 'reject_trade');
+            const accept = document.createElement('button');
+            accept.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30';
+            accept.textContent = 'Accept';
+            accept.onclick = () => sendTradeAction(c.Id, 'accept_trade');
+            actions.appendChild(cancel);
+            actions.appendChild(accept);
+            card.appendChild(content);
+            card.appendChild(actions);
+            container.appendChild(card);
         });
+    }
+
+    function setTradePendingCount(value) {
+        const count = Math.max(0, Number(value) || 0);
+        const badge = document.getElementById('trade-pending-badge');
+        badge.textContent = count > 99 ? '99+' : String(count);
+        badge.classList.toggle('hidden', count === 0);
+        badge.setAttribute('aria-label', count + (count === 1 ? ' pending trade confirmation' : ' pending trade confirmations'));
     }
 
     function sendTradeAction(id, act) {
         showSpinner();
         window.chrome.webview.postMessage({ action: act, id: id });
     }
+
+    // Login Actions
+    let loginRequests = [];
+    let loginUnavailableAccounts = [];
+    let recentLoginAttempts = [];
+    let loginActionMode = 'manual';
+    let loginAutoAllowIpEnabled = false;
+    let loginAutoAllowCurrentDeviceIp = false;
+    let loginAutoAllowAdditionalIp = '';
+    let recentLoginAttemptOpener = null;
+
+    document.getElementById('btn-refresh-login-actions').addEventListener('click', () => {
+        showSpinner();
+        window.chrome.webview.postMessage({ action: 'load_login_actions' });
+    });
+    document.getElementById('login-account-select').addEventListener('change', event => {
+        const selectedAccount = event.target.value;
+        const tradeSelect = document.getElementById('trade-account-select');
+        if (tradeSelect) tradeSelect.value = selectedAccount;
+        if (selectedAccount !== 'all') {
+            window.chrome.webview.postMessage({ action: 'switch_account', accountName: selectedAccount });
+        }
+        renderLoginActions();
+    });
+    document.getElementById('btn-configure-login-actions').addEventListener('click', () => {
+        switchTab('settings');
+        window.setTimeout(() => {
+            const settings = document.getElementById('login-actions-settings');
+            settings.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            settings.focus({ preventScroll: true });
+        }, 0);
+    });
+
+    function loginDetail(label, value) {
+        const detail = document.createElement('div');
+        detail.className = 'min-w-0';
+        const detailLabel = document.createElement('div');
+        detailLabel.className = 'text-xs uppercase tracking-wide text-on-surface-variant';
+        detailLabel.textContent = label;
+        const detailValue = document.createElement('div');
+        detailValue.className = 'text-sm text-on-surface truncate mt-1';
+        detailValue.textContent = value || 'Not available';
+        detailValue.title = value || 'Not available';
+        detail.appendChild(detailLabel);
+        detail.appendChild(detailValue);
+        return detail;
+    }
+
+    function loginBadge(text, tone) {
+        const badge = document.createElement('span');
+        badge.className = tone === 'warning'
+            ? 'rounded-full border border-error/40 bg-error-container/30 px-2 py-1 text-xs text-error'
+            : 'rounded-full border border-white/10 bg-surface-variant px-2 py-1 text-xs text-on-surface-variant';
+        badge.textContent = text;
+        return badge;
+    }
+
+    function formatLoginAttemptTime(value) {
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? 'Just now' : date.toLocaleString();
+    }
+
+    function renderRecentLoginAttempts() {
+        const container = document.getElementById('recent-login-attempts');
+        const empty = document.getElementById('recent-login-attempts-empty');
+        container.innerHTML = '';
+        empty.classList.toggle('hidden', recentLoginAttempts.length > 0);
+
+        recentLoginAttempts.slice(0, 3).forEach(attempt => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'min-w-0 rounded-lg border border-white/10 bg-surface-container-lowest p-2 text-left hover:bg-surface-variant focus:outline-none focus:ring-1 focus:ring-primary transition-colors';
+            button.onclick = () => showRecentLoginAttempt(attempt, button);
+            const device = document.createElement('div');
+            device.className = 'truncate text-sm font-medium text-on-surface';
+            device.textContent = attempt.deviceName || attempt.platform || 'Steam login';
+            device.title = device.textContent;
+            const outcome = document.createElement('div');
+            outcome.className = attempt.outcome && attempt.outcome.startsWith('Approved') ? 'truncate text-xs text-secondary mt-1' : 'truncate text-xs text-error mt-1';
+            outcome.textContent = attempt.outcome || 'Completed';
+            outcome.title = outcome.textContent;
+            const time = document.createElement('div');
+            time.className = 'truncate text-xs text-on-surface-variant mt-1';
+            time.textContent = formatLoginAttemptTime(attempt.occurredAtUtc);
+            time.title = time.textContent;
+            button.appendChild(device);
+            button.appendChild(outcome);
+            button.appendChild(time);
+            container.appendChild(button);
+        });
+    }
+
+    function showRecentLoginAttempt(attempt, opener) {
+        recentLoginAttemptOpener = opener || null;
+        const modal = document.getElementById('recent-login-attempt-modal');
+        const details = document.getElementById('recent-login-attempt-details');
+        document.getElementById('recent-login-attempt-title').textContent = attempt.deviceName || attempt.platform || 'Steam login attempt';
+        document.getElementById('recent-login-attempt-outcome').textContent = (attempt.outcome || 'Completed') + ' · ' + formatLoginAttemptTime(attempt.occurredAtUtc);
+        details.innerHTML = '';
+        const location = [attempt.city, attempt.state, attempt.country].filter(Boolean).join(', ') || attempt.geolocation;
+        details.appendChild(loginDetail('Account', attempt.accountName));
+        details.appendChild(loginDetail('Platform', attempt.platform));
+        details.appendChild(loginDetail('IP address', attempt.ipAddress));
+        details.appendChild(loginDetail('Location', location));
+        details.appendChild(loginDetail('Requested session', attempt.requestedPersistence));
+        details.appendChild(loginDetail('Login history', attempt.securityHistory));
+        details.appendChild(loginDetail('Client ID', attempt.clientId));
+        details.appendChild(loginDetail('Steam geolocation', attempt.geolocation));
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+        document.getElementById('btn-close-recent-login-attempt').focus();
+    }
+
+    function closeRecentLoginAttempt() {
+        const modal = document.getElementById('recent-login-attempt-modal');
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+        if (recentLoginAttemptOpener) {
+            recentLoginAttemptOpener.focus();
+            recentLoginAttemptOpener = null;
+        }
+    }
+
+    document.getElementById('btn-close-recent-login-attempt').addEventListener('click', closeRecentLoginAttempt);
+    document.addEventListener('keydown', event => {
+        const modal = document.getElementById('recent-login-attempt-modal');
+        if (event.key === 'Escape' && !modal.classList.contains('hidden')) {
+            closeRecentLoginAttempt();
+        }
+    });
+    document.getElementById('recent-login-attempt-modal').addEventListener('click', event => {
+        if (event.target.id === 'recent-login-attempt-modal') closeRecentLoginAttempt();
+    });
+
+    function renderLoginActions() {
+        const container = document.getElementById('login-actions-container');
+        const empty = document.getElementById('login-actions-empty');
+        const unavailable = document.getElementById('login-actions-unavailable');
+        const count = document.getElementById('login-actions-count');
+        const accountFilter = document.getElementById('login-account-select').value || 'all';
+        const requests = loginRequests.filter(request => accountFilter === 'all' || request.accountName === accountFilter);
+
+        container.innerHTML = '';
+        count.textContent = requests.length === 1 ? '1 pending login request' : requests.length + ' pending login requests';
+
+        const banner = document.getElementById('automatic-login-action-banner');
+        if (loginActionMode === 'approve_persistent' || loginActionMode === 'deny') {
+            banner.classList.remove('hidden');
+            if (loginActionMode === 'approve_persistent') {
+                document.getElementById('automatic-login-action-text').textContent = 'Astro SDA will automatically approve all new login requests with a persistent sign-in.';
+            } else {
+                const whitelistSources = [];
+                if (loginAutoAllowIpEnabled && loginAutoAllowCurrentDeviceIp) {
+                    whitelistSources.push('this device’s current public IP');
+                }
+                if (loginAutoAllowIpEnabled && loginAutoAllowAdditionalIp) {
+                    whitelistSources.push('1 additional remote IP');
+                }
+                document.getElementById('automatic-login-action-text').textContent = whitelistSources.length === 0
+                    ? 'Astro SDA will automatically deny all new login requests.'
+                    : 'Astro SDA will automatically deny new login requests, except those from ' + whitelistSources.join(' and ') + '.';
+            }
+        } else {
+            banner.classList.add('hidden');
+        }
+
+        unavailable.innerHTML = '';
+        const filteredUnavailable = loginUnavailableAccounts.filter(account => accountFilter === 'all' || account.accountName === accountFilter);
+        if (filteredUnavailable.length > 0) {
+            unavailable.classList.remove('hidden');
+            filteredUnavailable.forEach(account => {
+                const row = document.createElement('div');
+                row.className = 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between';
+                const text = document.createElement('div');
+                text.className = 'min-w-0';
+                const title = document.createElement('p');
+                title.className = 'font-medium text-on-surface';
+                title.textContent = account.accountName + ' needs you to sign in again';
+                const reason = document.createElement('p');
+                reason.className = 'text-sm text-on-surface-variant mt-1';
+                reason.textContent = account.reason;
+                text.appendChild(title);
+                text.appendChild(reason);
+                const button = document.createElement('button');
+                button.className = 'shrink-0 px-3 py-2 rounded-lg border border-error/40 text-error hover:bg-error-container/30 text-sm transition-colors';
+                button.textContent = 'Login again';
+                button.onclick = () => window.chrome.webview.postMessage({ action: 'refresh_login_account', accountName: account.accountName });
+                row.appendChild(text);
+                row.appendChild(button);
+                unavailable.appendChild(row);
+            });
+        } else {
+            unavailable.classList.add('hidden');
+        }
+
+        if (requests.length === 0) {
+            container.classList.add('hidden');
+            empty.classList.remove('hidden');
+            empty.classList.add('flex');
+        } else {
+            container.classList.remove('hidden');
+            empty.classList.add('hidden');
+            empty.classList.remove('flex');
+        }
+
+        requests.forEach(request => {
+            const card = document.createElement('article');
+            card.className = 'rounded-xl border border-white/10 bg-surface-container-low p-4 space-y-4';
+
+            const heading = document.createElement('div');
+            heading.className = 'flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between';
+            const titleGroup = document.createElement('div');
+            titleGroup.className = 'min-w-0';
+            const title = document.createElement('h2');
+            title.className = 'font-semibold text-on-surface truncate';
+            title.textContent = request.deviceName || request.platform || 'Steam login request';
+            title.title = title.textContent;
+            const subtitle = document.createElement('p');
+            subtitle.className = 'text-sm text-on-surface-variant mt-1';
+            subtitle.textContent = 'Account: ' + request.accountName + ' · ' + (request.platform || 'Unknown platform');
+            titleGroup.appendChild(title);
+            titleGroup.appendChild(subtitle);
+            const badges = document.createElement('div');
+            badges.className = 'flex flex-wrap gap-2';
+            badges.appendChild(loginBadge(request.requestedPersistence || 'Not specified', 'neutral'));
+            if (request.securityHistory === 'New or unknown login') badges.appendChild(loginBadge('New login', 'warning'));
+            if (request.locationMismatch) badges.appendChild(loginBadge('Location mismatch', 'warning'));
+            if (request.highUsageLogin) badges.appendChild(loginBadge('High-use login', 'warning'));
+            heading.appendChild(titleGroup);
+            heading.appendChild(badges);
+            card.appendChild(heading);
+
+            const metadata = document.createElement('div');
+            metadata.className = 'grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3';
+            const location = [request.city, request.state, request.country].filter(Boolean).join(', ') || request.geolocation;
+            metadata.appendChild(loginDetail('IP address', request.ipAddress));
+            metadata.appendChild(loginDetail('Location', location));
+            metadata.appendChild(loginDetail('Requested session', request.requestedPersistence));
+            metadata.appendChild(loginDetail('Login history', request.securityHistory));
+            card.appendChild(metadata);
+
+            const details = document.createElement('details');
+            details.className = 'rounded-lg bg-surface-container-lowest border border-white/5 px-3 py-2';
+            const summary = document.createElement('summary');
+            summary.className = 'cursor-pointer text-sm text-on-surface-variant hover:text-on-surface';
+            summary.textContent = 'Technical details';
+            const technical = document.createElement('div');
+            technical.className = 'grid grid-cols-1 gap-2 pt-3';
+            technical.appendChild(loginDetail('Client ID', request.clientId));
+            technical.appendChild(loginDetail('Steam geolocation', request.geolocation));
+            details.appendChild(summary);
+            details.appendChild(technical);
+            card.appendChild(details);
+
+            if (loginActionMode === 'manual') {
+                const actions = document.createElement('div');
+                actions.className = 'flex flex-col-reverse gap-2 sm:flex-row sm:justify-end';
+                const deny = document.createElement('button');
+                deny.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-error-container/30 hover:bg-error-container/60 text-error text-sm font-medium transition-colors border border-error/30';
+                deny.textContent = 'Deny';
+                deny.onclick = () => sendLoginAction(request, 'deny', card);
+                const approve = document.createElement('button');
+                approve.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30';
+                approve.textContent = 'Accept';
+                approve.onclick = () => sendLoginAction(request, 'approve', card);
+                actions.appendChild(deny);
+                actions.appendChild(approve);
+                card.appendChild(actions);
+            }
+
+            container.appendChild(card);
+        });
+
+        renderRecentLoginAttempts();
+    }
+
+    function loadLoginActions(data) {
+        hideSpinner();
+        if (data && data.loading) return;
+        loginRequests = data && Array.isArray(data.requests) ? data.requests : [];
+        loginUnavailableAccounts = data && Array.isArray(data.unavailableAccounts) ? data.unavailableAccounts : [];
+        recentLoginAttempts = data && Array.isArray(data.recentAttempts) ? data.recentAttempts : [];
+        loginActionMode = data && data.actionMode ? data.actionMode : 'manual';
+        loginAutoAllowIpEnabled = !!(data && data.autoAllowIpEnabled);
+        loginAutoAllowCurrentDeviceIp = !!(data && data.autoAllowCurrentDeviceIp);
+        loginAutoAllowAdditionalIp = data && data.autoAllowAdditionalIp ? data.autoAllowAdditionalIp : '';
+        renderLoginActions();
+    }
+
+    function sendLoginAction(request, decision, card) {
+        card.querySelectorAll('button').forEach(button => button.disabled = true);
+        showSpinner();
+        window.chrome.webview.postMessage({
+            action: 'respond_login_action',
+            accountName: request.accountName,
+            clientId: request.clientId,
+            decision: decision
+        });
+    }
+
+    function updateLoginAutoAllowIpSettings() {
+        const mode = document.getElementById('login-action-mode');
+        const section = document.getElementById('login-auto-allow-ip-settings');
+        const enabled = document.getElementById('login-action-auto-allow-ip-enabled');
+        const currentDevice = document.getElementById('login-action-auto-allow-current-device-ip');
+        const address = document.getElementById('login-action-auto-allow-ip');
+        const autoDeny = mode.value === 'deny';
+
+        section.classList.toggle('hidden', !autoDeny);
+        currentDevice.disabled = !autoDeny || !enabled.checked;
+        address.disabled = !autoDeny || !enabled.checked;
+    }
+
+    document.getElementById('login-action-mode').addEventListener('change', () => updateLoginAutoAllowIpSettings());
+    document.getElementById('login-action-auto-allow-ip-enabled').addEventListener('change', updateLoginAutoAllowIpSettings);
 
     // Settings Actions
     document.getElementById('btn-save-settings').addEventListener('click', () => {
@@ -453,7 +975,13 @@ input[type="checkbox"]:checked {
             checkAllAccounts: document.getElementById('check-all-accounts').checked,
             autoConfirmMarket: document.getElementById('auto-confirm-market').checked,
             autoConfirmTrades: document.getElementById('auto-confirm-trades').checked,
-            minimizeToTray: document.getElementById('close-to-tray').checked
+            minimizeToTray: document.getElementById('close-to-tray').checked,
+            diagnosticErrorLoggingEnabled: document.getElementById('diagnostic-error-logging-enabled').checked,
+            loginActionMonitoringEnabled: document.getElementById('login-action-monitoring-enabled').checked,
+            loginActionMode: document.getElementById('login-action-mode').value,
+            loginActionAutoAllowIpEnabled: document.getElementById('login-action-auto-allow-ip-enabled').checked,
+            loginActionAutoAllowCurrentDeviceIp: document.getElementById('login-action-auto-allow-current-device-ip').checked,
+            loginActionAutoAllowIp: document.getElementById('login-action-auto-allow-ip').value.trim()
         });
     });
 
@@ -465,6 +993,13 @@ input[type="checkbox"]:checked {
         document.getElementById('auto-confirm-market').checked = settings.autoConfirmMarket;
         document.getElementById('auto-confirm-trades').checked = settings.autoConfirmTrades;
         document.getElementById('close-to-tray').checked = settings.minimizeToTray;
+        document.getElementById('diagnostic-error-logging-enabled').checked = !!settings.diagnosticErrorLoggingEnabled;
+        document.getElementById('login-action-monitoring-enabled').checked = settings.loginActionMonitoringEnabled;
+        document.getElementById('login-action-mode').value = settings.loginActionMode || 'manual';
+        document.getElementById('login-action-auto-allow-ip-enabled').checked = !!settings.loginActionAutoAllowIpEnabled;
+        document.getElementById('login-action-auto-allow-current-device-ip').checked = !!settings.loginActionAutoAllowCurrentDeviceIp;
+        document.getElementById('login-action-auto-allow-ip').value = settings.loginActionAutoAllowIp || '';
+        updateLoginAutoAllowIpSettings();
     }
 
     function updateQrButtonText(text) {

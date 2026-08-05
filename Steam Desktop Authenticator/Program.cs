@@ -2,11 +2,24 @@ using System;
 using System.Windows.Forms;
 using System.Diagnostics;
 using CommandLine;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Steam_Desktop_Authenticator
 {
     static class Program
     {
+        private const string InstanceMutexName = @"Local\AstroSteamDesktopAuthenticator_0F37C513_9AF4_42C8_9CE9_F9B3BFA55E4E";
+        private const int SW_RESTORE = 9;
+        private static Mutex instanceMutex;
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
         public static Process PriorProcess()
         // Returns a System.Diagnostics.Process pointing to
         // a pre-existing process with the same name as the
@@ -31,21 +44,57 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private static void RestoreExistingInstance()
+        {
+            Process existing = PriorProcess();
+            if (existing == null)
+                return;
+
+            // A pinned-taskbar launch can arrive while the first process is still
+            // constructing its window, so wait briefly for a usable top-level handle.
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                try
+                {
+                    existing.Refresh();
+                    if (existing.HasExited)
+                        return;
+
+                    IntPtr handle = existing.MainWindowHandle;
+                    if (handle != IntPtr.Zero)
+                    {
+                        ShowWindowAsync(handle, SW_RESTORE);
+                        SetForegroundWindow(handle);
+                        return;
+                    }
+                }
+                catch (Exception)
+                {
+                    return;
+                }
+
+                Thread.Sleep(100);
+            }
+        }
+
         /// <summary>
         /// The main entry point for the application.
         /// </summary>
         [STAThread]
         static void Main(string[] args)
         {
-            // Force TLS 1.2 for Steam API compatibility
-            System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
-
-            // run the program only once
-            if (PriorProcess() != null)
+            bool createdNew;
+            instanceMutex = new Mutex(true, InstanceMutexName, out createdNew);
+            if (!createdNew)
             {
-                AstroMessageBox.Show("Another instance of the app is already running.");
+                RestoreExistingInstance();
                 return;
             }
+
+            try
+            {
+            // Force TLS 1.2 for Steam API compatibility
+            System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
 
             // Parse command line arguments
             CommandLineOptions options = new();
@@ -78,6 +127,16 @@ namespace Steam_Desktop_Authenticator
                 }
             }
 
+            DiagnosticErrorLogger.Configure(man.DiagnosticErrorLoggingEnabled);
+            Application.ThreadException += (sender, eventArgs) =>
+                DiagnosticErrorLogger.Log("Windows Forms UI", eventArgs.Exception, "Unhandled UI-thread exception.");
+            AppDomain.CurrentDomain.UnhandledException += (sender, eventArgs) =>
+            {
+                if (eventArgs.ExceptionObject is Exception exception)
+                    DiagnosticErrorLogger.Log("Application", exception, "Unhandled application exception.");
+            };
+            TaskScheduler.UnobservedTaskException += (sender, eventArgs) =>
+                DiagnosticErrorLogger.Log("Task scheduler", eventArgs.Exception, "Unobserved task exception.");
 
             if (man.FirstRun && man.Entries.Count == 0)
             {
@@ -91,6 +150,12 @@ namespace Steam_Desktop_Authenticator
                 mf.SetEncryptionKey(options.EncryptionKey);
                 mf.StartSilent(options.Silent);
                 Application.Run(mf);
+            }
+            }
+            finally
+            {
+                instanceMutex.ReleaseMutex();
+                instanceMutex.Dispose();
             }
         }
     }
