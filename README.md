@@ -27,6 +27,20 @@ This is a continuation of the original [Steam Desktop Authenticator](https://git
 A reliable way to manage **Steam Guard**, handle **2FA (Two-Factor Authentication)**, and automatically accept or decline **trade confirmations** directly on you're pc without using a mobile phone.
 All credit for the original design and implementation goes to Jessecar96 and the original contributors.
 
+## Key Features
+
+- **Steam Guard codes and account management** — view, copy, and manage Steam Guard authenticators for multiple accounts.
+- **Trade confirmations** — review and accept or decline pending confirmations across managed accounts.
+- **Login approvals** — review Steam login requests with device and location details, then approve or deny them manually. Optional account-wide rules can automatically approve persistent sign-ins or deny requests, with IP allowlisting controls.
+- **Desktop notifications** — receive Windows notifications for pending trade confirmations and login requests, with navigation back to the relevant view.
+
+## Version 1.1.0.0 Highlights
+
+- Added a dedicated Login Actions experience for managing pending Steam login approvals and denials.
+- Added automatic login rules, including persistent approval, automatic denial, and optional IP allowlisting.
+- Added multi-account trade-confirmation monitoring and notification support.
+- Added optional diagnostic logging so users can view and report issues.
+
 ## Screenshots
 
 | Main Page | Settings |
@@ -73,6 +87,7 @@ If you prefer to compile the program from source rather than downloading the pre
 - [x] Stabilize Steam API endpoints for trade confirmations — fetch, accept, and decline are all functional.
 - [x] API support for confirming/declining trade offers — implemented via `AcceptConfirmation` / `DenyConfirmation`.
 - [x] Improve API session refresh reliability — `IsRefreshTokenExpired` + `RefreshAccessToken` checks are in place with user-facing alerts on expiry.
+- [x] Manage Steam login approvals and denials, including optional automatic login rules and IP allowlisting.
 
 #### UI Rehaul
 - [x] Full UI rehaul — replaced original WinForms UI with a modern WebView2-based interface (dark theme, Tailwind CSS, glassmorphism).
@@ -83,11 +98,11 @@ If you prefer to compile the program from source rather than downloading the pre
 - [x] Trade Confirmations tab — list view with Accept/Decline per confirmation, per-account switcher dropdown, and refresh button.
 - [x] Settings tab — periodic check toggle, check interval, auto-confirm options, with saved feedback.
 - [x] Proxy Settings section (UI layout — Coming Soon, pending backend implementation).
+- [x] Desktop notifications for pending trade confirmations and login requests.
 
 #### In Progress / Remaining
 - [ ] API endpoint for trading automation
 - [ ] Proxy support backend implementation.
-- [ ] Auto-confirm popup notifications reliability improvements.
 
 ## Disclaimer
 We provide no warranty for using this tool. You use this program at your own risk, and accept the responsibility to make backups of your `maFiles` (which contain your 2FA secrets) and prevent unauthorized access to your computer.
