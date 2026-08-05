@@ -76,26 +76,7 @@ namespace Steam_Desktop_Authenticator
 
         public static string GetExecutableDir()
         {
-            string dir = AppContext.BaseDirectory;
-            if (string.IsNullOrEmpty(dir)) 
-            {
-                dir = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
-            }
-
-            // Remove trailing slashes
-            dir = dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-            // If we are running inside the "bin" folder, the mafiles are actually one folder up
-            if (string.Equals(Path.GetFileName(dir), "bin", StringComparison.OrdinalIgnoreCase))
-            {
-                string parentDir = Path.GetDirectoryName(dir);
-                if (!string.IsNullOrEmpty(parentDir))
-                {
-                    return parentDir;
-                }
-            }
-
-            return dir;
+            return ApplicationPaths.InstallDirectory;
         }
 
         public static Manifest GetManifest(bool forceLoad = false)

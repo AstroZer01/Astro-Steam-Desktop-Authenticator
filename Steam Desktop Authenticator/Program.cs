@@ -104,6 +104,18 @@ namespace Steam_Desktop_Authenticator
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            if (ApplicationPaths.TryGetMissingWebResource(out string missingResource))
+            {
+                AstroMessageBox.Show(
+                    "Astro SDA cannot start because a required application file is missing:\n\n" +
+                    missingResource +
+                    "\n\nRestore the complete release folder and try again.",
+                    "Astro Steam Desktop Assistant",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
             Manifest man;
 
             try

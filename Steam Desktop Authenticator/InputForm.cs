@@ -58,7 +58,7 @@ namespace Steam_Desktop_Authenticator
             this.Controls.Add(webView);
             webView.BringToFront();
 
-            await webView.EnsureCoreWebView2Async(null);
+            await webView.EnsureCoreWebView2Async(await WebViewEnvironmentProvider.GetAsync());
 
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
@@ -102,7 +102,7 @@ namespace Steam_Desktop_Authenticator
                 webView.CoreWebView2.ExecuteScriptAsync($"setupInput('{jsLabel}', {isPassStr})");
             };
 
-            string htmlPath = System.IO.Path.Combine(Application.StartupPath, "wwwroot", "input.html");
+            string htmlPath = System.IO.Path.Combine(ApplicationPaths.WebRootDirectory, "input.html");
             webView.Source = new Uri(htmlPath);
         }
 

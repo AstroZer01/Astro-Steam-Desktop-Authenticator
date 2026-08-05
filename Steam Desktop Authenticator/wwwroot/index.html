@@ -364,6 +364,7 @@ input[type="checkbox"]:checked {
     function switchTab(tabId) {
         document.querySelectorAll('section[id^="view-"]').forEach(s => s.classList.add('hidden'));
         document.getElementById('view-' + tabId).classList.remove('hidden');
+        window.chrome.webview.postMessage({ action: 'active_tab_changed', tabName: tabId });
 
         document.querySelectorAll('.tab-link').forEach(l => {
             const isDesktop = l.parentElement.id === 'desktop-nav';
@@ -387,10 +388,8 @@ input[type="checkbox"]:checked {
 
         if (tabId === 'trades') {
             beginTradeLoad();
-            showSpinner();
-            window.chrome.webview.postMessage({ action: 'load_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
+            window.chrome.webview.postMessage({ action: 'load_trades_cache', accountName: document.getElementById('trade-account-select').value || 'all' });
         } else if (tabId === 'login-actions') {
-            showSpinner();
             window.chrome.webview.postMessage({ action: 'load_login_actions' });
         } else if (tabId === 'settings') {
             showSpinner();
@@ -539,8 +538,7 @@ input[type="checkbox"]:checked {
     // Trade Actions
     document.getElementById('btn-refresh-trades').addEventListener('click', () => {
         beginTradeLoad();
-        showSpinner();
-        window.chrome.webview.postMessage({ action: 'load_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
+        window.chrome.webview.postMessage({ action: 'refresh_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
     });
     document.getElementById('trade-account-select').addEventListener('change', (e) => {
         const selectedAccount = e.target.value;
@@ -553,8 +551,7 @@ input[type="checkbox"]:checked {
             window.chrome.webview.postMessage({ action: 'switch_account', accountName: selectedAccount });
         }
         beginTradeLoad();
-        showSpinner();
-        window.chrome.webview.postMessage({ action: 'load_trades', accountName: selectedAccount });
+        window.chrome.webview.postMessage({ action: 'load_trades_cache', accountName: selectedAccount });
     });
 
     function beginTradeLoad() {
@@ -563,7 +560,11 @@ input[type="checkbox"]:checked {
         error.classList.add('hidden');
     }
     
-    function loadConfirmations(confirmsStr, errorMessage) {
+    let latestTradeRevision = 0;
+
+    function loadConfirmations(confirmsStr, errorMessage, revision = 0) {
+        if (revision < latestTradeRevision) return;
+        latestTradeRevision = revision;
         hideSpinner();
         const confirms = JSON.parse(confirmsStr || '[]');
         const container = document.getElementById('trades-container');
@@ -659,10 +660,10 @@ input[type="checkbox"]:checked {
     let loginAutoAllowCurrentDeviceIp = false;
     let loginAutoAllowAdditionalIp = '';
     let recentLoginAttemptOpener = null;
+    let latestLoginRevision = 0;
 
     document.getElementById('btn-refresh-login-actions').addEventListener('click', () => {
-        showSpinner();
-        window.chrome.webview.postMessage({ action: 'load_login_actions' });
+        window.chrome.webview.postMessage({ action: 'refresh_login_actions' });
     });
     document.getElementById('login-account-select').addEventListener('change', event => {
         const selectedAccount = event.target.value;
@@ -926,6 +927,9 @@ input[type="checkbox"]:checked {
     }
 
     function loadLoginActions(data) {
+        const revision = Number(data && data.revision) || 0;
+        if (revision < latestLoginRevision) return;
+        latestLoginRevision = revision;
         hideSpinner();
         if (data && data.loading) return;
         loginRequests = data && Array.isArray(data.requests) ? data.requests : [];

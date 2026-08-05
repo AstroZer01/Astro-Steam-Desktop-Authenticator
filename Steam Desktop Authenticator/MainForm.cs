@@ -46,6 +46,10 @@ namespace Steam_Desktop_Authenticator
         private readonly SemaphoreSlim tradeLoadSemaphore = new SemaphoreSlim(1, 1);
         private readonly ConcurrentDictionary<ulong, SemaphoreSlim> steamAccountOperationLocks = new ConcurrentDictionary<ulong, SemaphoreSlim>();
         private readonly Dictionary<string, LoadedTradeConfirmation> loadedTradeConfirmations = new Dictionary<string, LoadedTradeConfirmation>();
+        private readonly HashSet<ulong> loadedTradeConfirmationAccounts = new HashSet<ulong>();
+        private readonly Dictionary<string, string> unavailableLoginAccounts = new Dictionary<string, string>();
+        private readonly Dictionary<string, DateTime> recentlyResolvedLoginRequests = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, DateTime> recentlyResolvedTradeConfirmations = new Dictionary<string, DateTime>();
         private readonly List<LoginNotificationPopup> activeLoginNotificationPopups = new List<LoginNotificationPopup>();
         private LoginApprovalService loginApprovalService;
         private Action trayNotificationClickAction;
@@ -55,11 +59,16 @@ namespace Steam_Desktop_Authenticator
         private readonly object loginRateLimitLock = new object();
         private DateTime loginRateLimitedUntilUtc = DateTime.MinValue;
         private int tradeMonitoringAccountIndex;
+        private string activeWebTab = "authenticator";
+        private long tradeViewRevision;
+        private long loginViewRevision;
+        private static readonly TimeSpan RecentlyResolvedRequestRetention = TimeSpan.FromSeconds(30);
 
         private long steamTime = 0;
         private long currentSteamChunk = 0;
         private string passKey = null;
         private bool startSilent = false;
+        private bool backgroundServicesStarted;
 
         const int VK_RCONTROL = 0xA3;
         [DllImport("user32.dll")]
@@ -254,6 +263,8 @@ namespace Steam_Desktop_Authenticator
         public MainForm()
         {
             InitializeComponent();
+            timerSteamGuard.Enabled = false;
+            timerTradesPopup.Enabled = false;
             loginActionsTimer.Tick += loginActionsTimer_Tick;
         }
 
@@ -287,9 +298,6 @@ namespace Steam_Desktop_Authenticator
             this.manifest.FirstRun = false;
             this.manifest.Save();
 
-            // Tick first time manually to sync time
-            timerSteamGuard_Tick(new object(), EventArgs.Empty);
-
             if (manifest.Encrypted)
             {
                 if (passKey == null)
@@ -310,12 +318,8 @@ namespace Steam_Desktop_Authenticator
 
             btnManageEncryption.Enabled = manifest.Entries.Count > 0;
 
-            loadSettings();
             loadAccountsList();
             loginApprovalService = new LoginApprovalService(PersistLoginSession);
-            ConfigureLoginActionsMonitor();
-
-            checkForUpdates();
 
             if (startSilent)
             {
@@ -905,6 +909,9 @@ namespace Steam_Desktop_Authenticator
                 }
                 pendingTradeConfirmationCounts[account.Session.SteamID] = pendingConfirmations.Count;
                 UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
+                CacheTradeConfirmations(account, pendingConfirmations);
+                if (IsWebTabActive("trades"))
+                    await PublishCachedTradesAsync();
 
                 if (autoAcceptConfirmations.Count > 0)
                 {
@@ -981,6 +988,7 @@ namespace Steam_Desktop_Authenticator
                         () => loginApprovalService.FetchPendingRequestsAsync(account));
                     if (result.ErrorKind == LoginApprovalErrorKind.SessionExpired)
                     {
+                        unavailableLoginAccounts[account.AccountName] = result.ErrorMessage;
                         if (notifiedUnavailableLoginAccounts.Add(account.AccountName))
                         {
                             NotifyLoginAction("Login monitoring needs attention", account.AccountName + " needs you to sign in again before login requests can be monitored.", ToolTipIcon.Warning);
@@ -999,9 +1007,21 @@ namespace Steam_Desktop_Authenticator
                         continue;
 
                     notifiedUnavailableLoginAccounts.Remove(account.AccountName);
+                    unavailableLoginAccounts.Remove(account.AccountName);
+                    string accountRequestPrefix = account.Session.SteamID + ":";
+                    var fetchedRequestKeys = new HashSet<string>(result.Requests
+                        .Select(request => BuildLoginRequestKey(request.SteamId, request.ClientId)));
+                    foreach (string resolvedKey in recentlyResolvedLoginRequests.Keys
+                        .Where(key => key.StartsWith(accountRequestPrefix, StringComparison.Ordinal) && !fetchedRequestKeys.Contains(key))
+                        .ToList())
+                    {
+                        recentlyResolvedLoginRequests.Remove(resolvedKey);
+                    }
                     foreach (PendingLoginRequest request in result.Requests)
                     {
                         string requestKey = BuildLoginRequestKey(request.SteamId, request.ClientId);
+                        if (IsRecentlyResolved(recentlyResolvedLoginRequests, requestKey))
+                            continue;
                         pendingLoginRequests[requestKey] = request;
 
                         if (manifest.LoginActionMode == LoginActionModes.Manual)
@@ -1048,6 +1068,8 @@ namespace Steam_Desktop_Authenticator
                         }
                         if (actionResult.Succeeded || actionResult.ErrorKind == LoginApprovalErrorKind.ExpiredOrDuplicate)
                         {
+                            MarkRecentlyResolved(recentlyResolvedLoginRequests, requestKey);
+                            pendingLoginRequests.Remove(requestKey);
                             completedAutomatedLoginActions.Add(actionKey);
                             RecordRecentLoginAttempt(request, actionResult.Succeeded
                                 ? (allowWhitelistedIp ? "Approved automatically (whitelisted IP)" : (decision == LoginApprovalDecision.ApprovePersistent ? "Approved automatically" : "Denied automatically"))
@@ -1074,6 +1096,8 @@ namespace Steam_Desktop_Authenticator
             finally
             {
                 loginActionsSemaphore.Release();
+                if (IsWebTabActive("login-actions"))
+                    await PublishCachedLoginActionsAsync();
             }
         }
 
@@ -1185,6 +1209,29 @@ namespace Steam_Desktop_Authenticator
             return steamId.ToString() + ":" + clientId.ToString();
         }
 
+        private bool IsWebTabActive(string tabName)
+        {
+            return String.Equals(activeWebTab, tabName, StringComparison.Ordinal);
+        }
+
+        private static bool IsRecentlyResolved(Dictionary<string, DateTime> resolvedRequests, string key)
+        {
+            DateTime now = DateTime.UtcNow;
+            foreach (string expiredKey in resolvedRequests
+                .Where(entry => now - entry.Value >= RecentlyResolvedRequestRetention)
+                .Select(entry => entry.Key)
+                .ToList())
+            {
+                resolvedRequests.Remove(expiredKey);
+            }
+            return resolvedRequests.ContainsKey(key);
+        }
+
+        private static void MarkRecentlyResolved(Dictionary<string, DateTime> resolvedRequests, string key)
+        {
+            resolvedRequests[key] = DateTime.UtcNow;
+        }
+
         private void RecordRecentLoginAttempt(PendingLoginRequest request, string outcome)
         {
             if (request == null)
@@ -1218,6 +1265,88 @@ namespace Steam_Desktop_Authenticator
             string accountConfirmationPrefix = account.Session.SteamID.ToString() + ":";
             notifiedTradeConfirmations.RemoveWhere(key => key.StartsWith(accountConfirmationPrefix, StringComparison.Ordinal) &&
                 !fetchedConfirmationKeys.Contains(key));
+        }
+
+        private void CacheTradeConfirmations(SteamGuardAccount account, IEnumerable<Confirmation> confirmations)
+        {
+            if (account?.Session == null)
+                return;
+
+            string accountPrefix = account.Session.SteamID + ":";
+            var confirmationList = (confirmations ?? Enumerable.Empty<Confirmation>()).ToList();
+            var fetchedKeys = new HashSet<string>(confirmationList.Select(confirmation => BuildTradeConfirmationKey(account, confirmation)));
+            foreach (string resolvedKey in recentlyResolvedTradeConfirmations.Keys
+                .Where(key => key.StartsWith(accountPrefix, StringComparison.Ordinal) && !fetchedKeys.Contains(key))
+                .ToList())
+            {
+                recentlyResolvedTradeConfirmations.Remove(resolvedKey);
+            }
+            foreach (string key in loadedTradeConfirmations.Keys
+                .Where(key => key.StartsWith(accountPrefix, StringComparison.Ordinal))
+                .ToList())
+            {
+                loadedTradeConfirmations.Remove(key);
+            }
+
+            foreach (Confirmation confirmation in confirmationList)
+            {
+                string confirmationKey = BuildTradeConfirmationKey(account, confirmation);
+                if (IsRecentlyResolved(recentlyResolvedTradeConfirmations, confirmationKey))
+                    continue;
+
+                loadedTradeConfirmations[confirmationKey] =
+                    new LoadedTradeConfirmation { Account = account, Confirmation = confirmation };
+            }
+            loadedTradeConfirmationAccounts.Add(account.Session.SteamID);
+        }
+
+        private bool IsTradeCacheCompleteForSelection()
+        {
+            if (allAccounts == null || allAccounts.Length == 0)
+                return true;
+
+            IEnumerable<SteamGuardAccount> accounts = tradeAccountSelection == "all"
+                ? allAccounts
+                : allAccounts.Where(account => account.AccountName == tradeAccountSelection);
+            return accounts.All(account => loadedTradeConfirmationAccounts.Contains(account.Session.SteamID));
+        }
+
+        private async Task PublishCachedTradesAsync(string errorMessage = null)
+        {
+            if (webView == null || webView.CoreWebView2 == null)
+                return;
+
+            IEnumerable<LoadedTradeConfirmation> entries = loadedTradeConfirmations.Values;
+            if (tradeAccountSelection != "all")
+            {
+                entries = entries.Where(entry => String.Equals(entry.Account.AccountName, tradeAccountSelection, StringComparison.Ordinal));
+            }
+
+            var settings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
+            string jsonStr = JsonConvert.SerializeObject(entries.Select(entry => new
+            {
+                Id = BuildTradeConfirmationKey(entry.Account, entry.Confirmation),
+                AccountName = entry.Account.AccountName,
+                Headline = entry.Confirmation.Headline,
+                Creator = entry.Confirmation.Creator.ToString(),
+                Icon = entry.Confirmation.Icon,
+                Summary = entry.Confirmation.Summary,
+                Type = entry.Confirmation.ConfType.ToString()
+            }), settings);
+            string jsEscaped = jsonStr.Replace("'", "\\'");
+            string jsError = String.IsNullOrWhiteSpace(errorMessage) ? "null" : JsonConvert.SerializeObject(errorMessage);
+            long revision = Interlocked.Increment(ref tradeViewRevision);
+            await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations('{jsEscaped}', {jsError}, {revision})");
+        }
+
+        private async Task LoadCachedTradesAsync(string selectedAccountName)
+        {
+            if (!String.IsNullOrWhiteSpace(selectedAccountName))
+                tradeAccountSelection = selectedAccountName;
+
+            await PublishCachedTradesAsync();
+            if (!IsTradeCacheCompleteForSelection())
+                _ = LoadTradesAsync();
         }
 
         private void PruneLoginRequestBookkeeping(string requestKey)
@@ -1375,12 +1504,66 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private async Task PublishCachedLoginActionsAsync()
+        {
+            if (webView == null || webView.CoreWebView2 == null)
+                return;
+
+            var jsonSettings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
+            string json = JsonConvert.SerializeObject(new
+            {
+                revision = Interlocked.Increment(ref loginViewRevision),
+                requests = pendingLoginRequests.Values.Select(request => new
+                {
+                    accountName = request.AccountName,
+                    steamId = request.SteamId.ToString(),
+                    clientId = request.ClientId.ToString(),
+                    version = request.Version,
+                    ipAddress = request.IPAddress,
+                    geolocation = request.Geolocation,
+                    city = request.City,
+                    state = request.State,
+                    country = request.Country,
+                    platform = request.Platform,
+                    deviceName = request.DeviceName,
+                    requestedPersistence = request.RequestedPersistence,
+                    securityHistory = request.SecurityHistory,
+                    locationMismatch = request.LocationMismatch,
+                    highUsageLogin = request.HighUsageLogin
+                }),
+                unavailableAccounts = unavailableLoginAccounts.Select(account => new { accountName = account.Key, reason = account.Value }),
+                actionMode = manifest?.LoginActionMode ?? LoginActionModes.Manual,
+                autoAllowIpEnabled = manifest?.LoginActionAutoAllowIpEnabled ?? false,
+                autoAllowCurrentDeviceIp = manifest?.LoginActionAutoAllowCurrentDeviceIp ?? false,
+                autoAllowAdditionalIp = manifest?.LoginActionAutoAllowIp ?? String.Empty,
+                recentAttempts = recentLoginAttempts.Select(attempt => new
+                {
+                    accountName = attempt.Request.AccountName,
+                    clientId = attempt.Request.ClientId.ToString(),
+                    ipAddress = attempt.Request.IPAddress,
+                    geolocation = attempt.Request.Geolocation,
+                    city = attempt.Request.City,
+                    state = attempt.Request.State,
+                    country = attempt.Request.Country,
+                    platform = attempt.Request.Platform,
+                    deviceName = attempt.Request.DeviceName,
+                    requestedPersistence = attempt.Request.RequestedPersistence,
+                    securityHistory = attempt.Request.SecurityHistory,
+                    locationMismatch = attempt.Request.LocationMismatch,
+                    highUsageLogin = attempt.Request.HighUsageLogin,
+                    outcome = attempt.Outcome,
+                    occurredAtUtc = attempt.OccurredAtUtc.ToString("O")
+                })
+            }, jsonSettings);
+            await webView.CoreWebView2.ExecuteScriptAsync("loadLoginActions(" + json + ");");
+        }
+
         private async Task RespondToLoginActionAsync(string accountName, ulong clientId, string action)
         {
             if (manifest.LoginActionMode != LoginActionModes.Manual)
             {
                 AstroMessageBox.Show("Manual actions are disabled while an automatic login action is enabled.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                await LoadLoginActionsAsync();
+                await PublishCachedLoginActionsAsync();
                 return;
             }
 
@@ -1388,7 +1571,7 @@ namespace Steam_Desktop_Authenticator
             if (account == null || !pendingLoginRequests.TryGetValue(BuildLoginRequestKey(account.Session.SteamID, clientId), out PendingLoginRequest request))
             {
                 AstroMessageBox.Show("This login request is no longer available. Refresh the list and try again.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                await LoadLoginActionsAsync();
+                await PublishCachedLoginActionsAsync();
                 return;
             }
 
@@ -1420,6 +1603,7 @@ namespace Steam_Desktop_Authenticator
                     string requestKey = BuildLoginRequestKey(request.SteamId, request.ClientId);
                     pendingLoginRequests.Remove(requestKey);
                     notifiedLoginRequests.Remove(requestKey);
+                    MarkRecentlyResolved(recentlyResolvedLoginRequests, requestKey);
                     if (result.Succeeded)
                     {
                         RecordRecentLoginAttempt(request, decision == LoginApprovalDecision.ApprovePersistent ? "Approved manually" : "Denied manually");
@@ -1437,8 +1621,8 @@ namespace Steam_Desktop_Authenticator
                 loginActionsSemaphore.Release();
             }
 
-            await Task.Delay(500);
-            await LoadLoginActionsAsync();
+            await PublishCachedLoginActionsAsync();
+            _ = MonitorLoginActionsSafelyAsync();
         }
 
         // Other methods
@@ -1628,6 +1812,19 @@ namespace Steam_Desktop_Authenticator
                 pendingTradeConfirmationCounts.Clear();
                 UpdateTradePendingCount(0);
             }
+        }
+
+        private void StartBackgroundServicesAfterUiReady()
+        {
+            if (backgroundServicesStarted)
+                return;
+
+            backgroundServicesStarted = true;
+            timerSteamGuard.Enabled = true;
+            timerSteamGuard_Tick(this, EventArgs.Empty);
+            loadSettings();
+            ConfigureLoginActionsMonitor();
+            checkForUpdates();
         }
 
         // Logic for version checking
@@ -1822,7 +2019,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             // Wait for WebView2 runtime to be initialized
-            await webView.EnsureCoreWebView2Async(null);
+            await webView.EnsureCoreWebView2Async(await WebViewEnvironmentProvider.GetAsync());
 
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
@@ -1833,6 +2030,14 @@ namespace Steam_Desktop_Authenticator
             // When navigation is done, we swap out the old UI for the new one
             webView.NavigationCompleted += (sender, args) =>
             {
+                if (!args.IsSuccess)
+                {
+                    loadingTimer.Stop();
+                    loadingTimer.Dispose();
+                    lblLoading.Text = "Astro UI could not be loaded. Restore the complete release folder and try again.";
+                    return;
+                }
+
                 loadingTimer.Stop();
                 loadingTimer.Dispose();
                 loadingPanel.Visible = false;
@@ -1853,10 +2058,12 @@ namespace Steam_Desktop_Authenticator
                         isAutoStart = true;
                 }
                 webView.ExecuteScriptAsync($"setAutoStart({isAutoStart.ToString().ToLower()});");
+
+                StartBackgroundServicesAfterUiReady();
             };
 
             // Load local html file
-            string htmlPath = System.IO.Path.Combine(Application.StartupPath, "wwwroot", "index.html");
+            string htmlPath = System.IO.Path.Combine(ApplicationPaths.WebRootDirectory, "index.html");
             webView.Source = new Uri(htmlPath);
         }
 
@@ -2027,13 +2234,27 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
             }
-            else if (action == "load_trades")
+            else if (action == "active_tab_changed")
+            {
+                string tabName = (string)payload["tabName"];
+                if (tabName == "authenticator" || tabName == "trades" || tabName == "login-actions" || tabName == "settings")
+                    activeWebTab = tabName;
+            }
+            else if (action == "load_trades_cache")
+            {
+                _ = LoadCachedTradesAsync((string)payload["accountName"]);
+            }
+            else if (action == "refresh_trades")
             {
                 _ = LoadTradesAsync((string)payload["accountName"]);
             }
             else if (action == "load_login_actions")
             {
-                _ = LoadLoginActionsAsync();
+                _ = PublishCachedLoginActionsAsync();
+            }
+            else if (action == "refresh_login_actions")
+            {
+                _ = MonitorLoginActionsSafelyAsync();
             }
             else if (action == "respond_login_action")
             {
@@ -2084,6 +2305,7 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
+            bool actionSucceeded = false;
             try
             {
                 await confirmationsSemaphore.WaitAsync();
@@ -2092,6 +2314,7 @@ namespace Steam_Desktop_Authenticator
                     await RunSteamAccountOperationAsync(entry.Account, () => accept
                         ? entry.Account.AcceptConfirmation(entry.Confirmation)
                         : entry.Account.DenyConfirmation(entry.Confirmation));
+                    actionSucceeded = true;
                 }
                 finally
                 {
@@ -2105,7 +2328,13 @@ namespace Steam_Desktop_Authenticator
             }
             finally
             {
-                await LoadTradesAsync();
+                if (actionSucceeded)
+                {
+                    MarkRecentlyResolved(recentlyResolvedTradeConfirmations, confirmationKey);
+                    loadedTradeConfirmations.Remove(confirmationKey);
+                    await PublishCachedTradesAsync();
+                }
+                _ = LoadTradesAsync();
             }
         }
 
@@ -2116,11 +2345,12 @@ namespace Steam_Desktop_Authenticator
 
             if (allAccounts == null || allAccounts.Length == 0)
             {
-                await webView.CoreWebView2.ExecuteScriptAsync("loadConfirmations('[]', null)");
+                await PublishCachedTradesAsync();
                 return;
             }
 
-            await tradeLoadSemaphore.WaitAsync();
+            if (!await tradeLoadSemaphore.WaitAsync(0))
+                return;
             await confirmationsSemaphore.WaitAsync();
             try
             {
@@ -2130,10 +2360,8 @@ namespace Steam_Desktop_Authenticator
                 if (accountsToLoad.Length == 0 && currentAccount != null)
                     accountsToLoad = new[] { currentAccount };
 
-                var confirmations = new List<LoadedTradeConfirmation>();
                 var unavailableAccounts = new List<string>();
                 string rateLimitMessage = null;
-                loadedTradeConfirmations.Clear();
                 foreach (SteamGuardAccount account in accountsToLoad)
                 {
                     try
@@ -2146,13 +2374,7 @@ namespace Steam_Desktop_Authenticator
                         Confirmation[] accountConfirmations = await FetchTradeConfirmationsForPageAsync(account);
                         if (accountConfirmations == null)
                             continue;
-                        foreach (Confirmation confirmation in accountConfirmations)
-                        {
-                            var entry = new LoadedTradeConfirmation { Account = account, Confirmation = confirmation };
-                            string confirmationKey = BuildTradeConfirmationKey(account, confirmation);
-                            confirmations.Add(entry);
-                            loadedTradeConfirmations[confirmationKey] = entry;
-                        }
+                        CacheTradeConfirmations(account, accountConfirmations);
                     }
                     catch (TradeRateLimitedException ex)
                     {
@@ -2166,31 +2388,18 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
-                var settings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
-                object projected = confirmations.Select(entry => new {
-                    Id = BuildTradeConfirmationKey(entry.Account, entry.Confirmation),
-                    AccountName = entry.Account.AccountName,
-                    Headline = entry.Confirmation.Headline,
-                    Creator = entry.Confirmation.Creator.ToString(),
-                    Icon = entry.Confirmation.Icon,
-                    Summary = entry.Confirmation.Summary,
-                    Type = entry.Confirmation.ConfType.ToString()
-                });
-
-                string jsonStr = JsonConvert.SerializeObject(projected, settings);
-                string jsEscaped = jsonStr.Replace("'", "\\'");
                 string errorMessage = !String.IsNullOrWhiteSpace(rateLimitMessage)
-                    ? JsonConvert.SerializeObject(rateLimitMessage)
+                    ? rateLimitMessage
                     : unavailableAccounts.Count == 0
-                        ? "null"
-                        : JsonConvert.SerializeObject("Some account confirmations could not be loaded: " + String.Join(" ", unavailableAccounts));
-                await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations('{jsEscaped}', {errorMessage})");
+                        ? null
+                        : "Some account confirmations could not be loaded: " + String.Join(" ", unavailableAccounts);
+                await PublishCachedTradesAsync(errorMessage);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine("Trade confirmation load failed: " + ex.Message);
                 DiagnosticErrorLogger.Log("Trade confirmation page", ex, "The confirmation page could not be updated.");
-                await webView.CoreWebView2.ExecuteScriptAsync("loadConfirmations('[]', 'Steam confirmations could not be loaded. Please try refreshing.')");
+                await PublishCachedTradesAsync("Steam confirmations could not be loaded. Please try refreshing.");
             }
             finally
             {

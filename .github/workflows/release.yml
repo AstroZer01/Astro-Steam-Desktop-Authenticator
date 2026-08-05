@@ -16,7 +16,7 @@ on:
         - Release
         - Beta
       release_notes:
-        description: 'Optional release notes in Markdown'
+        description: 'Optional Markdown release notes. In the Run workflow form, use \n for each new line.'
         required: false
         type: string
 
@@ -38,9 +38,6 @@ jobs:
       uses: actions/setup-dotnet@v6
       with:
         dotnet-version: 8.0.x
-
-    - name: Setup MSBuild.exe
-      uses: microsoft/setup-msbuild@v3
 
     - name: Update Version Numbers
       run: |
@@ -79,10 +76,36 @@ jobs:
     - name: Clean and publish the release package
       run: |
         dotnet clean $env:Solution_Name -c Release
-        dotnet publish Launcher\Launcher.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish\ASDA
+        dotnet publish "Steam Desktop Authenticator\Steam Desktop Authenticator.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o publish\ASDA
+
+        Remove-Item publish\ASDA\*.pdb, publish\ASDA\*.xml, publish\ASDA\*.config -Force -ErrorAction SilentlyContinue
+
+        $requiredPaths = @(
+          "publish\ASDA\Steam Desktop Authenticator.exe",
+          "publish\ASDA\WebView2Loader.dll",
+          "publish\ASDA\runtimes",
+          "publish\ASDA\app\wwwroot\index.html",
+          "publish\ASDA\app\wwwroot\login.html",
+          "publish\ASDA\app\wwwroot\input.html"
+        )
+        $missingPaths = $requiredPaths | Where-Object { -not (Test-Path $_) }
+        if ($missingPaths) {
+          throw "Release package is incomplete: $($missingPaths -join ', ')"
+        }
+        if (Test-Path publish\ASDA\bin) {
+          throw "Release package unexpectedly contains the legacy launcher bin folder."
+        }
 
     - name: Zip Build Output
       run: Compress-Archive -Path publish\ASDA\* -DestinationPath ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
+
+    - name: Prepare release notes
+      env:
+        RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
+      run: |
+        $notes = $env:RELEASE_NOTES -replace '(?<!\\)\\n', [Environment]::NewLine
+        $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+        [System.IO.File]::WriteAllText($notesPath, $notes, [System.Text.UTF8Encoding]::new($false))
 
     - name: Create Release
       uses: softprops/action-gh-release@v3
@@ -90,7 +113,7 @@ jobs:
         tag_name: ${{ github.event.inputs.version }}
         name: ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}
         files: ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
-        body: ${{ github.event.inputs.release_notes }}
+        body_path: ${{ runner.temp }}\release-notes.md
         draft: false
         prerelease: ${{ github.event.inputs.release_type == 'Beta' }}
       env:
