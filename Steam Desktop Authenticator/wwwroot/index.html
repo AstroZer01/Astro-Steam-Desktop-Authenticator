@@ -581,7 +581,9 @@ input[type="checkbox"]:checked {
     
     let latestTradeRevision = 0;
 
-    function loadConfirmations(confirms, errorMessage, revision = 0) {
+    function loadConfirmations(confirms, errorMessage, revision = 0, selection = 'all') {
+        const selectedAccount = document.getElementById('trade-account-select').value || 'all';
+        if (selection !== selectedAccount) return;
         if (revision < latestTradeRevision) return;
         latestTradeRevision = revision;
         hideRefreshSpinner();

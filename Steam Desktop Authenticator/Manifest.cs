@@ -1,4 +1,5 @@
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using SteamAuth;
 using System;
 using System.Collections.Generic;
@@ -104,10 +105,17 @@ namespace Steam_Desktop_Authenticator
             try
             {
                 string manifestContents = File.ReadAllText(manifestFile);
-                _manifest = JsonConvert.DeserializeObject<Manifest>(manifestContents);
+                JObject manifestJson = JObject.Parse(manifestContents);
+                _manifest = manifestJson.ToObject<Manifest>();
+                bool migratedLegacyTradeSettings = _manifest.MigrateLegacyTradeConfirmationSettings(manifestJson);
 
                 _manifest.NormalizeTradeConfirmationSettings();
                 _manifest.NormalizeLoginActionSettings();
+
+                if (migratedLegacyTradeSettings)
+                {
+                    _manifest.Save();
+                }
 
                 if (_manifest.Encrypted && _manifest.Entries.Count == 0)
                 {
@@ -519,6 +527,42 @@ namespace Steam_Desktop_Authenticator
         public void NormalizeTradeConfirmationSettings()
         {
             TradeConfirmationCheckInterval = Math.Clamp(TradeConfirmationCheckInterval, 3, 3600);
+        }
+
+        private bool MigrateLegacyTradeConfirmationSettings(JObject manifestJson)
+        {
+            bool hasCurrentSettings = manifestJson.Properties().Any(property =>
+                String.Equals(property.Name, "trade_confirmation_custom_interval_enabled", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(property.Name, "trade_confirmation_check_interval", StringComparison.OrdinalIgnoreCase));
+            if (hasCurrentSettings)
+            {
+                return false;
+            }
+
+            JToken periodicCheckingToken = manifestJson.GetValue("periodic_checking", StringComparison.OrdinalIgnoreCase);
+            if (periodicCheckingToken?.Type != JTokenType.Boolean)
+            {
+                return false;
+            }
+
+            TradeConfirmationCustomIntervalEnabled = periodicCheckingToken.Value<bool>();
+            if (TradeConfirmationCustomIntervalEnabled)
+            {
+                JToken legacyIntervalToken = manifestJson.GetValue("periodic_checking_interval", StringComparison.OrdinalIgnoreCase);
+                if (legacyIntervalToken?.Type == JTokenType.Integer &&
+                    Int32.TryParse(legacyIntervalToken.ToString(), out int legacyInterval))
+                {
+                    TradeConfirmationCheckInterval = legacyInterval;
+                }
+            }
+            else
+            {
+                TradeConfirmationCheckInterval = 15;
+            }
+
+            // The monitor now always scans every account, so the former
+            // periodic_checking_checkall setting intentionally has no equivalent.
+            return true;
         }
 
         public void MoveEntry(int from, int to)

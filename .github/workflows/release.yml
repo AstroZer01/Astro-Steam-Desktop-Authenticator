@@ -29,6 +29,8 @@ jobs:
     
     env:
       Solution_Name: SteamDesktopAuthenticator.sln
+      VERSION: ${{ github.event.inputs.version }}
+      RELEASE_TYPE: ${{ github.event.inputs.release_type }}
 
     steps:
     - name: Checkout
@@ -41,7 +43,7 @@ jobs:
 
     - name: Update Version Numbers
       run: |
-        $version = "${{ github.event.inputs.version }}"
+        $version = $env:VERSION
         if ($version -notmatch '^\d+\.\d+\.\d+$') {
             throw "Use a three-part public version number such as 1.1.1."
         }
@@ -69,7 +71,7 @@ jobs:
         if (git diff --cached --quiet) {
             Write-Host "No version changes to commit."
         } else {
-            git commit -m "Bump version to ${{ github.event.inputs.version }}"
+            git commit -m "Bump version to $env:VERSION"
             git push
         }
 
@@ -97,7 +99,9 @@ jobs:
         }
 
     - name: Zip Build Output
-      run: Compress-Archive -Path publish\ASDA\* -DestinationPath ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
+      run: |
+        $releaseAssetName = "ASDA-$env:RELEASE_TYPE-$env:VERSION.zip"
+        Compress-Archive -Path publish\ASDA\* -DestinationPath $releaseAssetName
 
     - name: Prepare release notes
       env:

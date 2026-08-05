@@ -1317,15 +1317,16 @@ namespace Steam_Desktop_Authenticator
                 .All(account => loadedTradeConfirmationAccounts.Contains(account.Session.SteamID));
         }
 
-        private async Task PublishCachedTradesAsync(string errorMessage = null)
+        private async Task PublishCachedTradesAsync(string errorMessage = null, string selection = null)
         {
             if (webView == null || webView.CoreWebView2 == null)
                 return;
 
+            string selectionToPublish = String.IsNullOrWhiteSpace(selection) ? tradeAccountSelection : selection;
             IEnumerable<LoadedTradeConfirmation> entries = loadedTradeConfirmations.Values;
-            if (tradeAccountSelection != "all")
+            if (selectionToPublish != "all")
             {
-                entries = entries.Where(entry => String.Equals(entry.Account.AccountName, tradeAccountSelection, StringComparison.Ordinal));
+                entries = entries.Where(entry => String.Equals(entry.Account.AccountName, selectionToPublish, StringComparison.Ordinal));
             }
 
             var settings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
@@ -1341,7 +1342,8 @@ namespace Steam_Desktop_Authenticator
             }), settings);
             string jsError = String.IsNullOrWhiteSpace(errorMessage) ? "null" : JsonConvert.SerializeObject(errorMessage);
             long revision = Interlocked.Increment(ref tradeViewRevision);
-            await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations({jsonStr}, {jsError}, {revision})");
+            string jsSelection = JsonConvert.SerializeObject(selectionToPublish);
+            await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations({jsonStr}, {jsError}, {revision}, {jsSelection})");
         }
 
         private async Task LoadCachedTradesAsync(string selectedAccountName)
@@ -2036,7 +2038,19 @@ namespace Steam_Desktop_Authenticator
             }
 
             // Wait for WebView2 runtime to be initialized
-            await webView.EnsureCoreWebView2Async(await WebViewEnvironmentProvider.GetAsync());
+            try
+            {
+                await webView.EnsureCoreWebView2Async(await WebViewEnvironmentProvider.GetAsync());
+            }
+            catch (Exception ex)
+            {
+                loadingTimer.Stop();
+                loadingTimer.Dispose();
+                lblLoading.Text = "Astro UI could not be initialized. Restore the complete release folder and try again.";
+                DiagnosticErrorLogger.Log("Astro UI", ex, "The dashboard could not be initialized.");
+                StartBackgroundServicesAfterUiReady();
+                return;
+            }
 
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
@@ -2399,13 +2413,13 @@ namespace Steam_Desktop_Authenticator
                     : unavailableAccounts.Count == 0
                         ? null
                         : "Some account confirmations could not be loaded: " + String.Join(" ", unavailableAccounts);
-                await PublishCachedTradesAsync(errorMessage);
+                await PublishCachedTradesAsync(errorMessage, selectionToLoad);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine("Trade confirmation load failed: " + ex.Message);
                 DiagnosticErrorLogger.Log("Trade confirmation page", ex, "The confirmation page could not be updated.");
-                await PublishCachedTradesAsync("Steam confirmations could not be loaded. Please try refreshing.");
+                await PublishCachedTradesAsync("Steam confirmations could not be loaded. Please try refreshing.", selectionToLoad);
             }
             finally
             {
