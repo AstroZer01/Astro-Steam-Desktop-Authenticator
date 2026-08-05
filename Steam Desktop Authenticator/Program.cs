@@ -12,13 +12,25 @@ namespace Steam_Desktop_Authenticator
     {
         private const string InstanceMutexName = @"Local\AstroSteamDesktopAuthenticator_0F37C513_9AF4_42C8_9CE9_F9B3BFA55E4E";
         private const int SW_RESTORE = 9;
+        internal const int RestoreExistingInstanceMessage = 0x8000 + 0x5A;
         private static Mutex instanceMutex;
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         [DllImport("user32.dll")]
         private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
 
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        [DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam);
 
         public static Process PriorProcess()
         // Returns a System.Diagnostics.Process pointing to
@@ -63,10 +75,14 @@ namespace Steam_Desktop_Authenticator
                     IntPtr handle = existing.MainWindowHandle;
                     if (handle != IntPtr.Zero)
                     {
+                        PostMessage(handle, RestoreExistingInstanceMessage, IntPtr.Zero, IntPtr.Zero);
                         ShowWindowAsync(handle, SW_RESTORE);
                         SetForegroundWindow(handle);
                         return;
                     }
+
+                    if (PostRestoreMessageToHiddenWindow(existing.Id))
+                        return;
                 }
                 catch (Exception)
                 {
@@ -75,6 +91,24 @@ namespace Steam_Desktop_Authenticator
 
                 Thread.Sleep(100);
             }
+        }
+
+        private static bool PostRestoreMessageToHiddenWindow(int processId)
+        {
+            bool messagePosted = false;
+            EnumWindows((hWnd, _) =>
+            {
+                GetWindowThreadProcessId(hWnd, out uint windowProcessId);
+                if (windowProcessId == processId &&
+                    PostMessage(hWnd, RestoreExistingInstanceMessage, IntPtr.Zero, IntPtr.Zero))
+                {
+                    messagePosted = true;
+                }
+
+                return true;
+            }, IntPtr.Zero);
+
+            return messagePosted;
         }
 
         /// <summary>
@@ -103,6 +137,18 @@ namespace Steam_Desktop_Authenticator
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+
+            if (ApplicationPaths.TryGetMissingWebResource(out string missingResource))
+            {
+                AstroMessageBox.Show(
+                    "Astro SDA cannot start because a required application file is missing:\n\n" +
+                    missingResource +
+                    "\n\nRestore the complete release folder and try again.",
+                    "Astro Steam Desktop Assistant",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
 
             Manifest man;
 
@@ -137,6 +183,18 @@ namespace Steam_Desktop_Authenticator
             };
             TaskScheduler.UnobservedTaskException += (sender, eventArgs) =>
                 DiagnosticErrorLogger.Log("Task scheduler", eventArgs.Exception, "Unobserved task exception.");
+
+            if (man.FirstRun)
+            {
+                try
+                {
+                    WindowsStartup.SetEnabled(true);
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Windows startup", ex, "Could not enable the default Start with Windows setting.");
+                }
+            }
 
             if (man.FirstRun && man.Entries.Count == 0)
             {
