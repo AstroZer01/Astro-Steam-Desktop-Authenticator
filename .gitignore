@@ -552,6 +552,8 @@ MigrationBackup/
 # Steam Desktop Authenticator Sensitive Data
 maFiles/
 *.maFile
+# Steam Guard authenticator exports contain account secrets. Never commit them.
+*.[mM][aA][fF][iI][lL][eE]
 
 # Debug and JSON files generated during our analysis
 raw_issues.json
@@ -567,9 +569,23 @@ project_setup_and_issues.md
 # Keys and Environments
 .env
 *.keys
-# Agent Workspace and Scratch
+# Local AI-agent workspace, instructions, notes, and reusable skills
 .dev_scratch/
 .agents/
+.codex/
+.agent/
+.agent-notes/
+.agent-skills/
+/agent-notes/
+/agent-skills/
+/notes/
+/skills/
+AGENTS.md
+SKILL.md
+*.agent.md
+
+# Local analysis notes
+FEATURE_COMPARISON.md
 
 # Ignore steamguard-cli-master folder
 steamguard-cli-master/

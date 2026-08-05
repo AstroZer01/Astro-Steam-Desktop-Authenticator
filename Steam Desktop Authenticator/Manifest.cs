@@ -4,12 +4,21 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Steam_Desktop_Authenticator
 {
+    public static class LoginActionModes
+    {
+        public const string Manual = "manual";
+        public const string ApprovePersistent = "approve_persistent";
+        public const string Deny = "deny";
+    }
+
     public class Manifest
     {
         [JsonProperty("encrypted")]
@@ -44,6 +53,24 @@ namespace Steam_Desktop_Authenticator
 
         [JsonProperty("check_for_updates")]
         public bool CheckForUpdates { get; set; } = true;
+
+        [JsonProperty("diagnostic_error_logging_enabled")]
+        public bool DiagnosticErrorLoggingEnabled { get; set; } = false;
+
+        [JsonProperty("login_action_monitoring_enabled")]
+        public bool LoginActionMonitoringEnabled { get; set; } = true;
+
+        [JsonProperty("login_action_mode")]
+        public string LoginActionMode { get; set; } = LoginActionModes.Manual;
+
+        [JsonProperty("login_action_auto_allow_ip_enabled")]
+        public bool LoginActionAutoAllowIpEnabled { get; set; } = false;
+
+        [JsonProperty("login_action_auto_allow_current_device_ip")]
+        public bool LoginActionAutoAllowCurrentDeviceIp { get; set; } = false;
+
+        [JsonProperty("login_action_auto_allow_ip")]
+        public string LoginActionAutoAllowIp { get; set; } = String.Empty;
 
         private static Manifest _manifest { get; set; }
 
@@ -101,6 +128,8 @@ namespace Steam_Desktop_Authenticator
                 string manifestContents = File.ReadAllText(manifestFile);
                 _manifest = JsonConvert.DeserializeObject<Manifest>(manifestContents);
 
+                _manifest.NormalizeLoginActionSettings();
+
                 if (_manifest.Encrypted && _manifest.Entries.Count == 0)
                 {
                     _manifest.Encrypted = false;
@@ -126,6 +155,11 @@ namespace Steam_Desktop_Authenticator
             newManifest.PeriodicChecking = false;
             newManifest.AutoConfirmMarketTransactions = false;
             newManifest.AutoConfirmTrades = false;
+            newManifest.LoginActionMonitoringEnabled = true;
+            newManifest.LoginActionMode = LoginActionModes.Manual;
+            newManifest.LoginActionAutoAllowIpEnabled = false;
+            newManifest.LoginActionAutoAllowCurrentDeviceIp = false;
+            newManifest.LoginActionAutoAllowIp = String.Empty;
             newManifest.Entries = new List<ManifestEntry>();
             newManifest.FirstRun = true;
 
@@ -475,6 +509,30 @@ namespace Steam_Desktop_Authenticator
             if (this.Entries.Count == 0)
             {
                 this.Encrypted = false;
+            }
+        }
+
+        public void NormalizeLoginActionSettings()
+        {
+            if (LoginActionMode != LoginActionModes.Manual &&
+                LoginActionMode != LoginActionModes.ApprovePersistent &&
+                LoginActionMode != LoginActionModes.Deny)
+            {
+                LoginActionMode = LoginActionModes.Manual;
+            }
+
+            LoginActionAutoAllowIp = (LoginActionAutoAllowIp ?? String.Empty).Trim();
+            bool hasValidAdditionalIp = String.IsNullOrEmpty(LoginActionAutoAllowIp) ||
+                (IPAddress.TryParse(LoginActionAutoAllowIp, out IPAddress parsedIp) &&
+                 parsedIp.AddressFamily == AddressFamily.InterNetwork);
+            if (LoginActionMode != LoginActionModes.Deny || !hasValidAdditionalIp)
+            {
+                LoginActionAutoAllowIpEnabled = false;
+                LoginActionAutoAllowCurrentDeviceIp = false;
+            }
+            else if (!LoginActionAutoAllowIpEnabled)
+            {
+                LoginActionAutoAllowCurrentDeviceIp = false;
             }
         }
 
