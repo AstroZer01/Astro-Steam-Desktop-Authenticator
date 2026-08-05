@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version Number (e.g. 1.2.0)'
+        description: 'Public release version (three components, e.g. 1.1.1)'
         required: true
-        default: '1.0.0'
+        default: '1.1.1'
       release_type:
         description: 'Release Type (Beta or Release)'
         required: true
@@ -15,6 +15,10 @@ on:
         options:
         - Release
         - Beta
+      release_notes:
+        description: 'Optional release notes in Markdown'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -41,11 +45,15 @@ jobs:
     - name: Update Version Numbers
       run: |
         $version = "${{ github.event.inputs.version }}"
+        if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Use a three-part public version number such as 1.1.1."
+        }
+        $applicationVersion = "$version.0"
         
         # Update .csproj
         $csprojPath = "Steam Desktop Authenticator\Steam Desktop Authenticator.csproj"
         $csprojContent = Get-Content $csprojPath
-        $csprojContent = $csprojContent -replace "<ApplicationVersion>.*</ApplicationVersion>", "<ApplicationVersion>$version.0</ApplicationVersion>"
+        $csprojContent = $csprojContent -replace "<ApplicationVersion>.*</ApplicationVersion>", "<ApplicationVersion>$applicationVersion</ApplicationVersion>"
         Set-Content -Path $csprojPath -Value $csprojContent
 
         # Update AssemblyInfo.cs
@@ -68,14 +76,13 @@ jobs:
             git push
         }
 
-    - name: Restore the application
-      run: msbuild $env:Solution_Name /t:Restore /p:Configuration=Release
-
-    - name: Build and Publish the application
-      run: dotnet publish Launcher\Launcher.csproj -c Release
+    - name: Clean and publish the release package
+      run: |
+        dotnet clean $env:Solution_Name -c Release
+        dotnet publish Launcher\Launcher.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish\ASDA
 
     - name: Zip Build Output
-      run: Compress-Archive -Path Launcher\bin\Release\net8.0-windows\publish\* -DestinationPath ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
+      run: Compress-Archive -Path publish\ASDA\* -DestinationPath ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
 
     - name: Create Release
       uses: softprops/action-gh-release@v3
@@ -83,6 +90,7 @@ jobs:
         tag_name: ${{ github.event.inputs.version }}
         name: ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}
         files: ASDA-${{ github.event.inputs.release_type }}-${{ github.event.inputs.version }}.zip
+        body: ${{ github.event.inputs.release_notes }}
         draft: false
         prerelease: ${{ github.event.inputs.release_type == 'Beta' }}
       env:
