@@ -33,14 +33,11 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("entries")]
         public List<ManifestEntry> Entries { get; set; }
 
-        [JsonProperty("periodic_checking")]
-        public bool PeriodicChecking { get; set; } = false;
+        [JsonProperty("trade_confirmation_custom_interval_enabled")]
+        public bool TradeConfirmationCustomIntervalEnabled { get; set; } = false;
 
-        [JsonProperty("periodic_checking_interval")]
-        public int PeriodicCheckingInterval { get; set; } = 5;
-
-        [JsonProperty("periodic_checking_checkall")]
-        public bool CheckAllAccounts { get; set; } = false;
+        [JsonProperty("trade_confirmation_check_interval")]
+        public int TradeConfirmationCheckInterval { get; set; } = 15;
 
         [JsonProperty("auto_confirm_market_transactions")]
         public bool AutoConfirmMarketTransactions { get; set; } = false;
@@ -49,7 +46,7 @@ namespace Steam_Desktop_Authenticator
         public bool AutoConfirmTrades { get; set; } = false;
 
         [JsonProperty("minimize_to_tray")]
-        public bool MinimizeToTray { get; set; } = false;
+        public bool MinimizeToTray { get; set; } = true;
 
         [JsonProperty("check_for_updates")]
         public bool CheckForUpdates { get; set; } = true;
@@ -109,6 +106,7 @@ namespace Steam_Desktop_Authenticator
                 string manifestContents = File.ReadAllText(manifestFile);
                 _manifest = JsonConvert.DeserializeObject<Manifest>(manifestContents);
 
+                _manifest.NormalizeTradeConfirmationSettings();
                 _manifest.NormalizeLoginActionSettings();
 
                 if (_manifest.Encrypted && _manifest.Entries.Count == 0)
@@ -132,10 +130,11 @@ namespace Steam_Desktop_Authenticator
             // No directory means no manifest file anyways.
             Manifest newManifest = new Manifest();
             newManifest.Encrypted = false;
-            newManifest.PeriodicCheckingInterval = 5;
-            newManifest.PeriodicChecking = false;
+            newManifest.TradeConfirmationCustomIntervalEnabled = false;
+            newManifest.TradeConfirmationCheckInterval = 15;
             newManifest.AutoConfirmMarketTransactions = false;
             newManifest.AutoConfirmTrades = false;
+            newManifest.MinimizeToTray = true;
             newManifest.LoginActionMonitoringEnabled = true;
             newManifest.LoginActionMode = LoginActionModes.Manual;
             newManifest.LoginActionAutoAllowIpEnabled = false;
@@ -515,6 +514,11 @@ namespace Steam_Desktop_Authenticator
             {
                 LoginActionAutoAllowCurrentDeviceIp = false;
             }
+        }
+
+        public void NormalizeTradeConfirmationSettings()
+        {
+            TradeConfirmationCheckInterval = Math.Clamp(TradeConfirmationCheckInterval, 3, 3600);
         }
 
         public void MoveEntry(int from, int to)

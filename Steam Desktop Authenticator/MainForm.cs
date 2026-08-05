@@ -124,8 +124,16 @@ namespace Steam_Desktop_Authenticator
 
         private Task<Confirmation[]> FetchTradeConfirmationsForMonitorAsync(SteamGuardAccount account)
         {
-            int seconds = Math.Max(1, manifest?.PeriodicCheckingInterval ?? 5);
+            int seconds = GetTradeConfirmationMonitorIntervalSeconds();
             return FetchTradeConfirmationsAsync(account, TimeSpan.FromSeconds(seconds), 3);
+        }
+
+        private int GetTradeConfirmationMonitorIntervalSeconds()
+        {
+            if (manifest?.TradeConfirmationCustomIntervalEnabled != true)
+                return 15;
+
+            return Math.Clamp(manifest.TradeConfirmationCheckInterval, 3, 3600);
         }
 
         private async Task<Confirmation[]> FetchTradeConfirmationsAsync(SteamGuardAccount account, TimeSpan retryDelay, int retryCount)
@@ -846,28 +854,24 @@ namespace Steam_Desktop_Authenticator
 
         private async void timerTradesPopup_Tick(object sender, EventArgs e)
         {
-            if (currentAccount == null || manifest == null || !manifest.PeriodicChecking) return;
+            if (manifest == null) return;
             if (TryGetTradeRateLimitMessage(out _)) return;
             if (!confirmationsSemaphore.Wait(0))
             {
                 return; //Only one thread may access this critical section at once. Mutex is a bad choice here because it'll cause a pileup of threads.
             }
 
-            SteamGuardAccount[] accountsToMonitor = manifest.CheckAllAccounts
-                ? allAccounts ?? Array.Empty<SteamGuardAccount>()
-                : new[] { currentAccount };
+            SteamGuardAccount[] accountsToMonitor = (allAccounts ?? Array.Empty<SteamGuardAccount>())
+                .Where(account => account?.Session != null)
+                .ToArray();
             if (accountsToMonitor.Length == 0)
             {
                 confirmationsSemaphore.Release();
                 return;
             }
 
-            bool monitoringAllAccounts = manifest.CheckAllAccounts;
-            if (!monitoringAllAccounts)
-                pendingTradeConfirmationCounts.Clear();
-            if (monitoringAllAccounts)
-                tradeMonitoringAccountIndex = ((tradeMonitoringAccountIndex % accountsToMonitor.Length) + accountsToMonitor.Length) % accountsToMonitor.Length;
-            SteamGuardAccount account = accountsToMonitor[monitoringAllAccounts ? tradeMonitoringAccountIndex : 0];
+            tradeMonitoringAccountIndex = ((tradeMonitoringAccountIndex % accountsToMonitor.Length) + accountsToMonitor.Length) % accountsToMonitor.Length;
+            SteamGuardAccount account = accountsToMonitor[tradeMonitoringAccountIndex];
             bool advanceQueue = true;
 
             try
@@ -935,7 +939,7 @@ namespace Steam_Desktop_Authenticator
                 // The monitor already keeps notifications and the navigation badge current.
                 // Do not immediately re-fetch the same accounts merely to redraw the page:
                 // that doubled traffic and caused Steam to return HTTP 429 responses.
-                if (monitoringAllAccounts && advanceQueue)
+                if (advanceQueue)
                     tradeMonitoringAccountIndex = (tradeMonitoringAccountIndex + 1) % accountsToMonitor.Length;
                 confirmationsSemaphore.Release();
             }
@@ -1804,14 +1808,9 @@ namespace Steam_Desktop_Authenticator
             if (manifest == null)
                 return;
 
-            int intervalSeconds = Math.Clamp(manifest.PeriodicCheckingInterval, 1, 3600);
+            int intervalSeconds = GetTradeConfirmationMonitorIntervalSeconds();
             timerTradesPopup.Interval = intervalSeconds * 1000;
-            timerTradesPopup.Enabled = manifest.PeriodicChecking;
-            if (!manifest.PeriodicChecking)
-            {
-                pendingTradeConfirmationCounts.Clear();
-                UpdateTradePendingCount(0);
-            }
+            timerTradesPopup.Enabled = true;
         }
 
         private void StartBackgroundServicesAfterUiReady()
@@ -2051,12 +2050,7 @@ namespace Steam_Desktop_Authenticator
                 webView.ExecuteScriptAsync($"setAppVersion('{Application.ProductVersion}');");
                 
                 // Set autostart checkbox
-                bool isAutoStart = false;
-                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", false))
-                {
-                    if (key?.GetValue(Application.ProductName) != null)
-                        isAutoStart = true;
-                }
+                bool isAutoStart = WindowsStartup.IsEnabled();
                 webView.ExecuteScriptAsync($"setAutoStart({isAutoStart.ToString().ToLower()});");
 
                 StartBackgroundServicesAfterUiReady();
@@ -2073,9 +2067,8 @@ namespace Steam_Desktop_Authenticator
                 return;
 
             var settings = new JObject();
-            settings["checkConfirmations"] = manifest.PeriodicChecking;
-            settings["checkInterval"] = manifest.PeriodicCheckingInterval;
-            settings["checkAllAccounts"] = manifest.CheckAllAccounts;
+            settings["tradeConfirmationCustomIntervalEnabled"] = manifest.TradeConfirmationCustomIntervalEnabled;
+            settings["tradeConfirmationCheckInterval"] = manifest.TradeConfirmationCheckInterval;
             settings["autoConfirmMarket"] = manifest.AutoConfirmMarketTransactions;
             settings["autoConfirmTrades"] = manifest.AutoConfirmTrades;
             settings["minimizeToTray"] = manifest.MinimizeToTray;
@@ -2199,9 +2192,8 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
-                manifest.PeriodicChecking = (bool?)payload["checkConfirmations"] ?? false;
-                manifest.PeriodicCheckingInterval = Math.Clamp((int?)payload["checkInterval"] ?? 5, 1, 3600);
-                manifest.CheckAllAccounts = (bool?)payload["checkAllAccounts"] ?? false;
+                manifest.TradeConfirmationCustomIntervalEnabled = (bool?)payload["tradeConfirmationCustomIntervalEnabled"] ?? false;
+                manifest.TradeConfirmationCheckInterval = Math.Clamp((int?)payload["tradeConfirmationCheckInterval"] ?? 15, 3, 3600);
                 manifest.AutoConfirmMarketTransactions = (bool?)payload["autoConfirmMarket"] ?? false;
                 manifest.AutoConfirmTrades = (bool?)payload["autoConfirmTrades"] ?? false;
                 manifest.MinimizeToTray = (bool?)payload["minimizeToTray"] ?? false;
@@ -2222,17 +2214,7 @@ namespace Steam_Desktop_Authenticator
             else if (action == "toggle_autostart")
             {
                 bool enable = (bool?)payload["enabled"] ?? false;
-                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
-                {
-                    if (enable)
-                    {
-                        key.SetValue(Application.ProductName, Application.ExecutablePath);
-                    }
-                    else
-                    {
-                        key.DeleteValue(Application.ProductName, false);
-                    }
-                }
+                WindowsStartup.SetEnabled(enable);
             }
             else if (action == "active_tab_changed")
             {

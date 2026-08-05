@@ -150,6 +150,18 @@ namespace Steam_Desktop_Authenticator
             TaskScheduler.UnobservedTaskException += (sender, eventArgs) =>
                 DiagnosticErrorLogger.Log("Task scheduler", eventArgs.Exception, "Unobserved task exception.");
 
+            if (man.FirstRun)
+            {
+                try
+                {
+                    WindowsStartup.SetEnabled(true);
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Windows startup", ex, "Could not enable the default Start with Windows setting.");
+                }
+            }
+
             if (man.FirstRun && man.Entries.Count == 0)
             {
                 // No accounts, run welcome form
