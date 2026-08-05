@@ -68,6 +68,7 @@ namespace Steam_Desktop_Authenticator
         private long currentSteamChunk = 0;
         private string passKey = null;
         private bool startSilent = false;
+        private bool backgroundServicesEligible;
         private bool backgroundServicesStarted;
 
         const int VK_RCONTROL = 0xA3;
@@ -124,7 +125,7 @@ namespace Steam_Desktop_Authenticator
 
         private Task<Confirmation[]> FetchTradeConfirmationsForMonitorAsync(SteamGuardAccount account)
         {
-            int seconds = GetTradeConfirmationMonitorIntervalSeconds();
+            int seconds = Math.Min(GetTradeConfirmationMonitorIntervalSeconds(), 15);
             return FetchTradeConfirmationsAsync(account, TimeSpan.FromSeconds(seconds), 3);
         }
 
@@ -134,6 +135,13 @@ namespace Steam_Desktop_Authenticator
                 return 15;
 
             return Math.Clamp(manifest.TradeConfirmationCheckInterval, 3, 3600);
+        }
+
+        private bool ShouldAutoConfirmTrade(Confirmation confirmation)
+        {
+            return confirmation != null &&
+                ((confirmation.ConfType == Confirmation.EMobileConfirmationType.MarketListing && manifest?.AutoConfirmMarketTransactions == true) ||
+                 (confirmation.ConfType == Confirmation.EMobileConfirmationType.Trade && manifest?.AutoConfirmTrades == true));
         }
 
         private async Task<Confirmation[]> FetchTradeConfirmationsAsync(SteamGuardAccount account, TimeSpan retryDelay, int retryCount)
@@ -328,6 +336,9 @@ namespace Steam_Desktop_Authenticator
 
             loadAccountsList();
             loginApprovalService = new LoginApprovalService(PersistLoginSession);
+
+            if (backgroundServicesEligible)
+                StartBackgroundServicesAfterUiReady();
 
             if (startSilent)
             {
@@ -893,8 +904,7 @@ namespace Steam_Desktop_Authenticator
                 var autoAcceptConfirmations = new List<Confirmation>();
                 foreach (Confirmation confirmation in confirmations)
                 {
-                    if ((confirmation.ConfType == Confirmation.EMobileConfirmationType.MarketListing && manifest.AutoConfirmMarketTransactions) ||
-                        (confirmation.ConfType == Confirmation.EMobileConfirmationType.Trade && manifest.AutoConfirmTrades))
+                    if (ShouldAutoConfirmTrade(confirmation))
                     {
                         autoAcceptConfirmations.Add(confirmation);
                     }
@@ -1622,7 +1632,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             await PublishCachedLoginActionsAsync();
-            _ = MonitorLoginActionsSafelyAsync();
+            _ = RefreshLoginActionsAsync();
         }
 
         // Other methods
@@ -1822,7 +1832,8 @@ namespace Steam_Desktop_Authenticator
 
         private void StartBackgroundServicesAfterUiReady()
         {
-            if (backgroundServicesStarted)
+            backgroundServicesEligible = true;
+            if (manifest == null || backgroundServicesStarted)
                 return;
 
             backgroundServicesStarted = true;
@@ -2381,7 +2392,7 @@ namespace Steam_Desktop_Authenticator
                         Confirmation[] accountConfirmations = await FetchTradeConfirmationsForPageAsync(account);
                         if (accountConfirmations == null)
                             continue;
-                        CacheTradeConfirmations(account, accountConfirmations);
+                        CacheTradeConfirmations(account, accountConfirmations.Where(confirmation => !ShouldAutoConfirmTrade(confirmation)));
                     }
                     catch (TradeRateLimitedException ex)
                     {
