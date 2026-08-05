@@ -21,6 +21,10 @@
   <img src="https://img.shields.io/github/stars/AstroZer01/Astro-Steam-Desktop-Authenticator?style=social" alt="Stars" />
 </p>
 
+<p align="center">
+  <img src="github-banner.jpg" alt="Astro Steam Desktop Authenticator" />
+</p>
+
 ## About This Project
 This is a continuation of the original [Steam Desktop Authenticator](https://github.com/Jessecar96/SteamDesktopAuthenticator) created by **Jessecar96**. Astro Steam Desktop Authenticator is an actively maintained fork that serves to keep the desktop authenticator tool functional, secure, and compatible with Steam's modern API changes. 
 
@@ -41,13 +45,6 @@ All credit for the original design and implementation goes to Jessecar96 and the
 - Added multi-account trade-confirmation monitoring and notification support.
 - Added optional diagnostic logging so users can view and report issues.
 
-## Screenshots
-
-| Main Page | Settings |
-| :---: | :---: |
-| <img src="screenshot%20main%20page.png" width="400"> | <img src="screenshot%20settings.png" width="400"> |
-
-
 ## How to Compile / Build
 
 If you prefer to compile the program from source rather than downloading the pre-built binaries, follow these steps:
@@ -58,13 +55,13 @@ If you prefer to compile the program from source rather than downloading the pre
    git clone https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator.git
    cd Astro-Steam-Desktop-Authenticator
    ```
-3. **Build the Application**:
-   We have bundled a convenient MSBuild pipeline. You can build the entire project including the launcher by running:
+3. **Publish the Application**:
+   Create the same portable release layout used by the release workflow:
    ```bash
-   dotnet publish "Launcher/Launcher.csproj" -c Release
+   dotnet publish "Steam Desktop Authenticator/Steam Desktop Authenticator.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o publish/ASDA
    ```
    *Alternatively, you can open `SteamDesktopAuthenticator.sln` in **Visual Studio 2022** and build the solution.*
-4. **Run the Application**: The compiled executable will be located in `Launcher/bin/Release/net8.0-windows/win-x64/publish/` (or similar depending on your build configuration).
+4. **Run the Application**: Start `publish/ASDA/Steam Desktop Authenticator.exe`. Keep the complete `publish/ASDA` folder together; it contains the WebView files and runtime dependencies. The `maFiles` folder is created there on first launch and stores your local account data.
 
 
 <p align="center">
