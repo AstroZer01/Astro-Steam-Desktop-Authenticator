@@ -545,7 +545,10 @@ input[type="checkbox"]:checked {
     document.getElementById('trade-account-select').addEventListener('change', (e) => {
         const selectedAccount = e.target.value;
         const loginSelect = document.getElementById('login-account-select');
-        if (loginSelect) loginSelect.value = selectedAccount;
+        if (loginSelect) {
+            loginSelect.value = selectedAccount;
+            renderLoginActions();
+        }
         if (selectedAccount !== 'all') {
             window.chrome.webview.postMessage({ action: 'switch_account', accountName: selectedAccount });
         }
@@ -655,6 +658,7 @@ input[type="checkbox"]:checked {
     let loginAutoAllowIpEnabled = false;
     let loginAutoAllowCurrentDeviceIp = false;
     let loginAutoAllowAdditionalIp = '';
+    let recentLoginAttemptOpener = null;
 
     document.getElementById('btn-refresh-login-actions').addEventListener('click', () => {
         showSpinner();
@@ -717,7 +721,7 @@ input[type="checkbox"]:checked {
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'min-w-0 rounded-lg border border-white/10 bg-surface-container-lowest p-2 text-left hover:bg-surface-variant focus:outline-none focus:ring-1 focus:ring-primary transition-colors';
-            button.onclick = () => showRecentLoginAttempt(attempt);
+            button.onclick = () => showRecentLoginAttempt(attempt, button);
             const device = document.createElement('div');
             device.className = 'truncate text-sm font-medium text-on-surface';
             device.textContent = attempt.deviceName || attempt.platform || 'Steam login';
@@ -737,7 +741,8 @@ input[type="checkbox"]:checked {
         });
     }
 
-    function showRecentLoginAttempt(attempt) {
+    function showRecentLoginAttempt(attempt, opener) {
+        recentLoginAttemptOpener = opener || null;
         const modal = document.getElementById('recent-login-attempt-modal');
         const details = document.getElementById('recent-login-attempt-details');
         document.getElementById('recent-login-attempt-title').textContent = attempt.deviceName || attempt.platform || 'Steam login attempt';
@@ -761,9 +766,19 @@ input[type="checkbox"]:checked {
         const modal = document.getElementById('recent-login-attempt-modal');
         modal.classList.add('hidden');
         modal.classList.remove('flex');
+        if (recentLoginAttemptOpener) {
+            recentLoginAttemptOpener.focus();
+            recentLoginAttemptOpener = null;
+        }
     }
 
     document.getElementById('btn-close-recent-login-attempt').addEventListener('click', closeRecentLoginAttempt);
+    document.addEventListener('keydown', event => {
+        const modal = document.getElementById('recent-login-attempt-modal');
+        if (event.key === 'Escape' && !modal.classList.contains('hidden')) {
+            closeRecentLoginAttempt();
+        }
+    });
     document.getElementById('recent-login-attempt-modal').addEventListener('click', event => {
         if (event.target.id === 'recent-login-attempt-modal') closeRecentLoginAttempt();
     });

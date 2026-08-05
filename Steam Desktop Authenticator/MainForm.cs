@@ -37,6 +37,7 @@ namespace Steam_Desktop_Authenticator
         private readonly HashSet<string> notifiedLoginRequests = new HashSet<string>();
         private readonly HashSet<string> notifiedUnavailableLoginAccounts = new HashSet<string>();
         private readonly Dictionary<string, DateTime> automatedLoginActionNotifications = new Dictionary<string, DateTime>();
+        private readonly HashSet<string> completedAutomatedLoginActions = new HashSet<string>();
         private readonly Dictionary<string, PendingLoginRequest> pendingLoginRequests = new Dictionary<string, PendingLoginRequest>();
         private readonly List<RecentLoginAttempt> recentLoginAttempts = new List<RecentLoginAttempt>();
         private readonly HashSet<string> recordedRecentLoginAttempts = new HashSet<string>();
@@ -51,6 +52,8 @@ namespace Steam_Desktop_Authenticator
         private string tradeAccountSelection = "all";
         private readonly object tradeRateLimitLock = new object();
         private DateTime tradeRateLimitedUntilUtc = DateTime.MinValue;
+        private readonly object loginRateLimitLock = new object();
+        private DateTime loginRateLimitedUntilUtc = DateTime.MinValue;
         private int tradeMonitoringAccountIndex;
 
         private long steamTime = 0;
@@ -207,6 +210,33 @@ namespace Steam_Desktop_Authenticator
         private static bool IsRateLimitedResponse(WebException exception)
         {
             return exception?.Response is HttpWebResponse response && (int)response.StatusCode == 429;
+        }
+
+        private bool TryGetLoginRateLimitMessage(out string message)
+        {
+            lock (loginRateLimitLock)
+            {
+                if (DateTime.UtcNow >= loginRateLimitedUntilUtc)
+                {
+                    message = null;
+                    return false;
+                }
+
+                TimeSpan remaining = loginRateLimitedUntilUtc - DateTime.UtcNow;
+                message = "Steam is temporarily limiting login checks. Retrying automatically in about " +
+                    Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds)) + " seconds.";
+                return true;
+            }
+        }
+
+        private void ApplyLoginRateLimit()
+        {
+            lock (loginRateLimitLock)
+            {
+                DateTime proposedUntil = DateTime.UtcNow.AddSeconds(60);
+                if (proposedUntil > loginRateLimitedUntilUtc)
+                    loginRateLimitedUntilUtc = proposedUntil;
+            }
         }
 
         private static bool IsTradeAuthenticationFailure(Exception exception)
@@ -866,6 +896,7 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
+                ReconcileTradeConfirmationNotifications(account, confirmations);
                 foreach (var pending in pendingConfirmations)
                 {
                     string confirmationKey = account.Session.SteamID.ToString() + ":" + pending.ID.ToString();
@@ -910,17 +941,32 @@ namespace Steam_Desktop_Authenticator
 
             loginActionsTimer.Enabled = manifest.LoginActionMonitoringEnabled;
             if (manifest.LoginActionMonitoringEnabled)
-                _ = MonitorLoginActionsAsync();
+                _ = MonitorLoginActionsSafelyAsync();
         }
 
         private async void loginActionsTimer_Tick(object sender, EventArgs e)
         {
-            await MonitorLoginActionsAsync();
+            await MonitorLoginActionsSafelyAsync();
+        }
+
+        private async Task MonitorLoginActionsSafelyAsync()
+        {
+            try
+            {
+                await MonitorLoginActionsAsync();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("Login action monitor failed: " + ex.Message);
+                DiagnosticErrorLogger.Log("Login action monitor", ex, "The background login-request scan did not complete.");
+            }
         }
 
         private async Task MonitorLoginActionsAsync()
         {
             if (manifest == null || loginApprovalService == null || !manifest.LoginActionMonitoringEnabled || allAccounts == null)
+                return;
+            if (TryGetLoginRateLimitMessage(out _))
                 return;
             if (!await loginActionsSemaphore.WaitAsync(0))
                 return;
@@ -940,6 +986,13 @@ namespace Steam_Desktop_Authenticator
                             NotifyLoginAction("Login monitoring needs attention", account.AccountName + " needs you to sign in again before login requests can be monitored.", ToolTipIcon.Warning);
                         }
                         continue;
+                    }
+
+                    if (result.ErrorKind == LoginApprovalErrorKind.RateLimited)
+                    {
+                        ApplyLoginRateLimit();
+                        DiagnosticErrorLogger.Log("Login action monitor", new InvalidOperationException(result.ErrorMessage), "Steam rate limited the login-request monitor.");
+                        return;
                     }
 
                     if (result.ErrorKind != LoginApprovalErrorKind.None)
@@ -987,13 +1040,18 @@ namespace Steam_Desktop_Authenticator
 
                         LoginApprovalActionResult actionResult = await RunSteamAccountOperationAsync(account,
                             () => loginApprovalService.RespondAsync(account, request, decision));
+                        if (actionResult.ErrorKind == LoginApprovalErrorKind.RateLimited)
+                        {
+                            ApplyLoginRateLimit();
+                            DiagnosticErrorLogger.Log("Login action monitor", new InvalidOperationException(actionResult.ErrorMessage), "Steam rate limited an automatic login action.");
+                            return;
+                        }
                         if (actionResult.Succeeded || actionResult.ErrorKind == LoginApprovalErrorKind.ExpiredOrDuplicate)
                         {
                             completedAutomatedLoginActions.Add(actionKey);
                             RecordRecentLoginAttempt(request, actionResult.Succeeded
                                 ? (allowWhitelistedIp ? "Approved automatically (whitelisted IP)" : (decision == LoginApprovalDecision.ApprovePersistent ? "Approved automatically" : "Denied automatically"))
                                 : "Expired or already handled");
-                            pendingLoginRequests.Remove(requestKey);
                             NotifyAutomatedLoginActionOnce(actionKey,
                                 actionResult.Succeeded
                                     ? (allowWhitelistedIp ? "Automatically allowed whitelisted Steam login" : (decision == LoginApprovalDecision.ApprovePersistent ? "Automatically approved Steam login" : "Automatically denied Steam login"))
@@ -1019,11 +1077,16 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private readonly HashSet<string> completedAutomatedLoginActions = new HashSet<string>();
-
         private void NotifyAutomatedLoginActionOnce(string key, string title, string message, ToolTipIcon icon)
         {
             DateTime now = DateTime.UtcNow;
+            foreach (string expiredKey in automatedLoginActionNotifications
+                .Where(pair => now - pair.Value >= TimeSpan.FromMinutes(5))
+                .Select(pair => pair.Key)
+                .ToList())
+            {
+                automatedLoginActionNotifications.Remove(expiredKey);
+            }
             if (automatedLoginActionNotifications.TryGetValue(key, out DateTime previous) && now - previous < TimeSpan.FromMinutes(5))
                 return;
 
@@ -1138,7 +1201,30 @@ namespace Steam_Desktop_Authenticator
                 OccurredAtUtc = DateTime.UtcNow
             });
             if (recentLoginAttempts.Count > 3)
+            {
+                foreach (RecentLoginAttempt removedAttempt in recentLoginAttempts.Skip(3))
+                    recordedRecentLoginAttempts.Remove(BuildLoginRequestKey(removedAttempt.Request.SteamId, removedAttempt.Request.ClientId));
                 recentLoginAttempts.RemoveRange(3, recentLoginAttempts.Count - 3);
+            }
+        }
+
+        private void ReconcileTradeConfirmationNotifications(SteamGuardAccount account, IEnumerable<Confirmation> confirmations)
+        {
+            if (account?.Session == null)
+                return;
+
+            var fetchedConfirmationKeys = new HashSet<string>((confirmations ?? Enumerable.Empty<Confirmation>())
+                .Select(confirmation => BuildTradeConfirmationKey(account, confirmation)));
+            string accountConfirmationPrefix = account.Session.SteamID.ToString() + ":";
+            notifiedTradeConfirmations.RemoveWhere(key => key.StartsWith(accountConfirmationPrefix, StringComparison.Ordinal) &&
+                !fetchedConfirmationKeys.Contains(key));
+        }
+
+        private void PruneLoginRequestBookkeeping(string requestKey)
+        {
+            notifiedLoginRequests.Remove(requestKey);
+            recordedRecentLoginAttempts.Remove(requestKey);
+            completedAutomatedLoginActions.RemoveWhere(key => key.StartsWith(requestKey + "|", StringComparison.Ordinal));
         }
 
         private void ReconcilePendingLoginRequestsForAccount(SteamGuardAccount account, IEnumerable<PendingLoginRequest> requests)
@@ -1154,6 +1240,7 @@ namespace Steam_Desktop_Authenticator
             {
                 RecordRecentLoginAttempt(pendingLoginRequests[staleKey], "Expired or handled elsewhere");
                 pendingLoginRequests.Remove(staleKey);
+                PruneLoginRequestBookkeeping(staleKey);
             }
         }
 
@@ -1330,7 +1417,9 @@ namespace Steam_Desktop_Authenticator
                 }
                 else
                 {
-                    pendingLoginRequests.Remove(BuildLoginRequestKey(request.SteamId, request.ClientId));
+                    string requestKey = BuildLoginRequestKey(request.SteamId, request.ClientId);
+                    pendingLoginRequests.Remove(requestKey);
+                    notifiedLoginRequests.Remove(requestKey);
                     if (result.Succeeded)
                     {
                         RecordRecentLoginAttempt(request, decision == LoginApprovalDecision.ApprovePersistent ? "Approved manually" : "Denied manually");
@@ -1903,15 +1992,15 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
-                manifest.PeriodicChecking = (bool)payload["checkConfirmations"];
+                manifest.PeriodicChecking = (bool?)payload["checkConfirmations"] ?? false;
                 manifest.PeriodicCheckingInterval = Math.Clamp((int?)payload["checkInterval"] ?? 5, 1, 3600);
-                manifest.CheckAllAccounts = (bool)payload["checkAllAccounts"];
-                manifest.AutoConfirmMarketTransactions = (bool)payload["autoConfirmMarket"];
-                manifest.AutoConfirmTrades = (bool)payload["autoConfirmTrades"];
-                manifest.MinimizeToTray = (bool)payload["minimizeToTray"];
+                manifest.CheckAllAccounts = (bool?)payload["checkAllAccounts"] ?? false;
+                manifest.AutoConfirmMarketTransactions = (bool?)payload["autoConfirmMarket"] ?? false;
+                manifest.AutoConfirmTrades = (bool?)payload["autoConfirmTrades"] ?? false;
+                manifest.MinimizeToTray = (bool?)payload["minimizeToTray"] ?? false;
                 manifest.DiagnosticErrorLoggingEnabled = (bool?)payload["diagnosticErrorLoggingEnabled"] ?? false;
                 // Automatic rules require the dedicated monitor; manual mode can be monitored or disabled independently.
-                manifest.LoginActionMonitoringEnabled = (bool)payload["loginActionMonitoringEnabled"] || newLoginActionMode != LoginActionModes.Manual;
+                manifest.LoginActionMonitoringEnabled = ((bool?)payload["loginActionMonitoringEnabled"] ?? false) || newLoginActionMode != LoginActionModes.Manual;
                 manifest.LoginActionMode = newLoginActionMode;
                 manifest.LoginActionAutoAllowIpEnabled = newLoginActionAutoAllowIpEnabled;
                 manifest.LoginActionAutoAllowCurrentDeviceIp = newLoginActionAutoAllowCurrentDeviceIp;
@@ -1925,7 +2014,7 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "toggle_autostart")
             {
-                bool enable = (bool)payload["enabled"];
+                bool enable = (bool?)payload["enabled"] ?? false;
                 using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
                 {
                     if (enable)
@@ -1997,10 +2086,17 @@ namespace Steam_Desktop_Authenticator
 
             try
             {
-                if (accept)
-                    await entry.Account.AcceptConfirmation(entry.Confirmation);
-                else
-                    await entry.Account.DenyConfirmation(entry.Confirmation);
+                await confirmationsSemaphore.WaitAsync();
+                try
+                {
+                    await RunSteamAccountOperationAsync(entry.Account, () => accept
+                        ? entry.Account.AcceptConfirmation(entry.Confirmation)
+                        : entry.Account.DenyConfirmation(entry.Confirmation));
+                }
+                finally
+                {
+                    confirmationsSemaphore.Release();
+                }
             }
             catch (Exception ex)
             {

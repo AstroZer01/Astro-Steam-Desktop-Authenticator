@@ -121,6 +121,8 @@ namespace Steam_Desktop_Authenticator
             await EnsureAccessTokenAsync(account, forceRefresh);
             var sessionsResponse = await SendGetAsync(account, "GetAuthSessionsForAccount", "{}");
             ThrowIfSteamFailed(sessionsResponse);
+            if (GetResponseObject(sessionsResponse.Body) == null)
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned an invalid pending login request response.");
 
             var requests = new List<PendingLoginRequest>();
             foreach (ulong clientId in ParseClientIds(sessionsResponse.Body))
@@ -244,6 +246,10 @@ namespace Steam_Desktop_Authenticator
                     await account.Session.RefreshAccessToken();
                     if (!persistAccount(account))
                         throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam refreshed the session, but Astro SDA could not save it securely.");
+                }
+                catch (LoginApprovalException)
+                {
+                    throw;
                 }
                 catch (Exception)
                 {

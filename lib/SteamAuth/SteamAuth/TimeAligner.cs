@@ -45,6 +45,8 @@ namespace SteamAuth
                 {
                     string response = client.UploadString(APIEndpoints.TWO_FACTOR_TIME_QUERY, "steamid=0");
                     TimeQuery query = JsonConvert.DeserializeObject<TimeQuery>(response);
+                    if (query?.Response == null)
+                        return;
                     TimeAligner._timeDifference = (int)(query.Response.ServerTime - currentTime);
                     TimeAligner._aligned = true;
                 }
@@ -69,6 +71,8 @@ namespace SteamAuth
                     client.Encoding = Encoding.UTF8;
                     string response = await client.UploadStringTaskAsync(new Uri(APIEndpoints.TWO_FACTOR_TIME_QUERY), "steamid=0");
                     TimeQuery query = JsonConvert.DeserializeObject<TimeQuery>(response);
+                    if (query?.Response == null)
+                        return;
                     TimeAligner._timeDifference = (int)(query.Response.ServerTime - currentTime);
                     TimeAligner._aligned = true;
                 }

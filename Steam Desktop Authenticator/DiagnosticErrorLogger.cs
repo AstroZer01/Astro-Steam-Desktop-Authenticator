@@ -50,7 +50,8 @@ namespace Steam_Desktop_Authenticator
                 {
                     Directory.CreateDirectory(directory);
                     DeleteExpiredLogs(directory);
-                    string filename = GetCurrentLogFilename(directory);
+                    int entrySize = new UTF8Encoding(false).GetByteCount(entry);
+                    string filename = GetCurrentLogFilename(directory, entrySize);
                     if (filename == null)
                         return;
                     File.AppendAllText(filename, entry, new UTF8Encoding(false));
@@ -84,14 +85,17 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static string GetCurrentLogFilename(string directory)
+        private static string GetCurrentLogFilename(string directory, int entrySize)
         {
+            if (entrySize > MaximumLogFileSizeBytes)
+                return null;
+
             string date = DateTime.UtcNow.ToString("yyyy-MM-dd");
             for (int part = 1; part <= 10; part++)
             {
                 string suffix = part == 1 ? String.Empty : "-" + part;
                 string filename = Path.Combine(directory, "errors-" + date + suffix + ".log");
-                if (!File.Exists(filename) || new FileInfo(filename).Length < MaximumLogFileSizeBytes)
+                if (!File.Exists(filename) || new FileInfo(filename).Length <= MaximumLogFileSizeBytes - entrySize)
                     return filename;
             }
 
