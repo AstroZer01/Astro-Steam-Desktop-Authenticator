@@ -60,7 +60,7 @@ If you prefer to compile the program from source rather than downloading the pre
    ```bash
    dotnet publish "Steam Desktop Authenticator/Steam Desktop Authenticator.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o publish/ASDA
    ```
-   *Alternatively, you can open `SteamDesktopAuthenticator.sln` in **Visual Studio 2022** and build the solution.*
+   *Alternatively, open `SteamDesktopAuthenticator.sln` in **Visual Studio 2022**, right-click the **Steam Desktop Authenticator** project, and choose **Publish** (not Build). Use a Folder target with the same Windows x64, framework-dependent, single-file settings and output folder shown above.*
 4. **Run the Application**: Start `publish/ASDA/Steam Desktop Authenticator.exe`. Keep the complete `publish/ASDA` folder together; it contains the WebView files and runtime dependencies. The `maFiles` folder is created there on first launch and stores your local account data.
 
 

@@ -7,9 +7,7 @@ namespace Steam_Desktop_Authenticator
     {
         private static readonly string[] RequiredWebResourceNames = { "index.html", "login.html", "input.html" };
 
-        public static string InstallDirectory => AppContext.BaseDirectory.TrimEnd(
-            Path.DirectorySeparatorChar,
-            Path.AltDirectorySeparatorChar);
+        public static string InstallDirectory => Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
 
         public static string WebRootDirectory => Path.Combine(InstallDirectory, "app", "wwwroot");
 

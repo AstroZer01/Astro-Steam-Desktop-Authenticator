@@ -403,6 +403,25 @@ input[type="checkbox"]:checked {
         document.getElementById('global-spinner').classList.add('hidden');
     }
 
+    let refreshSpinnerTimeout = null;
+
+    function showRefreshSpinner() {
+        showSpinner();
+        if (refreshSpinnerTimeout) clearTimeout(refreshSpinnerTimeout);
+        refreshSpinnerTimeout = setTimeout(() => {
+            refreshSpinnerTimeout = null;
+            hideSpinner();
+        }, 10000);
+    }
+
+    function hideRefreshSpinner() {
+        if (refreshSpinnerTimeout) {
+            clearTimeout(refreshSpinnerTimeout);
+            refreshSpinnerTimeout = null;
+        }
+        hideSpinner();
+    }
+
     // Authenticator Actions
     document.getElementById('btn-setup-account').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'setup_account' }); });
     document.getElementById('btn-import-account').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'import_account' }); });
@@ -537,6 +556,7 @@ input[type="checkbox"]:checked {
     // Trade Actions
     document.getElementById('btn-refresh-trades').addEventListener('click', () => {
         beginTradeLoad();
+        showRefreshSpinner();
         window.chrome.webview.postMessage({ action: 'refresh_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
     });
     document.getElementById('trade-account-select').addEventListener('change', (e) => {
@@ -561,11 +581,11 @@ input[type="checkbox"]:checked {
     
     let latestTradeRevision = 0;
 
-    function loadConfirmations(confirmsStr, errorMessage, revision = 0) {
+    function loadConfirmations(confirms, errorMessage, revision = 0) {
         if (revision < latestTradeRevision) return;
         latestTradeRevision = revision;
-        hideSpinner();
-        const confirms = JSON.parse(confirmsStr || '[]');
+        hideRefreshSpinner();
+        confirms = Array.isArray(confirms) ? confirms : [];
         const container = document.getElementById('trades-container');
         const emptyState = document.getElementById('empty-state');
         const count = document.getElementById('trade-confirmations-count');
@@ -662,6 +682,7 @@ input[type="checkbox"]:checked {
     let latestLoginRevision = 0;
 
     document.getElementById('btn-refresh-login-actions').addEventListener('click', () => {
+        showRefreshSpinner();
         window.chrome.webview.postMessage({ action: 'refresh_login_actions' });
     });
     document.getElementById('login-account-select').addEventListener('change', event => {
@@ -929,7 +950,7 @@ input[type="checkbox"]:checked {
         const revision = Number(data && data.revision) || 0;
         if (revision < latestLoginRevision) return;
         latestLoginRevision = revision;
-        hideSpinner();
+        hideRefreshSpinner();
         if (data && data.loading) return;
         loginRequests = data && Array.isArray(data.requests) ? data.requests : [];
         loginUnavailableAccounts = data && Array.isArray(data.unavailableAccounts) ? data.unavailableAccounts : [];

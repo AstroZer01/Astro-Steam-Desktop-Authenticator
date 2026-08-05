@@ -1312,7 +1312,9 @@ namespace Steam_Desktop_Authenticator
             IEnumerable<SteamGuardAccount> accounts = tradeAccountSelection == "all"
                 ? allAccounts
                 : allAccounts.Where(account => account.AccountName == tradeAccountSelection);
-            return accounts.All(account => loadedTradeConfirmationAccounts.Contains(account.Session.SteamID));
+            return accounts
+                .Where(account => account?.Session != null)
+                .All(account => loadedTradeConfirmationAccounts.Contains(account.Session.SteamID));
         }
 
         private async Task PublishCachedTradesAsync(string errorMessage = null)
@@ -1337,10 +1339,9 @@ namespace Steam_Desktop_Authenticator
                 Summary = entry.Confirmation.Summary,
                 Type = entry.Confirmation.ConfType.ToString()
             }), settings);
-            string jsEscaped = jsonStr.Replace("'", "\\'");
             string jsError = String.IsNullOrWhiteSpace(errorMessage) ? "null" : JsonConvert.SerializeObject(errorMessage);
             long revision = Interlocked.Increment(ref tradeViewRevision);
-            await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations('{jsEscaped}', {jsError}, {revision})");
+            await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations({jsonStr}, {jsError}, {revision})");
         }
 
         private async Task LoadCachedTradesAsync(string selectedAccountName)
@@ -1562,6 +1563,12 @@ namespace Steam_Desktop_Authenticator
             await webView.CoreWebView2.ExecuteScriptAsync("loadLoginActions(" + json + ");");
         }
 
+        private async Task RefreshLoginActionsAsync()
+        {
+            await MonitorLoginActionsSafelyAsync();
+            await PublishCachedLoginActionsAsync();
+        }
+
         private async Task RespondToLoginActionAsync(string accountName, ulong clientId, string action)
         {
             if (manifest.LoginActionMode != LoginActionModes.Manual)
@@ -1572,7 +1579,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             SteamGuardAccount account = allAccounts?.FirstOrDefault(item => item.AccountName == accountName);
-            if (account == null || !pendingLoginRequests.TryGetValue(BuildLoginRequestKey(account.Session.SteamID, clientId), out PendingLoginRequest request))
+            if (account?.Session == null || !pendingLoginRequests.TryGetValue(BuildLoginRequestKey(account.Session.SteamID, clientId), out PendingLoginRequest request))
             {
                 AstroMessageBox.Show("This login request is no longer available. Refresh the list and try again.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 await PublishCachedLoginActionsAsync();
@@ -1693,8 +1700,19 @@ namespace Steam_Desktop_Authenticator
 
             allAccounts = manifest.GetAllAccounts(passKey);
             var activeSteamIds = new HashSet<ulong>(allAccounts.Where(account => account.Session != null).Select(account => account.Session.SteamID));
+            var activeAccountNames = new HashSet<string>(allAccounts.Select(account => account.AccountName), StringComparer.Ordinal);
             foreach (ulong steamId in pendingTradeConfirmationCounts.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
                 pendingTradeConfirmationCounts.Remove(steamId);
+            loadedTradeConfirmationAccounts.RemoveWhere(steamId => !activeSteamIds.Contains(steamId));
+            foreach (string accountName in unavailableLoginAccounts.Keys.Where(accountName => !activeAccountNames.Contains(accountName)).ToArray())
+                unavailableLoginAccounts.Remove(accountName);
+            foreach (string confirmationKey in loadedTradeConfirmations
+                .Where(entry => entry.Value.Account?.Session == null || !activeSteamIds.Contains(entry.Value.Account.Session.SteamID))
+                .Select(entry => entry.Key)
+                .ToArray())
+            {
+                loadedTradeConfirmations.Remove(confirmationKey);
+            }
             UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
 
             if (allAccounts.Length > 0)
@@ -2034,6 +2052,8 @@ namespace Steam_Desktop_Authenticator
                     loadingTimer.Stop();
                     loadingTimer.Dispose();
                     lblLoading.Text = "Astro UI could not be loaded. Restore the complete release folder and try again.";
+                    DiagnosticErrorLogger.Log("Astro UI", new InvalidOperationException("WebView2 navigation failed: " + args.WebErrorStatus), "The dashboard could not be loaded.");
+                    StartBackgroundServicesAfterUiReady();
                     return;
                 }
 
@@ -2236,7 +2256,7 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "refresh_login_actions")
             {
-                _ = MonitorLoginActionsSafelyAsync();
+                _ = RefreshLoginActionsAsync();
             }
             else if (action == "respond_login_action")
             {
@@ -2324,6 +2344,7 @@ namespace Steam_Desktop_Authenticator
         {
             if (!String.IsNullOrWhiteSpace(selectedAccountName))
                 tradeAccountSelection = selectedAccountName;
+            string selectionToLoad = tradeAccountSelection;
 
             if (allAccounts == null || allAccounts.Length == 0)
             {
@@ -2333,13 +2354,16 @@ namespace Steam_Desktop_Authenticator
 
             if (!await tradeLoadSemaphore.WaitAsync(0))
                 return;
-            await confirmationsSemaphore.WaitAsync();
+            bool confirmationsSemaphoreAcquired = false;
             try
             {
-                SteamGuardAccount[] accountsToLoad = tradeAccountSelection == "all"
-                    ? allAccounts
-                    : allAccounts.Where(account => account.AccountName == tradeAccountSelection).ToArray();
-                if (accountsToLoad.Length == 0 && currentAccount != null)
+                await confirmationsSemaphore.WaitAsync();
+                confirmationsSemaphoreAcquired = true;
+
+                SteamGuardAccount[] accountsToLoad = selectionToLoad == "all"
+                    ? allAccounts.Where(account => account?.Session != null).ToArray()
+                    : allAccounts.Where(account => account?.Session != null && account.AccountName == selectionToLoad).ToArray();
+                if (accountsToLoad.Length == 0 && currentAccount?.Session != null)
                     accountsToLoad = new[] { currentAccount };
 
                 var unavailableAccounts = new List<string>();
@@ -2385,8 +2409,12 @@ namespace Steam_Desktop_Authenticator
             }
             finally
             {
-                confirmationsSemaphore.Release();
+                if (confirmationsSemaphoreAcquired)
+                    confirmationsSemaphore.Release();
                 tradeLoadSemaphore.Release();
+
+                if (!String.Equals(selectionToLoad, tradeAccountSelection, StringComparison.Ordinal))
+                    _ = LoadTradesAsync();
             }
         }
     }

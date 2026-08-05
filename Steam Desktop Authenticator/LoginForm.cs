@@ -75,7 +75,16 @@ namespace Steam_Desktop_Authenticator
             this.Controls.Add(webView);
             webView.BringToFront();
 
-            await webView.EnsureCoreWebView2Async(await WebViewEnvironmentProvider.GetAsync());
+            try
+            {
+                await webView.EnsureCoreWebView2Async(await WebViewEnvironmentProvider.GetAsync());
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Login UI", ex, "The WebView2 login dialog could not be initialized.");
+                lblLoading.Text = "Login UI could not be loaded. Restore the complete release folder and try again.";
+                return;
+            }
 
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
@@ -84,6 +93,12 @@ namespace Steam_Desktop_Authenticator
 
             webView.NavigationCompleted += (sender, args) =>
             {
+                if (!args.IsSuccess)
+                {
+                    lblLoading.Text = "Login UI could not be loaded. Restore the complete release folder and try again.";
+                    return;
+                }
+
                 loadingPanel.Visible = false;
                 foreach (Control c in this.Controls)
                 {
