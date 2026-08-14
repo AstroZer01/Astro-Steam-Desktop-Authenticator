@@ -34,6 +34,15 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v7
 
+    - name: Install Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: 22
+        cache: npm
+
+    - name: Install UI build dependencies
+      run: npm ci
+
     - name: Install .NET Core
       uses: actions/setup-dotnet@v6
       with:
@@ -41,6 +50,19 @@ jobs:
 
     - name: Setup MSBuild.exe
       uses: microsoft/setup-msbuild@v3
+
+    - name: Generate and commit local UI assets
+      run: |
+        npm run build:ui
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add "Steam Desktop Authenticator\wwwroot\assets\css\app.css"
+        if (git diff --cached --quiet) {
+            Write-Host "Local UI stylesheet is current."
+        } else {
+            git commit -m "Build local UI stylesheet"
+            git push
+        }
 
     - name: Update Version Numbers
       run: |
