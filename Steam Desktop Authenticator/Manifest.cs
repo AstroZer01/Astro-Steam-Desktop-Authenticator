@@ -74,7 +74,8 @@ namespace Steam_Desktop_Authenticator
 
         public static string GetExecutableDir()
         {
-            return ApplicationPaths.InstallDirectory;
+            // Account data lives beside the Launcher when the app is started through it.
+            return ApplicationPaths.DataDirectory;
         }
 
         public static Manifest GetManifest(bool forceLoad = false)

@@ -65,14 +65,13 @@ To run the built application, install the .NET 8 Desktop Runtime if the SDK is n
    cd Astro-Steam-Desktop-Authenticator
    ```
 
-2. From the repository root, run these commands in Command Prompt:
+2. From the repository root, run this command in Command Prompt:
 
    ```bat
-   if exist "publish\ASDA" rmdir /s /q "publish\ASDA"
-   dotnet publish "Steam Desktop Authenticator\Steam Desktop Authenticator.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o "publish\ASDA"
+   dotnet publish "Launcher\Launcher.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o "publish\ASDA"
    ```
 
-   The first command removes only the previous `publish\ASDA` package, preventing old files from being mixed into a new build. Close any copy of the app running from that folder before rebuilding so Windows can replace its executable. `dotnet publish` restores the required Windows x64 dependencies automatically.
+   Close any copy of the app running from that folder before rebuilding so Windows can replace its executable. `dotnet publish` restores the required Windows x64 dependencies automatically and preserves an existing root `publish\ASDA\maFiles` folder.
 
 3. When `dotnet publish` completes successfully, start:
 
@@ -80,13 +79,48 @@ To run the built application, install the .NET 8 Desktop Runtime if the SDK is n
    publish\ASDA\Steam Desktop Authenticator.exe
    ```
 
-Keep the complete `publish\ASDA` folder together. It contains the WebView files and runtime dependencies. The application creates its `maFiles` folder there on first launch; it holds your local account data and should be backed up securely.
+Keep the complete `publish\ASDA` folder together. The root executable is the Launcher; it starts the real app from `publish\ASDA\bin`. The `bin` folder contains the WebView files and runtime dependencies, while the application creates `publish\ASDA\maFiles` beside the Launcher on first launch. Back up that `maFiles` folder securely.
+
+#### Reusable personal build script
+
+If you keep a personal `.bat` file outside the repository, use this version. Change the two paths to your own locations. It intentionally never deletes `%OUTPUT%`, so an existing `%OUTPUT%\maFiles\manifest.json` and its `.maFile` account secrets survive every rebuild. `dotnet clean` only removes intermediate files from the source checkout; it does not affect the release folder.
+
+```bat
+@echo off
+setlocal EnableExtensions
+title Build Astro Steam Desktop Assistant
+
+set "PROJECT_ROOT=E:\Desktop\cursor projects\SteamDesktopAuthenticator-master"
+set "OUTPUT=E:\Desktop\Astro Steam Desktop Assistant"
+
+cd /d "%PROJECT_ROOT%" || goto :failed
+
+dotnet clean "SteamDesktopAuthenticator.sln" -c Release || goto :failed
+dotnet publish "Launcher\Launcher.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o "%OUTPUT%" || goto :failed
+
+del /q "%OUTPUT%\*.pdb" "%OUTPUT%\*.xml" "%OUTPUT%\*.config" 2>nul
+del /q "%OUTPUT%\bin\*.pdb" "%OUTPUT%\bin\*.xml" "%OUTPUT%\bin\*.config" 2>nul
+
+echo.
+echo Compilation finished:
+echo %OUTPUT%
+pause
+exit /b 0
+
+:failed
+echo.
+echo Compilation failed. Close any running copy of the app and try again.
+pause
+exit /b 1
+```
+
+Never use `rmdir /s`, `del /s`, or a file-cleanup tool on the release root. If you need to discard a release, first copy `maFiles` somewhere secure, then remove only the files you explicitly intend to replace. Git ignores `maFiles` folders and `.maFile` exports so account secrets do not enter commits, pull requests, or releases from this repository.
 
 ### Build with Visual Studio 2022
 
 1. Open `SteamDesktopAuthenticator.sln`.
 2. Select the `Release` configuration.
-3. In Solution Explorer, right-click **Steam Desktop Authenticator** — not **Launcher** — then choose **Publish**.
+3. In Solution Explorer, right-click **Launcher** — not **Steam Desktop Authenticator** — then choose **Publish**.
 4. Select a **Folder** target. Use `publish\ASDA` as the target location and select **Windows x64** with **Framework-dependent** deployment.
 5. In publish settings, enable **Produce single file** and leave trimming disabled, then select **Publish**.
 

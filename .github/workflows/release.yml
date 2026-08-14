@@ -100,24 +100,23 @@ jobs:
     - name: Clean and publish the release package
       run: |
         dotnet clean $env:Solution_Name -c Release
-        dotnet publish "Steam Desktop Authenticator\Steam Desktop Authenticator.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o publish\ASDA
+        dotnet publish "Launcher\Launcher.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o publish\ASDA
 
         Remove-Item publish\ASDA\*.pdb, publish\ASDA\*.xml, publish\ASDA\*.config -Force -ErrorAction SilentlyContinue
+        Remove-Item publish\ASDA\bin\*.pdb, publish\ASDA\bin\*.xml, publish\ASDA\bin\*.config -Force -ErrorAction SilentlyContinue
 
         $requiredPaths = @(
           "publish\ASDA\Steam Desktop Authenticator.exe",
-          "publish\ASDA\WebView2Loader.dll",
-          "publish\ASDA\runtimes",
-          "publish\ASDA\app\ui\index.html",
-          "publish\ASDA\app\ui\login.html",
-          "publish\ASDA\app\ui\input.html"
+          "publish\ASDA\bin\Steam Desktop Authenticator.exe",
+          "publish\ASDA\bin\WebView2Loader.dll",
+          "publish\ASDA\bin\runtimes",
+          "publish\ASDA\bin\app\ui\index.html",
+          "publish\ASDA\bin\app\ui\login.html",
+          "publish\ASDA\bin\app\ui\input.html"
         )
         $missingPaths = $requiredPaths | Where-Object { -not (Test-Path $_) }
         if ($missingPaths) {
           throw "Release package is incomplete: $($missingPaths -join ', ')"
-        }
-        if (Test-Path publish\ASDA\bin) {
-          throw "Release package unexpectedly contains the legacy launcher bin folder."
         }
 
     - name: Zip Build Output

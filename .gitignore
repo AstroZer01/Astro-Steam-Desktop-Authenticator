@@ -554,6 +554,8 @@ maFiles/
 *.maFile
 # Steam Guard authenticator exports contain account secrets. Never commit them.
 *.[mM][aA][fF][iI][lL][eE]
+# Ignore every casing and location of the account-data directory, including manifest.json within it.
+**/[mM][aA][fF][iI][lL][eE][sS]/
 
 # Debug and JSON files generated during our analysis
 raw_issues.json
