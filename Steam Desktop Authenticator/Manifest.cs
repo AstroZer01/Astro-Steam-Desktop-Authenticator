@@ -1,4 +1,5 @@
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using SteamAuth;
 using System;
 using System.Collections.Generic;
@@ -33,14 +34,11 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("entries")]
         public List<ManifestEntry> Entries { get; set; }
 
-        [JsonProperty("periodic_checking")]
-        public bool PeriodicChecking { get; set; } = false;
+        [JsonProperty("trade_confirmation_custom_interval_enabled")]
+        public bool TradeConfirmationCustomIntervalEnabled { get; set; } = false;
 
-        [JsonProperty("periodic_checking_interval")]
-        public int PeriodicCheckingInterval { get; set; } = 5;
-
-        [JsonProperty("periodic_checking_checkall")]
-        public bool CheckAllAccounts { get; set; } = false;
+        [JsonProperty("trade_confirmation_check_interval")]
+        public int TradeConfirmationCheckInterval { get; set; } = 15;
 
         [JsonProperty("auto_confirm_market_transactions")]
         public bool AutoConfirmMarketTransactions { get; set; } = false;
@@ -49,7 +47,7 @@ namespace Steam_Desktop_Authenticator
         public bool AutoConfirmTrades { get; set; } = false;
 
         [JsonProperty("minimize_to_tray")]
-        public bool MinimizeToTray { get; set; } = false;
+        public bool MinimizeToTray { get; set; } = true;
 
         [JsonProperty("check_for_updates")]
         public bool CheckForUpdates { get; set; } = true;
@@ -76,26 +74,7 @@ namespace Steam_Desktop_Authenticator
 
         public static string GetExecutableDir()
         {
-            string dir = AppContext.BaseDirectory;
-            if (string.IsNullOrEmpty(dir)) 
-            {
-                dir = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
-            }
-
-            // Remove trailing slashes
-            dir = dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-            // If we are running inside the "bin" folder, the mafiles are actually one folder up
-            if (string.Equals(Path.GetFileName(dir), "bin", StringComparison.OrdinalIgnoreCase))
-            {
-                string parentDir = Path.GetDirectoryName(dir);
-                if (!string.IsNullOrEmpty(parentDir))
-                {
-                    return parentDir;
-                }
-            }
-
-            return dir;
+            return ApplicationPaths.InstallDirectory;
         }
 
         public static Manifest GetManifest(bool forceLoad = false)
@@ -126,9 +105,17 @@ namespace Steam_Desktop_Authenticator
             try
             {
                 string manifestContents = File.ReadAllText(manifestFile);
-                _manifest = JsonConvert.DeserializeObject<Manifest>(manifestContents);
+                JObject manifestJson = JObject.Parse(manifestContents);
+                _manifest = manifestJson.ToObject<Manifest>();
+                bool migratedLegacyTradeSettings = _manifest.MigrateLegacyTradeConfirmationSettings(manifestJson);
 
+                _manifest.NormalizeTradeConfirmationSettings();
                 _manifest.NormalizeLoginActionSettings();
+
+                if (migratedLegacyTradeSettings)
+                {
+                    _manifest.Save();
+                }
 
                 if (_manifest.Encrypted && _manifest.Entries.Count == 0)
                 {
@@ -151,10 +138,11 @@ namespace Steam_Desktop_Authenticator
             // No directory means no manifest file anyways.
             Manifest newManifest = new Manifest();
             newManifest.Encrypted = false;
-            newManifest.PeriodicCheckingInterval = 5;
-            newManifest.PeriodicChecking = false;
+            newManifest.TradeConfirmationCustomIntervalEnabled = false;
+            newManifest.TradeConfirmationCheckInterval = 15;
             newManifest.AutoConfirmMarketTransactions = false;
             newManifest.AutoConfirmTrades = false;
+            newManifest.MinimizeToTray = true;
             newManifest.LoginActionMonitoringEnabled = true;
             newManifest.LoginActionMode = LoginActionModes.Manual;
             newManifest.LoginActionAutoAllowIpEnabled = false;
@@ -534,6 +522,47 @@ namespace Steam_Desktop_Authenticator
             {
                 LoginActionAutoAllowCurrentDeviceIp = false;
             }
+        }
+
+        public void NormalizeTradeConfirmationSettings()
+        {
+            TradeConfirmationCheckInterval = Math.Clamp(TradeConfirmationCheckInterval, 3, 3600);
+        }
+
+        private bool MigrateLegacyTradeConfirmationSettings(JObject manifestJson)
+        {
+            bool hasCurrentSettings = manifestJson.Properties().Any(property =>
+                String.Equals(property.Name, "trade_confirmation_custom_interval_enabled", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(property.Name, "trade_confirmation_check_interval", StringComparison.OrdinalIgnoreCase));
+            if (hasCurrentSettings)
+            {
+                return false;
+            }
+
+            JToken periodicCheckingToken = manifestJson.GetValue("periodic_checking", StringComparison.OrdinalIgnoreCase);
+            if (periodicCheckingToken?.Type != JTokenType.Boolean)
+            {
+                return false;
+            }
+
+            TradeConfirmationCustomIntervalEnabled = periodicCheckingToken.Value<bool>();
+            if (TradeConfirmationCustomIntervalEnabled)
+            {
+                JToken legacyIntervalToken = manifestJson.GetValue("periodic_checking_interval", StringComparison.OrdinalIgnoreCase);
+                if (legacyIntervalToken?.Type == JTokenType.Integer &&
+                    Int32.TryParse(legacyIntervalToken.ToString(), out int legacyInterval))
+                {
+                    TradeConfirmationCheckInterval = legacyInterval;
+                }
+            }
+            else
+            {
+                TradeConfirmationCheckInterval = 15;
+            }
+
+            // The monitor now always scans every account, so the former
+            // periodic_checking_checkall setting intentionally has no equivalent.
+            return true;
         }
 
         public void MoveEntry(int from, int to)

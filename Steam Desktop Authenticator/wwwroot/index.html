@@ -157,16 +157,15 @@
             </header>
             <div class="glass-panel rounded-xl p-5 space-y-5">
                 <div class="flex items-start gap-3">
-                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="check-confirmations" type="checkbox"/>
-                    <label class="text-on-surface" for="check-confirmations">Periodically check for new confirmations and show a popup</label>
+                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="trade-confirmation-custom-interval-enabled" type="checkbox"/>
+                    <div>
+                        <label class="text-on-surface" for="trade-confirmation-custom-interval-enabled">Use a custom confirmation check delay</label>
+                        <p class="text-sm text-on-surface-variant mt-1">All managed accounts are checked in sequence every 15 seconds by default.</p>
+                    </div>
                 </div>
                 <div class="flex items-center gap-3 pl-8">
-                    <input class="w-20 rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2 focus:ring-primary" id="check-interval" type="number" value="5"/>
-                    <span class="text-on-surface-variant">Seconds between checking</span>
-                </div>
-                <div class="flex items-start gap-3">
-                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="check-all-accounts" type="checkbox"/>
-                    <label class="text-on-surface" for="check-all-accounts">Check all accounts for confirmations</label>
+                    <input class="w-20 rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-50" id="trade-confirmation-check-interval" type="number" min="3" max="3600" value="15" disabled/>
+                    <span class="text-on-surface-variant">Seconds between account checks (minimum 3 seconds)</span>
                 </div>
                 <div class="flex items-start gap-3">
                     <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-confirm-market" type="checkbox"/>
@@ -187,7 +186,7 @@
                         <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="login-action-monitoring-enabled" type="checkbox"/>
                         <div>
                             <label class="text-on-surface" for="login-action-monitoring-enabled">Monitor pending login requests and show notifications</label>
-                            <p class="text-sm text-on-surface-variant mt-1">Checks all accounts every 5 seconds. Monitoring never takes automatic action by default.</p>
+                            <p class="text-sm text-on-surface-variant mt-1">Monitoring never takes action unless you configure an automatic rule below.</p>
                         </div>
                     </div>
                     <div class="space-y-1">
@@ -315,6 +314,7 @@
     function switchTab(tabId) {
         document.querySelectorAll('section[id^="view-"]').forEach(s => s.classList.add('hidden'));
         document.getElementById('view-' + tabId).classList.remove('hidden');
+        window.chrome.webview.postMessage({ action: 'active_tab_changed', tabName: tabId });
 
         document.querySelectorAll('.tab-link').forEach(l => {
             const isDesktop = l.parentElement.id === 'desktop-nav';
@@ -336,10 +336,8 @@
 
         if (tabId === 'trades') {
             beginTradeLoad();
-            showSpinner();
-            window.chrome.webview.postMessage({ action: 'load_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
+            window.chrome.webview.postMessage({ action: 'load_trades_cache', accountName: document.getElementById('trade-account-select').value || 'all' });
         } else if (tabId === 'login-actions') {
-            showSpinner();
             window.chrome.webview.postMessage({ action: 'load_login_actions' });
         } else if (tabId === 'settings') {
             showSpinner();
@@ -352,6 +350,25 @@
     }
     function hideSpinner() {
         document.getElementById('global-spinner').classList.add('hidden');
+    }
+
+    let refreshSpinnerTimeout = null;
+
+    function showRefreshSpinner() {
+        showSpinner();
+        if (refreshSpinnerTimeout) clearTimeout(refreshSpinnerTimeout);
+        refreshSpinnerTimeout = setTimeout(() => {
+            refreshSpinnerTimeout = null;
+            hideSpinner();
+        }, 10000);
+    }
+
+    function hideRefreshSpinner() {
+        if (refreshSpinnerTimeout) {
+            clearTimeout(refreshSpinnerTimeout);
+            refreshSpinnerTimeout = null;
+        }
+        hideSpinner();
     }
 
     // Authenticator Actions
@@ -488,8 +505,8 @@
     // Trade Actions
     document.getElementById('btn-refresh-trades').addEventListener('click', () => {
         beginTradeLoad();
-        showSpinner();
-        window.chrome.webview.postMessage({ action: 'load_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
+        showRefreshSpinner();
+        window.chrome.webview.postMessage({ action: 'refresh_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
     });
     document.getElementById('trade-account-select').addEventListener('change', (e) => {
         const selectedAccount = e.target.value;
@@ -502,8 +519,7 @@
             window.chrome.webview.postMessage({ action: 'switch_account', accountName: selectedAccount });
         }
         beginTradeLoad();
-        showSpinner();
-        window.chrome.webview.postMessage({ action: 'load_trades', accountName: selectedAccount });
+        window.chrome.webview.postMessage({ action: 'load_trades_cache', accountName: selectedAccount });
     });
 
     function beginTradeLoad() {
@@ -512,9 +528,15 @@
         error.classList.add('hidden');
     }
     
-    function loadConfirmations(confirmsStr, errorMessage) {
-        hideSpinner();
-        const confirms = JSON.parse(confirmsStr || '[]');
+    let latestTradeRevision = 0;
+
+    function loadConfirmations(confirms, errorMessage, revision = 0, selection = 'all') {
+        const selectedAccount = document.getElementById('trade-account-select').value || 'all';
+        if (selection !== selectedAccount) return;
+        if (revision < latestTradeRevision) return;
+        latestTradeRevision = revision;
+        hideRefreshSpinner();
+        confirms = Array.isArray(confirms) ? confirms : [];
         const container = document.getElementById('trades-container');
         const emptyState = document.getElementById('empty-state');
         const count = document.getElementById('trade-confirmations-count');
@@ -608,10 +630,11 @@
     let loginAutoAllowCurrentDeviceIp = false;
     let loginAutoAllowAdditionalIp = '';
     let recentLoginAttemptOpener = null;
+    let latestLoginRevision = 0;
 
     document.getElementById('btn-refresh-login-actions').addEventListener('click', () => {
-        showSpinner();
-        window.chrome.webview.postMessage({ action: 'load_login_actions' });
+        showRefreshSpinner();
+        window.chrome.webview.postMessage({ action: 'refresh_login_actions' });
     });
     document.getElementById('login-account-select').addEventListener('change', event => {
         const selectedAccount = event.target.value;
@@ -875,7 +898,10 @@
     }
 
     function loadLoginActions(data) {
-        hideSpinner();
+        const revision = Number(data && data.revision) || 0;
+        if (revision < latestLoginRevision) return;
+        latestLoginRevision = revision;
+        hideRefreshSpinner();
         if (data && data.loading) return;
         loginRequests = data && Array.isArray(data.requests) ? data.requests : [];
         loginUnavailableAccounts = data && Array.isArray(data.unavailableAccounts) ? data.unavailableAccounts : [];
@@ -914,14 +940,21 @@
     document.getElementById('login-action-mode').addEventListener('change', () => updateLoginAutoAllowIpSettings());
     document.getElementById('login-action-auto-allow-ip-enabled').addEventListener('change', updateLoginAutoAllowIpSettings);
 
+    function updateTradeConfirmationIntervalSettings() {
+        const customDelay = document.getElementById('trade-confirmation-custom-interval-enabled');
+        const interval = document.getElementById('trade-confirmation-check-interval');
+        interval.disabled = !customDelay.checked;
+    }
+
+    document.getElementById('trade-confirmation-custom-interval-enabled').addEventListener('change', updateTradeConfirmationIntervalSettings);
+
     // Settings Actions
     document.getElementById('btn-save-settings').addEventListener('click', () => {
         showSpinner();
         window.chrome.webview.postMessage({
             action: 'save_settings',
-            checkConfirmations: document.getElementById('check-confirmations').checked,
-            checkInterval: parseInt(document.getElementById('check-interval').value) || 5,
-            checkAllAccounts: document.getElementById('check-all-accounts').checked,
+            tradeConfirmationCustomIntervalEnabled: document.getElementById('trade-confirmation-custom-interval-enabled').checked,
+            tradeConfirmationCheckInterval: parseInt(document.getElementById('trade-confirmation-check-interval').value) || 15,
             autoConfirmMarket: document.getElementById('auto-confirm-market').checked,
             autoConfirmTrades: document.getElementById('auto-confirm-trades').checked,
             minimizeToTray: document.getElementById('close-to-tray').checked,
@@ -936,9 +969,8 @@
 
     function loadSettings(settings) {
         hideSpinner();
-        document.getElementById('check-confirmations').checked = settings.checkConfirmations;
-        document.getElementById('check-interval').value = settings.checkInterval;
-        document.getElementById('check-all-accounts').checked = settings.checkAllAccounts;
+        document.getElementById('trade-confirmation-custom-interval-enabled').checked = !!settings.tradeConfirmationCustomIntervalEnabled;
+        document.getElementById('trade-confirmation-check-interval').value = settings.tradeConfirmationCheckInterval || 15;
         document.getElementById('auto-confirm-market').checked = settings.autoConfirmMarket;
         document.getElementById('auto-confirm-trades').checked = settings.autoConfirmTrades;
         document.getElementById('close-to-tray').checked = settings.minimizeToTray;
@@ -948,6 +980,7 @@
         document.getElementById('login-action-auto-allow-ip-enabled').checked = !!settings.loginActionAutoAllowIpEnabled;
         document.getElementById('login-action-auto-allow-current-device-ip').checked = !!settings.loginActionAutoAllowCurrentDeviceIp;
         document.getElementById('login-action-auto-allow-ip').value = settings.loginActionAutoAllowIp || '';
+        updateTradeConfirmationIntervalSettings();
         updateLoginAutoAllowIpSettings();
     }
 

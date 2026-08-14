@@ -58,7 +58,16 @@ namespace Steam_Desktop_Authenticator
             this.Controls.Add(webView);
             webView.BringToFront();
 
-            await webView.EnsureCoreWebView2Async(null);
+            try
+            {
+                await webView.EnsureCoreWebView2Async(await WebViewEnvironmentProvider.GetAsync());
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Input UI", ex, "The WebView2 input dialog could not be initialized.");
+                lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                return;
+            }
 
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
@@ -89,6 +98,12 @@ namespace Steam_Desktop_Authenticator
 
             webView.NavigationCompleted += (sender, args) =>
             {
+                if (!args.IsSuccess)
+                {
+                    lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                    return;
+                }
+
                 loadingPanel.Visible = false;
                 foreach (Control c in this.Controls)
                 {
@@ -102,7 +117,7 @@ namespace Steam_Desktop_Authenticator
                 webView.CoreWebView2.ExecuteScriptAsync($"setupInput('{jsLabel}', {isPassStr})");
             };
 
-            string htmlPath = System.IO.Path.Combine(Application.StartupPath, "wwwroot", "input.html");
+            string htmlPath = System.IO.Path.Combine(ApplicationPaths.WebRootDirectory, "input.html");
             webView.Source = new Uri(htmlPath);
         }
 
