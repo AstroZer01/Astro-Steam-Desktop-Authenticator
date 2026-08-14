@@ -7,7 +7,16 @@ namespace Steam_Desktop_Authenticator
     {
         public const string DataDirectoryEnvironmentVariable = "ASDA_DATA_DIRECTORY";
 
-        private static readonly string[] RequiredWebResourceNames = { "index.html", "login.html", "input.html" };
+        private static readonly string[] RequiredWebResourceNames =
+        {
+            "index.html",
+            "login.html",
+            "input.html",
+            Path.Combine("assets", "css", "app.css"),
+            Path.Combine("assets", "fonts", "inter-latin.woff2"),
+            Path.Combine("assets", "fonts", "jetbrains-mono-latin.woff2"),
+            Path.Combine("assets", "icons", "check.svg")
+        };
 
         public static string InstallDirectory => Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
 
@@ -15,7 +24,10 @@ namespace Steam_Desktop_Authenticator
 
         public static string UiDirectory => Path.Combine(InstallDirectory, "app", "ui");
 
-        public static string WebViewUserDataDirectory => Path.Combine(InstallDirectory, "app", "webview2");
+        public static string WebViewUserDataDirectory => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Astro Steam Desktop Authenticator",
+            "WebView2");
 
         private static string ResolveDataDirectory()
         {

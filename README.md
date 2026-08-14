@@ -54,7 +54,7 @@ The committed UI assets are included in a normal .NET publish, so Node.js is not
 - Windows 10 or later, 64-bit
 - **[.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)**
 
-To run the built application, install the .NET 8 Desktop Runtime if the SDK is not installed. Windows 10/11 normally already includes the Microsoft Edge WebView2 Runtime.
+To run the built application, install the .NET 8 Desktop Runtime if the SDK is not installed, and install the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/#download-section).
 
 ### Build a release package from Command Prompt
 
@@ -79,7 +79,7 @@ To run the built application, install the .NET 8 Desktop Runtime if the SDK is n
    publish\ASDA\Steam Desktop Authenticator.exe
    ```
 
-Keep the complete `publish\ASDA` folder together. The root executable is the Launcher; it starts the real app from `publish\ASDA\bin`. The `bin` folder contains the WebView files and runtime dependencies, while the application creates `publish\ASDA\maFiles` beside the Launcher on first launch. Back up that `maFiles` folder securely.
+Keep the complete `publish\ASDA` folder together in a folder your Windows account can write to; do not install this portable package under `Program Files`. The root executable is the Launcher; it starts the real app from `publish\ASDA\bin`. The `bin` folder contains the WebView files and runtime dependencies, while the application creates `publish\ASDA\maFiles` beside the Launcher on first launch. Back up that `maFiles` folder securely.
 
 #### Reusable personal build script
 

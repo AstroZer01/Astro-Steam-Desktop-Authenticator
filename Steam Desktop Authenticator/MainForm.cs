@@ -918,7 +918,7 @@ namespace Steam_Desktop_Authenticator
                     lblStatus.Text = "";
                     AstroMessageBox.Show("Your session for account " + account.AccountName + " has expired. You will be prompted to login again.", "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     PromptRefreshLogin(account);
-                    pendingTradeConfirmationCounts.Remove(account.Session.SteamID);
+                    InvalidateTradeConfirmationCache(account);
                     UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
                     return;
                 }
@@ -1339,6 +1339,23 @@ namespace Steam_Desktop_Authenticator
             loadedTradeConfirmationAccounts.Add(account.Session.SteamID);
         }
 
+        private void InvalidateTradeConfirmationCache(SteamGuardAccount account)
+        {
+            if (account?.Session == null)
+                return;
+
+            ulong steamId = account.Session.SteamID;
+            pendingTradeConfirmationCounts.Remove(steamId);
+            loadedTradeConfirmationAccounts.Remove(steamId);
+            foreach (string confirmationKey in loadedTradeConfirmations
+                .Where(entry => entry.Value.Account?.Session?.SteamID == steamId)
+                .Select(entry => entry.Key)
+                .ToArray())
+            {
+                loadedTradeConfirmations.Remove(confirmationKey);
+            }
+        }
+
         private bool IsTradeCacheCompleteForSelection()
         {
             if (allAccounts == null || allAccounts.Length == 0)
@@ -1412,6 +1429,16 @@ namespace Steam_Desktop_Authenticator
                 RecordRecentLoginAttempt(pendingLoginRequests[staleKey], "Expired or handled elsewhere");
                 pendingLoginRequests.Remove(staleKey);
                 PruneLoginRequestBookkeeping(staleKey);
+            }
+
+            foreach (string staleRequestKey in completedAutomatedLoginActions
+                .Where(actionKey => actionKey.StartsWith(accountRequestPrefix, StringComparison.Ordinal) &&
+                    !fetchedRequestKeys.Contains(actionKey.Split('|')[0]))
+                .Select(actionKey => actionKey.Split('|')[0])
+                .Distinct()
+                .ToList())
+            {
+                PruneLoginRequestBookkeeping(staleRequestKey);
             }
         }
 
@@ -2412,6 +2439,7 @@ namespace Steam_Desktop_Authenticator
                         if (account.Session.IsRefreshTokenExpired())
                         {
                             unavailableAccounts.Add(account.AccountName + " needs you to sign in again.");
+                            InvalidateTradeConfirmationCache(account);
                             continue;
                         }
                         Confirmation[] accountConfirmations = await FetchTradeConfirmationsForPageAsync(account);
@@ -2436,6 +2464,7 @@ namespace Steam_Desktop_Authenticator
                     : unavailableAccounts.Count == 0
                         ? null
                         : "Some account confirmations could not be loaded: " + String.Join(" ", unavailableAccounts);
+                UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
                 await PublishCachedTradesAsync(errorMessage, selectionToLoad);
             }
             catch (Exception ex)

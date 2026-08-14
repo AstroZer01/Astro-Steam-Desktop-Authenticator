@@ -5,6 +5,10 @@ if git diff --cached --quiet -- \
   "Steam Desktop Authenticator/tailwind.config.js" \
   "Steam Desktop Authenticator/ui/tailwind-input.css" \
   ':(glob)Steam Desktop Authenticator/ui/**/*.html'; then
+  if ! git diff --cached --quiet -- "Steam Desktop Authenticator/ui/assets/css/app.css"; then
+    echo "Stage the UI source changes with app.css so the stylesheet matches the committed source." >&2
+    exit 1
+  fi
   exit 0
 fi
 

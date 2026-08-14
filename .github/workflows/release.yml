@@ -112,7 +112,11 @@ jobs:
           "publish\ASDA\bin\runtimes",
           "publish\ASDA\bin\app\ui\index.html",
           "publish\ASDA\bin\app\ui\login.html",
-          "publish\ASDA\bin\app\ui\input.html"
+          "publish\ASDA\bin\app\ui\input.html",
+          "publish\ASDA\bin\app\ui\assets\css\app.css",
+          "publish\ASDA\bin\app\ui\assets\fonts\inter-latin.woff2",
+          "publish\ASDA\bin\app\ui\assets\fonts\jetbrains-mono-latin.woff2",
+          "publish\ASDA\bin\app\ui\assets\icons\check.svg"
         )
         $missingPaths = $requiredPaths | Where-Object { -not (Test-Path $_) }
         if ($missingPaths) {
