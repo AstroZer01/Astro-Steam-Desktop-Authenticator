@@ -45,32 +45,70 @@ All credit for the original design and implementation goes to Jessecar96 and the
 - Added multi-account trade-confirmation monitoring and notification support.
 - Added optional diagnostic logging so users can view and report issues.
 
-## How to Compile / Build
+## Build from Source on Windows
 
-If you prefer to compile the program from source rather than downloading the pre-built binaries, follow these steps:
+The committed UI assets are included in a normal .NET publish, so Node.js is not required for an ordinary release build.
 
-1. **Install Prerequisites**: You must have the **[.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)** installed on your machine.
-2. **Clone the Repository**:
-   ```bash
+### Prerequisites
+
+- Windows 10 or later, 64-bit
+- **[.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)**
+
+To run the built application, install the .NET 8 Desktop Runtime if the SDK is not installed. Windows 10/11 normally already includes the Microsoft Edge WebView2 Runtime.
+
+### Build a release package from Command Prompt
+
+1. Clone the repository and open the cloned folder:
+
+   ```powershell
    git clone https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator.git
    cd Astro-Steam-Desktop-Authenticator
    ```
-3. **Publish the Application**:
-   Create the same portable release layout used by the release workflow:
-   ```bash
-   dotnet publish "Steam Desktop Authenticator/Steam Desktop Authenticator.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o publish/ASDA
+
+2. From the repository root, run these commands in Command Prompt:
+
+   ```bat
+   if exist "publish\ASDA" rmdir /s /q "publish\ASDA"
+   dotnet publish "Steam Desktop Authenticator\Steam Desktop Authenticator.csproj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o "publish\ASDA"
    ```
-   *Alternatively, open `SteamDesktopAuthenticator.sln` in **Visual Studio 2022**, right-click the **Steam Desktop Authenticator** project, and choose **Publish** (not Build). Use a Folder target with the same Windows x64, framework-dependent, single-file settings and output folder shown above.*
-4. **Run the Application**: Start `publish/ASDA/Steam Desktop Authenticator.exe`. Keep the complete `publish/ASDA` folder together; it contains the WebView files and runtime dependencies. The `maFiles` folder is created there on first launch and stores your local account data.
+
+   The first command removes only the previous `publish\ASDA` package, preventing old files from being mixed into a new build. Close any copy of the app running from that folder before rebuilding so Windows can replace its executable. `dotnet publish` restores the required Windows x64 dependencies automatically.
+
+3. When `dotnet publish` completes successfully, start:
+
+   ```text
+   publish\ASDA\Steam Desktop Authenticator.exe
+   ```
+
+Keep the complete `publish\ASDA` folder together. It contains the WebView files and runtime dependencies. The application creates its `maFiles` folder there on first launch; it holds your local account data and should be backed up securely.
+
+### Build with Visual Studio 2022
+
+1. Open `SteamDesktopAuthenticator.sln`.
+2. Select the `Release` configuration.
+3. In Solution Explorer, right-click **Steam Desktop Authenticator** — not **Launcher** — then choose **Publish**.
+4. Select a **Folder** target. Use `publish\ASDA` as the target location and select **Windows x64** with **Framework-dependent** deployment.
+5. In publish settings, enable **Produce single file** and leave trimming disabled, then select **Publish**.
+
+Visual Studio's regular **Build** command places development output under `bin`; use **Publish** when you want the portable release folder described above.
 
 ### UI stylesheet for contributors
 
-The WebView UI ships with committed, local CSS and fonts. Install Node.js 22 or later, then run `npm ci` once after cloning; this enables the repository's pre-commit hook.
+The WebView UI ships with committed, local CSS and fonts. Normal .NET builds use the committed `ui/assets/css/app.css` and do not require Node.js.
+
+After changing an HTML template, `tailwind.config.js`, or `ui/tailwind-input.css`, install **[Node.js 22 LTS](https://nodejs.org/)** and run:
+
+```powershell
+npm ci # once after cloning or when package-lock.json changes
+npm run build:ui
+```
+
+Commit the resulting `Steam Desktop Authenticator/ui/assets/css/app.css` with the UI change.
 
 - `npm run build:ui` regenerates `Steam Desktop Authenticator/ui/assets/css/app.css`.
 - `npm run check:ui` regenerates the stylesheet and fails if the generated file was not committed.
 
-The hook runs only when staged UI templates, the Tailwind configuration, or the Tailwind input stylesheet change. CI verifies the same invariant, and the release workflow regenerates and commits the stylesheet before publishing.
+The hook runs only when staged UI templates, the Tailwind configuration, or the Tailwind input stylesheet change. CI verifies the same invariant, and the release workflow regenerates the stylesheet before publishing.
 
 
 <p align="center">
