@@ -9,7 +9,7 @@ namespace Steam_Desktop_Authenticator
 
         public static string InstallDirectory => Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
 
-        public static string WebRootDirectory => Path.Combine(InstallDirectory, "app", "wwwroot");
+        public static string UiDirectory => Path.Combine(InstallDirectory, "app", "ui");
 
         public static string WebViewUserDataDirectory => Path.Combine(InstallDirectory, "app", "webview2");
 
@@ -17,7 +17,7 @@ namespace Steam_Desktop_Authenticator
         {
             foreach (string resourceName in RequiredWebResourceNames)
             {
-                string resourcePath = Path.Combine(WebRootDirectory, resourceName);
+                string resourcePath = Path.Combine(UiDirectory, resourceName);
                 if (!File.Exists(resourcePath))
                 {
                     missingResource = resourcePath;

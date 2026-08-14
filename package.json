@@ -2,8 +2,8 @@
   "name": "astro-steam-desktop-authenticator-ui",
   "private": true,
   "scripts": {
-    "build:ui": "cd \"Steam Desktop Authenticator\" && tailwindcss -c tailwind.config.js -i ui/tailwind-input.css -o wwwroot/assets/css/app.css --minify",
-    "check:ui": "npm run build:ui && git diff --exit-code -- \"Steam Desktop Authenticator/wwwroot/assets/css/app.css\"",
+    "build:ui": "cd \"Steam Desktop Authenticator\" && tailwindcss -c tailwind.config.js -i ui/tailwind-input.css -o ui/assets/css/app.css --minify",
+    "check:ui": "npm run build:ui && git diff --exit-code -- \"Steam Desktop Authenticator/ui/assets/css/app.css\"",
     "prepare": "git config --local core.hooksPath .githooks"
   },
   "devDependencies": {

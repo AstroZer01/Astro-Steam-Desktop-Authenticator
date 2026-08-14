@@ -4,17 +4,17 @@ set -eu
 if git diff --cached --quiet -- \
   "Steam Desktop Authenticator/tailwind.config.js" \
   "Steam Desktop Authenticator/ui/tailwind-input.css" \
-  ':(glob)Steam Desktop Authenticator/wwwroot/**/*.html'; then
+  ':(glob)Steam Desktop Authenticator/ui/**/*.html'; then
   exit 0
 fi
 
 if ! git diff --quiet -- \
   "Steam Desktop Authenticator/tailwind.config.js" \
   "Steam Desktop Authenticator/ui/tailwind-input.css" \
-  ':(glob)Steam Desktop Authenticator/wwwroot/**/*.html'; then
+  ':(glob)Steam Desktop Authenticator/ui/**/*.html'; then
   echo "Stage or stash all UI source changes before committing so app.css is generated from the staged source." >&2
   exit 1
 fi
 
 npm run build:ui
-git add -- "Steam Desktop Authenticator/wwwroot/assets/css/app.css"
+git add -- "Steam Desktop Authenticator/ui/assets/css/app.css"

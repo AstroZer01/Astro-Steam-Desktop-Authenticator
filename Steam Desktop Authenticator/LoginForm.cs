@@ -117,7 +117,7 @@ namespace Steam_Desktop_Authenticator
                 }
             };
 
-            string htmlPath = System.IO.Path.Combine(ApplicationPaths.WebRootDirectory, "login.html");
+            string htmlPath = System.IO.Path.Combine(ApplicationPaths.UiDirectory, "login.html");
             webView.Source = new Uri(htmlPath);
         }
 

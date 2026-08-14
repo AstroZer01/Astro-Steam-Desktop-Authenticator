@@ -1,13 +1,13 @@
 /**
- * Regenerate wwwroot/assets/css/app.css with:
- *   npx --yes --package tailwindcss@3.4.17 --package @tailwindcss/forms@0.5.10 tailwindcss -c tailwind.config.js -i ui/tailwind-input.css -o wwwroot/assets/css/app.css --minify
+ * Regenerate ui/assets/css/app.css with:
+ *   npx --yes --package tailwindcss@3.4.17 --package @tailwindcss/forms@0.5.10 tailwindcss -c tailwind.config.js -i ui/tailwind-input.css -o ui/assets/css/app.css --minify
  *
  * The generated CSS is committed so normal Visual Studio/MSBuild builds do not require Node.js.
  */
 const defaultTheme = require("tailwindcss/defaultTheme");
 
 module.exports = {
-  content: ["./wwwroot/**/*.html"],
+  content: ["./ui/**/*.html"],
   darkMode: "class",
   theme: {
     extend: {

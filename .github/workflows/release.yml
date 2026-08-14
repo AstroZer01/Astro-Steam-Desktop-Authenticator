@@ -55,7 +55,7 @@ jobs:
         npm run build:ui
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add "Steam Desktop Authenticator\wwwroot\assets\css\app.css"
+        git add "Steam Desktop Authenticator\ui\assets\css\app.css"
         if (git diff --cached --quiet) {
             Write-Host "Local UI stylesheet is current."
         } else {
@@ -108,9 +108,9 @@ jobs:
           "publish\ASDA\Steam Desktop Authenticator.exe",
           "publish\ASDA\WebView2Loader.dll",
           "publish\ASDA\runtimes",
-          "publish\ASDA\app\wwwroot\index.html",
-          "publish\ASDA\app\wwwroot\login.html",
-          "publish\ASDA\app\wwwroot\input.html"
+          "publish\ASDA\app\ui\index.html",
+          "publish\ASDA\app\ui\login.html",
+          "publish\ASDA\app\ui\input.html"
         )
         $missingPaths = $requiredPaths | Where-Object { -not (Test-Path $_) }
         if ($missingPaths) {

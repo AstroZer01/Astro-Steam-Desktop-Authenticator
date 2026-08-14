@@ -67,7 +67,7 @@ If you prefer to compile the program from source rather than downloading the pre
 
 The WebView UI ships with committed, local CSS and fonts. Install Node.js 22 or later, then run `npm ci` once after cloning; this enables the repository's pre-commit hook.
 
-- `npm run build:ui` regenerates `Steam Desktop Authenticator/wwwroot/assets/css/app.css`.
+- `npm run build:ui` regenerates `Steam Desktop Authenticator/ui/assets/css/app.css`.
 - `npm run check:ui` regenerates the stylesheet and fails if the generated file was not committed.
 
 The hook runs only when staged UI templates, the Tailwind configuration, or the Tailwind input stylesheet change. CI verifies the same invariant, and the release workflow regenerates and commits the stylesheet before publishing.
