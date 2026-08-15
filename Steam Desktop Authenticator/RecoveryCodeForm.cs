@@ -15,6 +15,12 @@ namespace Steam_Desktop_Authenticator
         private readonly Timer continueTimer;
         private readonly Stopwatch continueStopwatch = new Stopwatch();
         private Button continueButton;
+        private Label statusLabel;
+        private Label recoveryCodeLabel;
+        private Label recoveryCodeValueLabel;
+        private Label warningLabel;
+        private Label backupRequirementLabel;
+        private Button downloadButton;
         private bool continuationAllowed;
 
         public RecoveryCodeForm(SteamGuardAccount account, string statusMessage, bool requireBackupBeforeContinue = false)
@@ -23,11 +29,9 @@ namespace Steam_Desktop_Authenticator
             this.requireBackupBeforeContinue = requireBackupBeforeContinue;
 
             Text = "Steam Guard Recovery Code";
-            Size = new Size(500, 330);
             MinimumSize = new Size(500, 330);
-            MaximumSize = new Size(500, 330);
             StartPosition = FormStartPosition.CenterParent;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
+            FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = false;
             MinimizeBox = false;
             ControlBox = !requireBackupBeforeContinue;
@@ -36,17 +40,18 @@ namespace Steam_Desktop_Authenticator
             ForeColor = AstroTheme.OnSurface;
             AstroTheme.ApplyDarkTitleBar(this);
 
-            Label message = new Label
+            AutoScroll = true;
+            statusLabel = new Label
             {
                 Text = statusMessage,
-                AutoSize = false,
+                AutoSize = true,
                 Location = new Point(20, 20),
-                Size = new Size(440, 42),
+                MaximumSize = new Size(440, 0),
                 Font = new Font("Segoe UI", 10f),
                 ForeColor = AstroTheme.OnSurface
             };
 
-            Label codeLabel = new Label
+            recoveryCodeLabel = new Label
             {
                 Text = "Recovery code for " + account.AccountName + ":",
                 AutoSize = true,
@@ -55,7 +60,7 @@ namespace Steam_Desktop_Authenticator
                 ForeColor = AstroTheme.OnSurfaceVariant
             };
 
-            Label code = new Label
+            recoveryCodeValueLabel = new Label
             {
                 Text = account.RevocationCode,
                 AutoSize = false,
@@ -67,36 +72,36 @@ namespace Steam_Desktop_Authenticator
                 ForeColor = AstroTheme.Primary
             };
 
-            Label warning = new Label
+            warningLabel = new Label
             {
                 Text = "Keep this code private. Steam may require it to recover your account or move Steam Guard to another device.",
-                AutoSize = false,
+                AutoSize = true,
                 Location = new Point(20, 148),
-                Size = new Size(440, 34),
+                MaximumSize = new Size(440, 0),
                 Font = new Font("Segoe UI", 9f),
                 ForeColor = AstroTheme.OnSurfaceVariant
             };
 
-            Label backupRequirement = new Label
+            backupRequirementLabel = new Label
             {
                 Text = requireBackupBeforeContinue
                     ? "For safety, download the recovery code to continue, or wait 60 seconds."
                     : "Keep this code private and stored somewhere safe.",
-                AutoSize = false,
+                AutoSize = true,
                 Location = new Point(20, 188),
-                Size = new Size(440, 20),
+                MaximumSize = new Size(440, 0),
                 Font = new Font("Segoe UI", 9f),
                 ForeColor = AstroTheme.Primary
             };
 
-            Button download = new Button
+            downloadButton = new Button
             {
                 Text = "Download recovery code",
                 Location = new Point(20, 222),
                 Size = new Size(230, 34)
             };
-            AstroTheme.StylePrimaryButton(download);
-            download.Click += DownloadRecoveryCode_Click;
+            AstroTheme.StylePrimaryButton(downloadButton);
+            downloadButton.Click += DownloadRecoveryCode_Click;
 
             continueButton = new Button
             {
@@ -108,14 +113,15 @@ namespace Steam_Desktop_Authenticator
             };
             AstroTheme.StyleSecondaryButton(continueButton);
 
-            Controls.Add(message);
-            Controls.Add(codeLabel);
-            Controls.Add(code);
-            Controls.Add(warning);
-            Controls.Add(backupRequirement);
-            Controls.Add(download);
+            Controls.Add(statusLabel);
+            Controls.Add(recoveryCodeLabel);
+            Controls.Add(recoveryCodeValueLabel);
+            Controls.Add(warningLabel);
+            Controls.Add(backupRequirementLabel);
+            Controls.Add(downloadButton);
             Controls.Add(continueButton);
             AcceptButton = continueButton;
+            LayoutRecoveryControls();
 
             continuationAllowed = !requireBackupBeforeContinue;
             continueTimer = new Timer { Interval = 250 };
@@ -124,6 +130,34 @@ namespace Steam_Desktop_Authenticator
             Activated += RecoveryCodeForm_Activated;
             FormClosing += RecoveryCodeForm_FormClosing;
             FormClosed += RecoveryCodeForm_FormClosed;
+            Resize += (sender, args) => LayoutRecoveryControls();
+        }
+
+        private void LayoutRecoveryControls()
+        {
+            int contentWidth = Math.Max(300, ClientSize.Width - 40);
+            statusLabel.MaximumSize = new Size(contentWidth, 0);
+            warningLabel.MaximumSize = new Size(contentWidth, 0);
+            backupRequirementLabel.MaximumSize = new Size(contentWidth, 0);
+
+            int nextTop = 20;
+            statusLabel.Location = new Point(20, nextTop);
+            nextTop = statusLabel.Bottom + 12;
+            recoveryCodeLabel.Location = new Point(20, nextTop);
+            nextTop = recoveryCodeLabel.Bottom + 8;
+            recoveryCodeValueLabel.Location = new Point(20, nextTop);
+            recoveryCodeValueLabel.Size = new Size(contentWidth, 36);
+            nextTop = recoveryCodeValueLabel.Bottom + 11;
+            warningLabel.Location = new Point(20, nextTop);
+            nextTop = warningLabel.Bottom + 10;
+            backupRequirementLabel.Location = new Point(20, nextTop);
+            nextTop = backupRequirementLabel.Bottom + 14;
+            downloadButton.Location = new Point(20, nextTop);
+            continueButton.Location = new Point(Math.Max(20, ClientSize.Width - 20 - continueButton.Width), nextTop);
+
+            int requiredHeight = continueButton.Bottom + 50;
+            if (MinimumSize.Height < requiredHeight)
+                MinimumSize = new Size(MinimumSize.Width, requiredHeight);
         }
 
         private void DownloadRecoveryCode_Click(object sender, EventArgs e)

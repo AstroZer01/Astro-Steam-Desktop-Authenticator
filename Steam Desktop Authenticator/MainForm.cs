@@ -654,7 +654,7 @@ namespace Steam_Desktop_Authenticator
                 string curPassKey;
                 using (InputForm currentPassKeyForm = new InputForm("Enter current passkey to remove encryption", true))
                 {
-                    currentPassKeyForm.ShowDialog(this);
+                    currentPassKeyForm.ShowInputDialog(this);
                     if (currentPassKeyForm.Canceled)
                         return;
 
@@ -766,7 +766,11 @@ namespace Steam_Desktop_Authenticator
             {
                 try
                 {
-                    await currentAccount.Session.RefreshAccessToken();
+                    await RunSteamAccountOperationAsync(currentAccount, async () =>
+                    {
+                        await currentAccount.Session.RefreshAccessToken();
+                        return true;
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -797,7 +801,7 @@ namespace Steam_Desktop_Authenticator
                 string enteredCode;
                 using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", currentAccount.AccountName, confCode)))
                 {
-                    confirmationDialog.ShowDialog(this);
+                    confirmationDialog.ShowInputDialog(this);
                     if (confirmationDialog.Canceled)
                         return;
 
@@ -810,7 +814,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                bool success = await currentAccount.DeactivateAuthenticator(scheme);
+                bool success = await RunSteamAccountOperationAsync(currentAccount, () => currentAccount.DeactivateAuthenticator(scheme));
                 if (success)
                 {
                     AstroMessageBox.Show(String.Format("Steam Guard {0}. maFile will be deleted after hitting okay. If you need to make a backup, now's the time.", (scheme == 2 ? "removed completely" : "switched to emails")));
@@ -907,7 +911,11 @@ namespace Steam_Desktop_Authenticator
                 {
                     try
                     {
-                        await account.Session.RefreshAccessToken();
+                        await RunSteamAccountOperationAsync(account, async () =>
+                        {
+                            await account.Session.RefreshAccessToken();
+                            return true;
+                        });
                     }
                     catch (Exception ex)
                     {
@@ -921,7 +929,7 @@ namespace Steam_Desktop_Authenticator
                 string enteredConfirmationCode;
                 using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", account.AccountName, confirmationCode)))
                 {
-                    confirmationDialog.ShowDialog(this);
+                    confirmationDialog.ShowInputDialog(this);
                     if (confirmationDialog.Canceled)
                         return;
 
@@ -934,7 +942,8 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                if (!await account.DeactivateAuthenticator(2))
+                bool deactivated = await RunSteamAccountOperationAsync(account, () => account.DeactivateAuthenticator(2));
+                if (!deactivated)
                 {
                     string failureMessage = String.IsNullOrWhiteSpace(account.LastAuthenticatorOperationError)
                         ? "Steam Guard removal could not be verified."

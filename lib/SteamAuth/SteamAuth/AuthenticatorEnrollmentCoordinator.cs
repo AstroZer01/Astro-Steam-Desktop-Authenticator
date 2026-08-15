@@ -77,7 +77,7 @@ namespace SteamAuth
                     return new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.AuthenticatorPresent);
 
                 if (linkResult == AuthenticatorLinker.LinkResult.MustProvidePhoneNumber)
-                    return await EnrollPhoneAsync(cancellationToken);
+                    return await EnrollPhoneAsync(cancellationToken, new PhoneEnrollmentState());
 
                 return FailedLinkRequest();
             }
@@ -92,14 +92,15 @@ namespace SteamAuth
             }
         }
 
-        private async Task<AuthenticatorEnrollmentOutcome> EnrollPhoneAsync(CancellationToken cancellationToken)
+        private async Task<AuthenticatorEnrollmentOutcome> EnrollPhoneAsync(CancellationToken cancellationToken, PhoneEnrollmentState enrollmentState)
         {
             bool previousCodeWasInvalid = false;
-            for (int attempt = 0; attempt < MaxPhoneEnrollmentAttempts; attempt++)
+            while (enrollmentState.Attempts < MaxPhoneEnrollmentAttempts)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (attempt > 0)
+                if (enrollmentState.Attempts > 0)
                     await Task.Delay(PhoneEnrollmentRetryDelay, cancellationToken);
+                enrollmentState.Attempts++;
                 AuthenticatorLinker.PhoneLinkResult phoneResult = await linker.AddPhoneNumber(cancellationToken);
                 switch (phoneResult)
                 {
@@ -109,7 +110,7 @@ namespace SteamAuth
                             return new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.Canceled);
 
                         if (phone.ContinueWithoutPhone)
-                            return await RetryWithoutPhoneAsync(cancellationToken);
+                            return await RetryWithoutPhoneAsync(cancellationToken, enrollmentState);
 
                         if (string.IsNullOrWhiteSpace(phone.PhoneNumber))
                             return new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.Canceled);
@@ -160,7 +161,7 @@ namespace SteamAuth
             return FailedLinkRequest();
         }
 
-        private async Task<AuthenticatorEnrollmentOutcome> RetryWithoutPhoneAsync(CancellationToken cancellationToken)
+        private async Task<AuthenticatorEnrollmentOutcome> RetryWithoutPhoneAsync(CancellationToken cancellationToken, PhoneEnrollmentState enrollmentState)
         {
             AuthenticatorLinker.LinkResult result = await linker.AddAuthenticator(cancellationToken);
             if (result == AuthenticatorLinker.LinkResult.AwaitingFinalization)
@@ -174,7 +175,7 @@ namespace SteamAuth
                 if (!interaction.ConfirmPhoneRequired())
                     return new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.Canceled);
 
-                return await EnrollPhoneAsync(cancellationToken);
+                return await EnrollPhoneAsync(cancellationToken, enrollmentState);
             }
 
             return FailedLinkRequest();
@@ -190,6 +191,11 @@ namespace SteamAuth
         private static AuthenticatorEnrollmentOutcome Failed(string message)
         {
             return new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.Failed, message);
+        }
+
+        private sealed class PhoneEnrollmentState
+        {
+            public int Attempts { get; set; }
         }
     }
 }

@@ -126,6 +126,8 @@ namespace SteamAuth
                                 throw new HttpRequestException("Steam redirected the request too many times.");
                             if (!Uri.TryCreate(requestUri, response.Headers.Location, out Uri redirectedUri))
                                 throw new HttpRequestException("Steam returned an invalid redirect location.");
+                            if (requestUri.Scheme == Uri.UriSchemeHttps && redirectedUri.Scheme != Uri.UriSchemeHttps)
+                                throw new HttpRequestException("Steam redirected the request to an insecure location.");
 
                             bool preservesMethod = (int)response.StatusCode == 307 || (int)response.StatusCode == 308;
                             if (!preservesMethod && requestMethod != HttpMethod.Get)
@@ -205,7 +207,16 @@ namespace SteamAuth
             foreach (KeyValuePair<string, IEnumerable<string>> header in response.Headers.Concat(contentHeaders))
             {
                 foreach (string value in header.Value)
-                    headers.Add(header.Key, value);
+                {
+                    try
+                    {
+                        headers.Add(header.Key, value);
+                    }
+                    catch (ArgumentException)
+                    {
+                        // WebHeaderCollection rejects restricted response headers on some targets.
+                    }
+                }
             }
             return headers;
         }

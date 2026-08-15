@@ -34,12 +34,12 @@ namespace Steam_Desktop_Authenticator
             SetupModernUI(label, password);
         }
 
-        public new DialogResult ShowDialog()
+        public DialogResult ShowInputDialog()
         {
             return ShowDialogWithCurrentOwner(null);
         }
 
-        public new DialogResult ShowDialog(IWin32Window owner)
+        public DialogResult ShowInputDialog(IWin32Window owner)
         {
             return ShowDialogWithCurrentOwner(owner);
         }

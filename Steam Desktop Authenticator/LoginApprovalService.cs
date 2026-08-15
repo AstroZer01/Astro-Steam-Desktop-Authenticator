@@ -306,6 +306,10 @@ namespace Steam_Desktop_Authenticator
             {
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unauthorized, "Steam rejected this account session. Log in again and retry.");
             }
+            catch (SteamWebRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                throw new LoginApprovalException(LoginApprovalErrorKind.RateLimited, "Steam is rate limiting login actions. Try again shortly.");
+            }
             catch (System.Net.Http.HttpRequestException exception)
             {
                 throw CreateNetworkException(exception.Message);

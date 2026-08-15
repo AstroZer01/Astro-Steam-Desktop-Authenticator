@@ -387,7 +387,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey."))
                     {
-                        passKeyForm.ShowDialog(this);
+                        passKeyForm.ShowInputDialog(this);
                         if (!passKeyForm.Canceled)
                         {
                             passKey = passKeyForm.txtBox.Text;
@@ -428,12 +428,12 @@ namespace Steam_Desktop_Authenticator
                         ? "phone number associated with your Steam account"
                         : "confirmation method selected by Steam";
                 string confirmationCode;
-                using (InputForm confirmationCodeForm = new InputForm(
+                    using (InputForm confirmationCodeForm = new InputForm(
                     previousFinalizationCodeWasInvalid
                         ? "That confirmation code was not accepted. Please enter the correct code sent to your " + confirmationDestination + "."
                         : "Please input the confirmation code sent to your " + confirmationDestination + "."))
                 {
-                    confirmationCodeForm.ShowDialog(this);
+                        confirmationCodeForm.ShowInputDialog(this);
                     if (confirmationCodeForm.Canceled)
                     {
                         if (!manifest.RemoveAccount(linker.LinkedAccount))
@@ -624,9 +624,9 @@ namespace Steam_Desktop_Authenticator
                 string message = previousCodeWasInvalid
                     ? "That SMS code was not accepted. Please enter the new code sent to your phone."
                     : "Please enter the SMS code sent to your phone to verify the phone number.";
-                using (InputForm smsCodeForm = new InputForm(message))
-                {
-                    smsCodeForm.ShowDialog(owner);
+                    using (InputForm smsCodeForm = new InputForm(message))
+                    {
+                        smsCodeForm.ShowInputDialog(owner);
                     return smsCodeForm.Canceled ? null : smsCodeForm.txtBox.Text;
                 }
             }
@@ -646,7 +646,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey."))
                     {
-                        passKeyForm.ShowDialog(this);
+                        passKeyForm.ShowInputDialog(this);
                         if (!passKeyForm.Canceled)
                         {
                             passKey = passKeyForm.txtBox.Text;

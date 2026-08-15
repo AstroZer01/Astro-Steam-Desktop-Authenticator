@@ -578,7 +578,9 @@
 
     let accountPendingRemoval = null;
     let removeAccountEscapeHandler = null;
+    let removeAccountPreviousFocus = null;
     function openRemoveAccountModal(account) {
+        removeAccountPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         accountPendingRemoval = account;
         document.getElementById('remove-account-name').textContent = account.name;
         const unlinkButton = document.getElementById('btn-unlink-steam-guard');
@@ -591,7 +593,28 @@
         if (removeAccountEscapeHandler)
             document.removeEventListener('keydown', removeAccountEscapeHandler);
         removeAccountEscapeHandler = event => {
-            if (event.key === 'Escape') closeRemoveAccountModal();
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                closeRemoveAccountModal();
+                return;
+            }
+
+            if (event.key !== 'Tab') return;
+            const buttons = Array.from(modal.querySelectorAll('button:not([disabled])'));
+            if (buttons.length === 0) return;
+
+            const focusedIndex = buttons.indexOf(document.activeElement);
+            if (focusedIndex === -1) {
+                event.preventDefault();
+                buttons[event.shiftKey ? buttons.length - 1 : 0].focus();
+                return;
+            }
+
+            const nextIndex = event.shiftKey ? focusedIndex - 1 : focusedIndex + 1;
+            if (nextIndex < 0 || nextIndex >= buttons.length) {
+                event.preventDefault();
+                buttons[event.shiftKey ? buttons.length - 1 : 0].focus();
+            }
         };
         document.addEventListener('keydown', removeAccountEscapeHandler);
         document.getElementById('btn-cancel-remove-account').focus();
@@ -606,6 +629,10 @@
         const modal = document.getElementById('remove-account-modal');
         modal.classList.add('hidden');
         modal.classList.remove('flex');
+        const focusTarget = removeAccountPreviousFocus;
+        removeAccountPreviousFocus = null;
+        if (focusTarget && focusTarget.isConnected && !focusTarget.disabled)
+            focusTarget.focus();
     }
 
     function requestAccountRemoval(removalMode) {

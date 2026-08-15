@@ -199,13 +199,30 @@ namespace Steam_Desktop_Authenticator
             if (phoneNumberInput != null && selectedCountry != null)
             {
                 string currentNumber = phoneNumberInput.Text ?? String.Empty;
-                string remainder = !String.IsNullOrEmpty(displayedDialingCode) && currentNumber.StartsWith(displayedDialingCode, StringComparison.Ordinal)
-                    ? currentNumber.Substring(displayedDialingCode.Length)
-                    : String.Empty;
+                string remainder = GetPhoneNumberRemainder(currentNumber);
                 phoneNumberInput.Text = selectedCountry.DialingCode + remainder;
                 displayedDialingCode = selectedCountry.DialingCode;
                 phoneNumberInput.SelectionStart = phoneNumberInput.Text.Length;
             }
+        }
+
+        private string GetPhoneNumberRemainder(string currentNumber)
+        {
+            if (String.IsNullOrWhiteSpace(currentNumber))
+                return String.Empty;
+
+            if (!String.IsNullOrEmpty(displayedDialingCode) && currentNumber.StartsWith(displayedDialingCode, StringComparison.Ordinal))
+                return currentNumber.Substring(displayedDialingCode.Length);
+
+            string knownDialingCode = CountryOptions
+                .Select(option => option.DialingCode)
+                .OrderByDescending(code => code.Length)
+                .FirstOrDefault(code => currentNumber.StartsWith(code, StringComparison.Ordinal));
+            if (!String.IsNullOrEmpty(knownDialingCode))
+                return currentNumber.Substring(knownDialingCode.Length);
+
+            int firstSpace = currentNumber.IndexOf(' ');
+            return firstSpace >= 0 ? currentNumber.Substring(firstSpace) : String.Empty;
         }
 
         private void countrySelector_DrawItem(object sender, DrawItemEventArgs e)

@@ -77,7 +77,7 @@ namespace Steam_Desktop_Authenticator
                     : "Enter the code Steam sent to " + email + ".";
                 using (InputForm emailForm = new InputForm(message))
                 {
-                    emailForm.ShowDialog(owner);
+                    emailForm.ShowInputDialog(owner);
                     if (emailForm.Canceled)
                         throw new OperationCanceledException(cancellationToken);
                     return emailForm.txtBox.Text;

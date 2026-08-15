@@ -10,26 +10,27 @@ namespace SteamAuth
     /// </summary>
     public class TimeAligner
     {
-        private static bool _aligned = false;
+        private static int _aligned = 0;
         private static int _timeDifference = 0;
-        private static DateTimeOffset _lastAlignmentFailureUtc = DateTimeOffset.MinValue;
+        private static long _lastAlignmentFailureUtcTicks = DateTime.MinValue.Ticks;
+        private static int _backgroundAlignmentScheduled = 0;
         private static readonly SemaphoreSlim _alignmentLock = new SemaphoreSlim(1, 1);
         private static readonly TimeSpan AlignmentRetryBackoff = TimeSpan.FromSeconds(30);
 
         public static long GetSteamTime()
         {
-            if (!_aligned && CanAttemptAlignment())
-                AlignTime();
+            if (Volatile.Read(ref _aligned) == 0 && CanAttemptAlignment())
+                StartBackgroundAlignment();
 
-            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + _timeDifference;
+            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Volatile.Read(ref _timeDifference);
         }
 
         public static async Task<long> GetSteamTimeAsync(CancellationToken cancellationToken = default)
         {
-            if (!_aligned && CanAttemptAlignment())
+            if (Volatile.Read(ref _aligned) == 0 && CanAttemptAlignment())
                 await AlignTimeAsync(cancellationToken);
 
-            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + _timeDifference;
+            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Volatile.Read(ref _timeDifference);
         }
 
         public static void AlignTime()
@@ -42,7 +43,7 @@ namespace SteamAuth
             await _alignmentLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                if (_aligned || !CanAttemptAlignment())
+                if (Volatile.Read(ref _aligned) != 0 || !CanAttemptAlignment())
                     return;
 
                 long currentTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -60,9 +61,9 @@ namespace SteamAuth
                     return;
                 }
 
-                _timeDifference = (int)((long)response.Body.ServerTime - currentTime);
-                _aligned = true;
-                _lastAlignmentFailureUtc = DateTimeOffset.MinValue;
+                Volatile.Write(ref _timeDifference, (int)((long)response.Body.ServerTime - currentTime));
+                Interlocked.Exchange(ref _lastAlignmentFailureUtcTicks, DateTime.MinValue.Ticks);
+                Volatile.Write(ref _aligned, 1);
             }
             catch (OperationCanceledException)
             {
@@ -82,12 +83,33 @@ namespace SteamAuth
 
         private static bool CanAttemptAlignment()
         {
-            return DateTimeOffset.UtcNow - _lastAlignmentFailureUtc >= AlignmentRetryBackoff;
+            long lastFailureTicks = Interlocked.Read(ref _lastAlignmentFailureUtcTicks);
+            return DateTime.UtcNow.Ticks - lastFailureTicks >= AlignmentRetryBackoff.Ticks;
         }
 
         private static void RecordAlignmentFailure()
         {
-            _lastAlignmentFailureUtc = DateTimeOffset.UtcNow;
+            Interlocked.Exchange(ref _lastAlignmentFailureUtcTicks, DateTime.UtcNow.Ticks);
+        }
+
+        private static void StartBackgroundAlignment()
+        {
+            if (Interlocked.CompareExchange(ref _backgroundAlignmentScheduled, 1, 0) != 0)
+                return;
+
+            _ = AlignInBackgroundAsync();
+        }
+
+        private static async Task AlignInBackgroundAsync()
+        {
+            try
+            {
+                await AlignTimeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                Volatile.Write(ref _backgroundAlignmentScheduled, 0);
+            }
         }
     }
 }

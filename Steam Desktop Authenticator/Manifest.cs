@@ -230,7 +230,7 @@ namespace Steam_Desktop_Authenticator
             {
                 using (InputForm passKeyForm = new InputForm("Please enter your encryption passkey.", true))
                 {
-                    passKeyForm.ShowDialog();
+                    passKeyForm.ShowInputDialog();
                     if (!passKeyForm.Canceled)
                     {
                         passKey = passKeyForm.txtBox.Text;
@@ -254,7 +254,7 @@ namespace Steam_Desktop_Authenticator
             string newPassKey;
             using (InputForm newPassKeyForm = new InputForm(initialPrompt, true))
             {
-                newPassKeyForm.ShowDialog();
+                newPassKeyForm.ShowInputDialog();
                 if (newPassKeyForm.Canceled || newPassKeyForm.txtBox.Text.Length == 0)
                 {
                     AstroMessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
@@ -267,7 +267,7 @@ namespace Steam_Desktop_Authenticator
             string confirmPassKey;
             using (InputForm newPassKeyForm2 = new InputForm("Confirm new passkey.", true))
             {
-                newPassKeyForm2.ShowDialog();
+                newPassKeyForm2.ShowInputDialog();
                 if (newPassKeyForm2.Canceled)
                 {
                     AstroMessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
@@ -645,11 +645,8 @@ namespace Steam_Desktop_Authenticator
                     foreach (string filename in obsoleteFilenames)
                         ValidateStorageFilename(filename);
 
-                    foreach (KeyValuePair<string, string> stagedFile in stagedFiles)
-                    {
-                        ValidateStorageFilename(stagedFile.Key);
-                        WriteAllTextAtomically(Path.Combine(maDir, stagedFile.Key), stagedFile.Value);
-                    }
+                    foreach (string filename in createdFilenames)
+                        ValidateStorageFilename(filename);
 
                     StorageTransactionJournal journal = new StorageTransactionJournal()
                     {
@@ -659,6 +656,9 @@ namespace Steam_Desktop_Authenticator
                         BackupFilename = Path.GetFileName(backupFilename)
                     };
                     WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal));
+
+                    foreach (KeyValuePair<string, string> stagedFile in stagedFiles)
+                        WriteAllTextAtomically(Path.Combine(maDir, stagedFile.Key), stagedFile.Value);
 
                     manifestCommitStarted = true;
                     WriteAllTextAtomically(manifestFilename, manifestContents, backupFilename);

@@ -115,7 +115,7 @@ namespace Steam_Desktop_Authenticator
                         string importedPassKey;
                         using (InputForm passKeyForm = new InputForm("Enter the passkey for the imported account.", true))
                         {
-                            ShowOwnedDialog(passKeyForm, dialogOwner);
+                            passKeyForm.ShowInputDialog(dialogOwner);
                             if (passKeyForm.Canceled) return;
                             importedPassKey = passKeyForm.txtBox.Text;
                         }
