@@ -12,7 +12,7 @@
   </PropertyGroup>
 
   <Target Name="PublishMainApp" AfterTargets="Publish">
-    <Exec Command="dotnet publish &quot;..\Steam Desktop Authenticator\Steam Desktop Authenticator.csproj&quot; -c $(Configuration) --self-contained false -o &quot;$(PublishDir)bin&quot;" />
+    <Exec Command="dotnet publish &quot;..\Steam Desktop Authenticator\Steam Desktop Authenticator.csproj&quot; -c $(Configuration) -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugSymbols=false -o &quot;$(PublishDir)bin&quot;" />
     
     <!-- Move the Launcher's PDB to the bin folder to keep the root clean -->
     <Move SourceFiles="$(PublishDir)Steam Desktop Authenticator.pdb" DestinationFolder="$(PublishDir)bin" Condition="Exists('$(PublishDir)Steam Desktop Authenticator.pdb')" />

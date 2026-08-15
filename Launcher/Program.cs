@@ -1,5 +1,6 @@
 using System.Diagnostics;
 
+const string DataDirectoryEnvironmentVariable = "ASDA_DATA_DIRECTORY";
 string binPath = Path.Combine(AppContext.BaseDirectory, "bin", "Steam Desktop Authenticator.exe");
 
 if (File.Exists(binPath))
@@ -10,6 +11,7 @@ if (File.Exists(binPath))
         WorkingDirectory = Path.Combine(AppContext.BaseDirectory, "bin"),
         UseShellExecute = false
     };
+    processInfo.Environment[DataDirectoryEnvironmentVariable] = AppContext.BaseDirectory;
 
     // Pass along any arguments
     foreach (var arg in args)

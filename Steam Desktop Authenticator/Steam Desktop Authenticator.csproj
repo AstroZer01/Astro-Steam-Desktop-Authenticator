@@ -29,10 +29,10 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="ASDA-icon.ico" />
-    <Content Include="wwwroot\**">
+    <Content Include="ui\**" Exclude="ui\tailwind-input.css">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      <TargetPath>app\wwwroot\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+      <TargetPath>app\ui\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
     </Content>
   </ItemGroup>
   <ItemGroup>

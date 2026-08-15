@@ -72,6 +72,7 @@ namespace Steam_Desktop_Authenticator
         private bool backgroundServicesStarted;
 
         const int VK_RCONTROL = 0xA3;
+        const int VK_ESCAPE = 0x1B;
         [DllImport("user32.dll")]
         private static extern bool GetCursorPos(out Point lpPoint);
 
@@ -82,6 +83,8 @@ namespace Steam_Desktop_Authenticator
         private TradePopupForm popupFrm = new TradePopupForm();
         private ToolStripMenuItem trayLoginActions;
         private ToolStripMenuItem trayAccountHeading;
+        private QrScanOverlayForm qrScanOverlay;
+        private bool qrScanInProgress;
 
         private sealed class RecentLoginAttempt
         {
@@ -485,93 +488,136 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private void SetQrScanWaitingState(bool isWaiting, int remainingSeconds = 0)
+        {
+            if (isWaiting)
+            {
+                if (qrScanOverlay == null || qrScanOverlay.IsDisposed)
+                    qrScanOverlay = new QrScanOverlayForm();
+
+                qrScanOverlay.FollowCursor();
+                if (!qrScanOverlay.Visible)
+                    qrScanOverlay.Show(this);
+            }
+            else if (qrScanOverlay?.Visible == true)
+            {
+                qrScanOverlay.Hide();
+            }
+
+            if (webView?.CoreWebView2 != null)
+            {
+                string waitingValue = isWaiting ? "true" : "false";
+                _ = webView.CoreWebView2.ExecuteScriptAsync($"setQrScanWaiting({waitingValue}, {remainingSeconds})");
+            }
+        }
+
         private async void btnLoginViaQr_Click(object sender, EventArgs e)
         {
-            if (currentAccount == null) return;
+            if (qrScanInProgress)
+                return;
 
-            this.btnLoginViaQr.Enabled = false;
-            string originalText = this.btnLoginViaQr.Text;
-
-            AstroMessageBox.Show("Move your cursor over the Steam QR code and press RIGHT CTRL to sign in.", "Scan QR Code", MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-            bool keyPressed = false;
-            for (int i = 300; i > 0; i--)
+            if (currentAccount == null)
             {
-                if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
-                {
-                    keyPressed = true;
-                    break;
-                }
-
-                if (i % 10 == 0)
-                {
-                    this.btnLoginViaQr.Text = $"Press Right CTRL ({i / 10}s)";
-                    if (webView != null && webView.CoreWebView2 != null)
-                        _ = webView.CoreWebView2.ExecuteScriptAsync($"updateQrButtonText('Press Right CTRL ({i / 10}s)')");
-                }
-
-                await Task.Delay(100);
-            }
-
-            this.btnLoginViaQr.Text = originalText;
-            this.btnLoginViaQr.Enabled = true;
-            if (webView != null && webView.CoreWebView2 != null)
-                _ = webView.CoreWebView2.ExecuteScriptAsync($"updateQrButtonText('{originalText}')");
-
-            if (!keyPressed)
-            {
-                AstroMessageBox.Show("QR Code scan cancelled (timeout).", "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                SetQrScanWaitingState(false);
                 return;
             }
-            
-            GetCursorPos(out Point cursorPos);
-            int scanWidth = 500;
-            int scanHeight = 500;
 
-            using (Bitmap bitmap = new Bitmap(scanWidth, scanHeight))
+            qrScanInProgress = true;
+            try
             {
-                using (Graphics g = Graphics.FromImage(bitmap))
+                this.btnLoginViaQr.Enabled = false;
+                string originalText = this.btnLoginViaQr.Text;
+                SetQrScanWaitingState(true, 30);
+
+                bool keyPressed = false;
+                bool cancelled = false;
+                for (int i = 300; i > 0; i--)
                 {
-                    g.CopyFromScreen(cursorPos.X - scanWidth / 2, cursorPos.Y - scanHeight / 2, 0, 0, bitmap.Size);
+                    if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
+                    {
+                        keyPressed = true;
+                        break;
+                    }
+
+                    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0)
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
+                    if (i % 10 == 0)
+                    {
+                        this.btnLoginViaQr.Text = $"Press Right CTRL ({i / 10}s)";
+                        SetQrScanWaitingState(true, i / 10);
+                    }
+
+                    await Task.Delay(100);
                 }
 
-                var reader = new BarcodeReader();
-                var result = reader.Decode(bitmap);
+                this.btnLoginViaQr.Text = originalText;
+                this.btnLoginViaQr.Enabled = true;
+                SetQrScanWaitingState(false);
 
-                if (result == null)
+                if (!keyPressed)
                 {
-                    AstroMessageBox.Show("No QR code detected. Make sure your cursor is exactly over the QR code.", "Scan Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    string cancellationReason = cancelled ? "QR Code scan cancelled." : "QR Code scan cancelled (timeout).";
+                    AstroMessageBox.Show(cancellationReason, "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
-                
-                string idOfQR = null;
-                if (!string.IsNullOrEmpty(result.Text))
+
+                GetCursorPos(out Point cursorPos);
+                int scanWidth = 500;
+                int scanHeight = 500;
+
+                using (Bitmap bitmap = new Bitmap(scanWidth, scanHeight))
                 {
-                    string[] parts = result.Text.Split('/');
-                    if (parts.Length > 5)
+                    using (Graphics g = Graphics.FromImage(bitmap))
                     {
-                        idOfQR = parts[5];
+                        g.CopyFromScreen(cursorPos.X - scanWidth / 2, cursorPos.Y - scanHeight / 2, 0, 0, bitmap.Size);
+                    }
+
+                    var reader = new BarcodeReader();
+                    var result = reader.Decode(bitmap);
+
+                    if (result == null)
+                    {
+                        AstroMessageBox.Show("No QR code detected. Make sure your cursor is exactly over the QR code.", "Scan Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                
+                    string idOfQR = null;
+                    if (!string.IsNullOrEmpty(result.Text))
+                    {
+                        string[] parts = result.Text.Split('/');
+                        if (parts.Length > 5)
+                        {
+                            idOfQR = parts[5];
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(idOfQR))
+                    {
+                        AstroMessageBox.Show("Can't get ID of QR code. Steam might have changed their QR format.", "Wrong QR code.", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    try
+                    {
+                        string response = await currentAccount.SignInViaQR(idOfQR);
+                        if (response != "1")
+                            AstroMessageBox.Show($"Can't log in to account.\n\nDebug Info:\nID: {idOfQR}\nEResult: {response}\n\nTry refreshing the Steam login page and scan again.", "Something went wrong!", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        else
+                            AstroMessageBox.Show("Successfully logged in via QR code!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        AstroMessageBox.Show($"Exception during QR Login:\n\nID: {idOfQR}\nError: {ex.Message}", "API Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 }
-                
-                if (string.IsNullOrEmpty(idOfQR))
-                {
-                    AstroMessageBox.Show("Can't get ID of QR code. Steam might have changed their QR format.", "Wrong QR code.", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return;
-                }
-
-                try 
-                {
-                    string response = await currentAccount.SignInViaQR(idOfQR);
-                    if (response != "1")
-                        AstroMessageBox.Show($"Can't log in to account.\n\nDebug Info:\nID: {idOfQR}\nEResult: {response}\n\nTry refreshing the Steam login page and scan again.", "Something went wrong!", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    else
-                        AstroMessageBox.Show("Successfully logged in via QR code!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                catch (Exception ex)
-                {
-                    AstroMessageBox.Show($"Exception during QR Login:\n\nID: {idOfQR}\nError: {ex.Message}", "API Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
+            }
+            finally
+            {
+                qrScanInProgress = false;
             }
         }
 
@@ -918,7 +964,7 @@ namespace Steam_Desktop_Authenticator
                     lblStatus.Text = "";
                     AstroMessageBox.Show("Your session for account " + account.AccountName + " has expired. You will be prompted to login again.", "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     PromptRefreshLogin(account);
-                    pendingTradeConfirmationCounts.Remove(account.Session.SteamID);
+                    InvalidateTradeConfirmationCache(account);
                     UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
                     return;
                 }
@@ -1339,6 +1385,23 @@ namespace Steam_Desktop_Authenticator
             loadedTradeConfirmationAccounts.Add(account.Session.SteamID);
         }
 
+        private void InvalidateTradeConfirmationCache(SteamGuardAccount account)
+        {
+            if (account?.Session == null)
+                return;
+
+            ulong steamId = account.Session.SteamID;
+            pendingTradeConfirmationCounts.Remove(steamId);
+            loadedTradeConfirmationAccounts.Remove(steamId);
+            foreach (string confirmationKey in loadedTradeConfirmations
+                .Where(entry => entry.Value.Account?.Session?.SteamID == steamId)
+                .Select(entry => entry.Key)
+                .ToArray())
+            {
+                loadedTradeConfirmations.Remove(confirmationKey);
+            }
+        }
+
         private bool IsTradeCacheCompleteForSelection()
         {
             if (allAccounts == null || allAccounts.Length == 0)
@@ -1412,6 +1475,16 @@ namespace Steam_Desktop_Authenticator
                 RecordRecentLoginAttempt(pendingLoginRequests[staleKey], "Expired or handled elsewhere");
                 pendingLoginRequests.Remove(staleKey);
                 PruneLoginRequestBookkeeping(staleKey);
+            }
+
+            foreach (string staleRequestKey in completedAutomatedLoginActions
+                .Where(actionKey => actionKey.StartsWith(accountRequestPrefix, StringComparison.Ordinal) &&
+                    !fetchedRequestKeys.Contains(actionKey.Split('|')[0]))
+                .Select(actionKey => actionKey.Split('|')[0])
+                .Distinct()
+                .ToList())
+            {
+                PruneLoginRequestBookkeeping(staleRequestKey);
             }
         }
 
@@ -2114,7 +2187,7 @@ namespace Steam_Desktop_Authenticator
             };
 
             // Load local html file
-            string htmlPath = System.IO.Path.Combine(ApplicationPaths.WebRootDirectory, "index.html");
+            string htmlPath = System.IO.Path.Combine(ApplicationPaths.UiDirectory, "index.html");
             webView.Source = new Uri(htmlPath);
         }
 
@@ -2412,6 +2485,7 @@ namespace Steam_Desktop_Authenticator
                         if (account.Session.IsRefreshTokenExpired())
                         {
                             unavailableAccounts.Add(account.AccountName + " needs you to sign in again.");
+                            InvalidateTradeConfirmationCache(account);
                             continue;
                         }
                         Confirmation[] accountConfirmations = await FetchTradeConfirmationsForPageAsync(account);
@@ -2436,6 +2510,7 @@ namespace Steam_Desktop_Authenticator
                     : unavailableAccounts.Count == 0
                         ? null
                         : "Some account confirmations could not be loaded: " + String.Join(" ", unavailableAccounts);
+                UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
                 await PublishCachedTradesAsync(errorMessage, selectionToLoad);
             }
             catch (Exception ex)

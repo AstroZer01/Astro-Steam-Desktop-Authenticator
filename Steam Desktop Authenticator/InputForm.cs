@@ -117,7 +117,7 @@ namespace Steam_Desktop_Authenticator
                 webView.CoreWebView2.ExecuteScriptAsync($"setupInput('{jsLabel}', {isPassStr})");
             };
 
-            string htmlPath = System.IO.Path.Combine(ApplicationPaths.WebRootDirectory, "input.html");
+            string htmlPath = System.IO.Path.Combine(ApplicationPaths.UiDirectory, "input.html");
             webView.Source = new Uri(htmlPath);
         }
 
