@@ -34,7 +34,13 @@ namespace Steam_Desktop_Authenticator
             {
                 // After 2 tries tell the user that there seems to be an issue
                 if (deviceCodesGenerated > 2)
-                    AstroMessageBox.Show("There seems to be an issue logging into your account with these two factor codes. Are you sure SDA is still your authenticator?");
+                {
+                    await RunOnUiThreadAsync(() =>
+                    {
+                        AstroMessageBox.Show("There seems to be an issue logging into your account with these two factor codes. Are you sure SDA is still your authenticator?");
+                        return true;
+                    });
+                }
 
                 await Task.Delay(30000, cancellationToken);
             }
@@ -106,22 +112,19 @@ namespace Steam_Desktop_Authenticator
 
             TaskCompletionSource<T> completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
             EventHandler ownerDisposed = (sender, args) => completion.TrySetCanceled();
-            owner.Disposed += ownerDisposed;
             CancellationTokenRegistration cancellationRegistration = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
-            _ = completion.Task.ContinueWith(_ =>
-            {
-                cancellationRegistration.Dispose();
-                owner.Disposed -= ownerDisposed;
-            }, TaskScheduler.Default);
             try
             {
                 owner.BeginInvoke((MethodInvoker)delegate
                 {
                     if (cancellationToken.IsCancellationRequested || owner.IsDisposed)
                     {
+                        cancellationRegistration.Dispose();
                         completion.TrySetCanceled(cancellationToken);
                         return;
                     }
+
+                    owner.Disposed += ownerDisposed;
                     try
                     {
                         completion.TrySetResult(action());
@@ -134,14 +137,21 @@ namespace Steam_Desktop_Authenticator
                     {
                         completion.TrySetException(ex);
                     }
+                    finally
+                    {
+                        owner.Disposed -= ownerDisposed;
+                        cancellationRegistration.Dispose();
+                    }
                 });
             }
             catch (OperationCanceledException ex)
             {
+                cancellationRegistration.Dispose();
                 completion.TrySetCanceled(ex.CancellationToken);
             }
             catch (Exception ex)
             {
+                cancellationRegistration.Dispose();
                 completion.TrySetException(ex);
             }
 

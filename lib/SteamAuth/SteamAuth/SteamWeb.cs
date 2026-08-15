@@ -72,6 +72,9 @@ namespace SteamAuth
             IReadOnlyDictionary<string, string> headers, TimeSpan timeout, CancellationToken cancellationToken,
             bool followRedirects = true)
         {
+            if (timeout < Timeout.InfiniteTimeSpan)
+                throw new ArgumentOutOfRangeException(nameof(timeout));
+
             byte[] requestBody = content == null ? null : await content.ReadAsByteArrayAsync().ConfigureAwait(false);
             IEnumerable<KeyValuePair<string, IEnumerable<string>>> contentHeaders = content == null
                 ? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>()
@@ -85,6 +88,7 @@ namespace SteamAuth
                 HttpMethod requestMethod = method;
                 for (int redirectCount = 0; ; redirectCount++)
                 {
+                    HttpResponseMessage response;
                     using (HttpRequestMessage request = CreateRequest(
                         requestMethod,
                         requestUri,
@@ -93,7 +97,18 @@ namespace SteamAuth
                         contentHeaders,
                         headers,
                         redirectCount == 0))
-                    using (HttpResponseMessage response = await httpClient.SendAsync(request, timeoutSource.Token).ConfigureAwait(false))
+                    {
+                        try
+                        {
+                            response = await httpClient.SendAsync(request, timeoutSource.Token).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            throw new TimeoutException("The Steam request timed out.");
+                        }
+                    }
+
+                    using (response)
                     {
                         StoreResponseCookies(response, requestUri, cookies);
                         if (IsRedirect(response.StatusCode) && !followRedirects)
@@ -188,7 +203,10 @@ namespace SteamAuth
                 ? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>()
                 : response.Content.Headers;
             foreach (KeyValuePair<string, IEnumerable<string>> header in response.Headers.Concat(contentHeaders))
-                headers[header.Key] = String.Join(", ", header.Value);
+            {
+                foreach (string value in header.Value)
+                    headers.Add(header.Key, value);
+            }
             return headers;
         }
     }
