@@ -14,7 +14,7 @@
         <span class="text-xs mt-1">Home</span>
     </a>
     <a onclick="switchTab('trades')" data-tab="trades" class="tab-link relative flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
-        <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M7 10h8m0 0-2.5-2.5M15 10l-2.5 2.5M17 14H9m0 0 2.5 2.5M9 14l2.5-2.5"/></svg>
+        <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" style="stroke-width: 2.25"><path d="M5 8h12m0 0-3-3m3 3-3 3M19 16H7m0 0 3-3m-3 3 3 3"/></svg>
         <span id="trade-pending-badge" class="hidden absolute top-0 right-2 min-w-4 h-4 px-1 rounded-full bg-error text-[10px] leading-4 text-on-error font-bold text-center" aria-label="Pending trade confirmations"></span>
         <span class="text-xs mt-1">Trade</span>
     </a>
@@ -61,7 +61,16 @@
             
             <div class="glass-panel rounded-xl p-4 flex flex-col gap-4">
                 <div id="account-title" class="text-on-surface-variant text-xs uppercase tracking-wider">Account: ...</div>
-                <button id="btn-login-qr" class="bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-sm">Login via QR</button>
+                <button id="btn-login-qr" aria-describedby="qr-scan-status" class="bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-sm">Login via QR</button>
+                <div id="qr-scan-status" class="hidden rounded-lg border border-primary/30 bg-primary/10 p-3" role="status" aria-live="polite">
+                    <div class="flex items-start gap-3">
+                        <svg class="ui-icon text-primary shrink-0 mt-0.5" viewBox="0 0 24 24" aria-hidden="true" style="stroke-width: 2.25"><circle cx="12" cy="12" r="7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M12 9v6m-3-3h6"/></svg>
+                        <div>
+                            <p class="font-semibold text-on-surface">QR scan is waiting for your cursor</p>
+                            <p id="qr-scan-instructions" class="text-sm text-on-surface-variant mt-1">Place the cursor over the QR code, then press Right Ctrl. Press Esc to cancel.</p>
+                        </div>
+                    </div>
+                </div>
             </div>
             
             <div class="glass-panel rounded-xl p-4 flex flex-col gap-4 flex-1 min-h-[300px]">
@@ -84,8 +93,8 @@
                     <select id="trade-account-select" class="min-w-0 flex-1 sm:w-44 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-2 focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer">
                         <option value="all">All accounts</option>
                     </select>
-                    <button id="btn-refresh-trades" class="p-2 hover:bg-surface-variant rounded-lg flex items-center justify-center transition-colors text-on-surface-variant" title="Refresh">
-                        <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5.5M20 5v6h-6"/></svg>
+                    <button id="btn-refresh-trades" class="p-2 hover:bg-surface-variant rounded-lg flex items-center justify-center transition-colors text-on-surface-variant" title="Refresh" aria-label="Refresh trade confirmations">
+                        <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true" style="stroke-width: 2.25"><path d="M20 11a8 8 0 1 0 2 5.5"/><path d="M20 4v7h-7"/></svg>
                     </button>
                 </div>
             </header>
@@ -112,14 +121,14 @@
                         <option value="all">All accounts</option>
                     </select>
                     <button id="btn-refresh-login-actions" class="shrink-0 p-2 hover:bg-surface-variant rounded-lg flex items-center justify-center transition-colors text-on-surface-variant" title="Refresh login requests" aria-label="Refresh login requests">
-                        <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5.5M20 5v6h-6"/></svg>
+                        <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true" style="stroke-width: 2.25"><path d="M20 11a8 8 0 1 0 2 5.5"/><path d="M20 4v7h-7"/></svg>
                     </button>
                 </div>
             </header>
 
             <div id="automatic-login-action-banner" class="hidden rounded-xl border border-primary/30 bg-primary/10 p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div class="flex items-start gap-3">
-                    <svg class="ui-icon text-primary mt-0.5" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.8 2.9 8.8 7 10 4.1-1.2 7-5.2 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>
+                    <svg class="ui-icon w-8 h-8 shrink-0 text-primary mt-0.5" viewBox="0 0 24 24" aria-hidden="true" style="stroke-width: 2.25"><path d="M12 3 5 6v5c0 4.8 2.9 8.8 7 10 4.1-1.2 7-5.2 7-10V6z"/><path d="m8.5 12 2.1 2.1 4.9-4.9"/></svg>
                     <div>
                         <p class="font-semibold text-on-surface">Automatic login action enabled</p>
                         <p id="automatic-login-action-text" class="text-sm text-on-surface-variant mt-1"></p>
@@ -392,7 +401,41 @@
             btn.classList.remove('bg-secondary', 'text-on-secondary');
         }, 1500);
     });
-    document.getElementById('btn-login-qr').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'login_qr' }); });
+    let qrScanWaiting = false;
+    let qrScanRemainingSeconds = 0;
+
+    function updateQrLoginButton() {
+        const button = document.getElementById('btn-login-qr');
+        const hasAccounts = allAccs.length > 0;
+        button.disabled = qrScanWaiting || !hasAccounts;
+
+        if (qrScanWaiting) {
+            button.className = 'bg-primary/10 border border-primary text-primary text-sm py-3 px-4 rounded-lg shadow-sm cursor-crosshair';
+            button.textContent = 'Waiting for Right Ctrl (' + qrScanRemainingSeconds + 's)';
+        } else if (!hasAccounts) {
+            button.className = 'bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm py-3 px-4 rounded-lg shadow-sm transition-colors';
+            button.textContent = 'Login via QR';
+        } else {
+            button.className = 'bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-sm';
+            button.textContent = 'Login via QR';
+        }
+    }
+
+    function setQrScanWaiting(isWaiting, remainingSeconds = 0) {
+        qrScanWaiting = !!isWaiting;
+        qrScanRemainingSeconds = Math.max(0, Number(remainingSeconds) || 0);
+        document.getElementById('qr-scan-status').classList.toggle('hidden', !qrScanWaiting);
+        document.body.classList.toggle('cursor-crosshair', qrScanWaiting);
+        if (qrScanWaiting) {
+            document.getElementById('qr-scan-instructions').textContent =
+                'Place the cursor over the QR code, then press Right Ctrl (' + qrScanRemainingSeconds + 's). Press Esc to cancel.';
+        }
+        updateQrLoginButton();
+    }
+
+    document.getElementById('btn-login-qr').addEventListener('click', () => {
+        if (!qrScanWaiting) window.chrome.webview.postMessage({ action: 'login_qr' });
+    });
 
     let currentAcc = "";
     function updateToken(token) { 
@@ -405,8 +448,9 @@
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         const tradeSelect = document.getElementById('trade-account-select');
         const loginSelect = document.getElementById('login-account-select');
-        if (tradeSelect && tradeSelect.value !== 'all') tradeSelect.value = accName;
-        if (loginSelect && loginSelect.value !== 'all') loginSelect.value = accName;
+        const hasOption = select => Array.from(select.options).some(option => option.value === accName);
+        if (tradeSelect && tradeSelect.value !== 'all' && hasOption(tradeSelect)) tradeSelect.value = accName;
+        if (loginSelect && loginSelect.value !== 'all' && hasOption(loginSelect)) loginSelect.value = accName;
     }
     function updateProgressBar(secondsRemaining) {
         let pct = (secondsRemaining / 30.0) * 100;
@@ -435,7 +479,6 @@
         
         let hasAccounts = names.length > 0;
         let btnCopy = document.getElementById('btn-copy');
-        let btnLoginQr = document.getElementById('btn-login-qr');
         
         let disabledStyle = "bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm transition-colors";
         
@@ -446,12 +489,7 @@
             btnCopy.className = "bg-surface-variant hover:bg-surface-bright border border-white/10 rounded-lg px-6 w-24 transition-colors text-on-surface text-sm";
         }
         
-        btnLoginQr.disabled = !hasAccounts;
-        if (!hasAccounts) {
-            btnLoginQr.className = disabledStyle + " py-3 px-4 rounded-lg shadow-sm";
-        } else {
-            btnLoginQr.className = "bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-sm";
-        }
+        updateQrLoginButton();
         
         let sel = document.getElementById('trade-account-select');
         if (sel) {
@@ -645,7 +683,11 @@
     document.getElementById('login-account-select').addEventListener('change', event => {
         const selectedAccount = event.target.value;
         const tradeSelect = document.getElementById('trade-account-select');
-        if (tradeSelect) tradeSelect.value = selectedAccount;
+        if (tradeSelect) {
+            tradeSelect.value = selectedAccount;
+            beginTradeLoad();
+            window.chrome.webview.postMessage({ action: 'load_trades_cache', accountName: selectedAccount });
+        }
         if (selectedAccount !== 'all') {
             window.chrome.webview.postMessage({ action: 'switch_account', accountName: selectedAccount });
         }
@@ -960,7 +1002,7 @@
         window.chrome.webview.postMessage({
             action: 'save_settings',
             tradeConfirmationCustomIntervalEnabled: document.getElementById('trade-confirmation-custom-interval-enabled').checked,
-            tradeConfirmationCheckInterval: parseInt(document.getElementById('trade-confirmation-check-interval').value) || 15,
+            tradeConfirmationCheckInterval: Math.min(3600, Math.max(3, parseInt(document.getElementById('trade-confirmation-check-interval').value, 10) || 15)),
             autoConfirmMarket: document.getElementById('auto-confirm-market').checked,
             autoConfirmTrades: document.getElementById('auto-confirm-trades').checked,
             minimizeToTray: document.getElementById('close-to-tray').checked,
@@ -988,11 +1030,6 @@
         document.getElementById('login-action-auto-allow-ip').value = settings.loginActionAutoAllowIp || '';
         updateTradeConfirmationIntervalSettings();
         updateLoginAutoAllowIpSettings();
-    }
-
-    function updateQrButtonText(text) {
-        let btn = document.getElementById('btn-login-qr');
-        if (btn) btn.innerText = text;
     }
 
     function settingsSaved() {

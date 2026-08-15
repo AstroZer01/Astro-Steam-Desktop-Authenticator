@@ -2,6 +2,8 @@
 set -eu
 
 if git diff --cached --quiet -- \
+  "package.json" \
+  "package-lock.json" \
   "Steam Desktop Authenticator/tailwind.config.js" \
   "Steam Desktop Authenticator/ui/tailwind-input.css" \
   ':(glob)Steam Desktop Authenticator/ui/**/*.html'; then
@@ -13,6 +15,8 @@ if git diff --cached --quiet -- \
 fi
 
 if ! git diff --quiet -- \
+  "package.json" \
+  "package-lock.json" \
   "Steam Desktop Authenticator/tailwind.config.js" \
   "Steam Desktop Authenticator/ui/tailwind-input.css" \
   ':(glob)Steam Desktop Authenticator/ui/**/*.html'; then

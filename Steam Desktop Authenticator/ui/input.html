@@ -24,7 +24,7 @@ input:focus { border-color: #00daf3 !important; }
     </div>
     
     <div class="flex flex-col gap-2">
-        <input type="text" id="input-box" placeholder="..." />
+        <input type="text" id="input-box" aria-labelledby="label-text" placeholder="..." />
     </div>
 
     <div class="flex gap-4 mt-2">
@@ -57,9 +57,7 @@ input:focus { border-color: #00daf3 !important; }
 
     function setupInput(label, isPassword) {
         document.getElementById('label-text').innerText = label;
-        if(isPassword) {
-            document.getElementById('input-box').type = 'password';
-        }
+        document.getElementById('input-box').type = isPassword ? 'password' : 'text';
         document.getElementById('input-box').focus();
         
         resizeObserver.observe(document.querySelector('.glass-panel'));
