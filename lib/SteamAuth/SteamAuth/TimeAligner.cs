@@ -1,85 +1,78 @@
-﻿using System;
-using System.Threading.Tasks;
-using System.Net;
-using Newtonsoft.Json;
-using System.Text;
+using SteamAuth.Protocol;
+using System;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace SteamAuth
 {
     /// <summary>
-    /// Class to help align system time with the Steam server time. Not super advanced; probably not taking some things into account that it should.
-    /// Necessary to generate up-to-date codes. In general, this will have an error of less than a second, assuming Steam is operational.
+    /// Aligns the system clock with Steam's typed two-factor time service.
     /// </summary>
     public class TimeAligner
     {
         private static bool _aligned = false;
         private static int _timeDifference = 0;
+        private static DateTimeOffset _lastAlignmentFailureUtc = DateTimeOffset.MinValue;
         private static readonly SemaphoreSlim _alignmentLock = new SemaphoreSlim(1, 1);
+        private static readonly TimeSpan AlignmentRetryBackoff = TimeSpan.FromSeconds(30);
 
         public static long GetSteamTime()
         {
-            if (!TimeAligner._aligned)
-            {
-                TimeAligner.AlignTime();
-            }
+            if (!_aligned && CanAttemptAlignment())
+                _ = AlignTimeAsync();
+
             return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + _timeDifference;
         }
 
-        public static async Task<long> GetSteamTimeAsync()
+        public static async Task<long> GetSteamTimeAsync(CancellationToken cancellationToken = default)
         {
-            if (!TimeAligner._aligned)
-            {
-                await TimeAligner.AlignTimeAsync();
-            }
+            if (!_aligned && CanAttemptAlignment())
+                await AlignTimeAsync(cancellationToken);
+
             return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + _timeDifference;
         }
 
         public static void AlignTime()
         {
-            long currentTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            using (WebClient client = new WebClient())
-            {
-                client.Encoding = Encoding.UTF8;
-                try
-                {
-                    string response = client.UploadString(APIEndpoints.TWO_FACTOR_TIME_QUERY, "steamid=0");
-                    TimeQuery query = JsonConvert.DeserializeObject<TimeQuery>(response);
-                    if (query?.Response == null)
-                        return;
-                    TimeAligner._timeDifference = (int)(query.Response.ServerTime - currentTime);
-                    TimeAligner._aligned = true;
-                }
-                catch (WebException)
-                {
-                    return;
-                }
-            }
+            AlignTimeAsync().GetAwaiter().GetResult();
         }
 
-        public static async Task AlignTimeAsync()
+        public static async Task AlignTimeAsync(CancellationToken cancellationToken = default)
         {
-            await _alignmentLock.WaitAsync();
+            await _alignmentLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                if (_aligned)
+                if (_aligned || !CanAttemptAlignment())
                     return;
 
                 long currentTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                using (WebClient client = new WebClient())
+                SteamProtobufAuthenticatorTransport transport = new SteamProtobufAuthenticatorTransport();
+                SteamProtocolResponse<CTwoFactor_Time_Response> response = await transport.SendAsync(
+                    "ITwoFactorService",
+                    "QueryTime",
+                    new CTwoFactor_Time_Request { SenderTime = (ulong)currentTime },
+                    null,
+                    CTwoFactor_Time_Response.Parser,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (response == null || response.Result != 1 || response.Body == null || response.Body.ServerTime == 0)
                 {
-                    client.Encoding = Encoding.UTF8;
-                    string response = await client.UploadStringTaskAsync(new Uri(APIEndpoints.TWO_FACTOR_TIME_QUERY), "steamid=0");
-                    TimeQuery query = JsonConvert.DeserializeObject<TimeQuery>(response);
-                    if (query?.Response == null)
-                        return;
-                    TimeAligner._timeDifference = (int)(query.Response.ServerTime - currentTime);
-                    TimeAligner._aligned = true;
+                    RecordAlignmentFailure();
+                    return;
                 }
+
+                _timeDifference = (int)((long)response.Body.ServerTime - currentTime);
+                _aligned = true;
+                _lastAlignmentFailureUtc = DateTimeOffset.MinValue;
             }
-            catch (WebException)
+            catch (OperationCanceledException)
             {
-                return;
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Code generation can safely use the local clock if Steam's time endpoint is unavailable.
+                SteamAuthDiagnostics.Log(ex, "Steam time alignment failed; local time will be used until the retry backoff expires.");
+                RecordAlignmentFailure();
             }
             finally
             {
@@ -87,17 +80,14 @@ namespace SteamAuth
             }
         }
 
-        internal class TimeQuery
+        private static bool CanAttemptAlignment()
         {
-            [JsonProperty("response")]
-            internal TimeQueryResponse Response { get; set; }
+            return DateTimeOffset.UtcNow - _lastAlignmentFailureUtc >= AlignmentRetryBackoff;
+        }
 
-            internal class TimeQueryResponse
-            {
-                [JsonProperty("server_time")]
-                public long ServerTime { get; set; }
-            }
-
+        private static void RecordAlignmentFailure()
+        {
+            _lastAlignmentFailureUtc = DateTimeOffset.UtcNow;
         }
     }
 }

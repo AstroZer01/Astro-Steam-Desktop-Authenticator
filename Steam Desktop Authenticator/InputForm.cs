@@ -17,11 +17,16 @@ namespace Steam_Desktop_Authenticator
     {
         public bool Canceled = false;
         private bool userClosed = true;
+        private readonly Form fallbackOwner;
 
         public InputForm(string label, bool password = false)
         {
             InitializeComponent();
             AstroTheme.ApplyTheme(this);
+            fallbackOwner = Form.ActiveForm;
+            StartPosition = fallbackOwner != null && fallbackOwner.Visible && !fallbackOwner.IsDisposed
+                ? FormStartPosition.CenterParent
+                : FormStartPosition.CenterScreen;
 
             this.labelText.Text = label;
 
@@ -31,6 +36,15 @@ namespace Steam_Desktop_Authenticator
             }
             
             SetupModernUI(label, password);
+        }
+
+        public new DialogResult ShowDialog()
+        {
+            if (fallbackOwner != null && fallbackOwner.Visible && !fallbackOwner.IsDisposed)
+                return base.ShowDialog(fallbackOwner);
+
+            StartPosition = FormStartPosition.CenterScreen;
+            return base.ShowDialog();
         }
 
         private WebView2 webView;

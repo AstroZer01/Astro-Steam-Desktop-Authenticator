@@ -9,12 +9,16 @@ namespace Steam_Desktop_Authenticator
         private Label lblMessage;
         private FlowLayoutPanel buttonPanel;
         private CheckBox chkOption;
+        private readonly string primaryButtonText;
+        private readonly string secondaryButtonText;
         
         public DialogResult Result { get; private set; } = DialogResult.None;
         public bool IsChecked => chkOption != null && chkOption.Checked;
 
-        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null)
+        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null, string primaryButtonText = null, string secondaryButtonText = null)
         {
+            this.primaryButtonText = primaryButtonText;
+            this.secondaryButtonText = secondaryButtonText;
             this.Text = caption;
             this.Size = new Size(400, 200);
             this.MinimumSize = new Size(400, 150);
@@ -26,7 +30,7 @@ namespace Steam_Desktop_Authenticator
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.ShowIcon = false;
-            this.ShowInTaskbar = false;
+            this.ShowInTaskbar = true;
             this.BackColor = AstroTheme.Background;
             this.ForeColor = AstroTheme.OnSurface;
             AstroTheme.ApplyDarkTitleBar(this);
@@ -88,8 +92,8 @@ namespace Steam_Desktop_Authenticator
                     AddButton("OK", DialogResult.OK, true);
                     break;
                 case MessageBoxButtons.OKCancel:
-                    AddButton("Cancel", DialogResult.Cancel, false);
-                    AddButton("OK", DialogResult.OK, true);
+                    AddButton(secondaryButtonText ?? "Cancel", DialogResult.Cancel, false);
+                    AddButton(primaryButtonText ?? "OK", DialogResult.OK, true);
                     break;
                 case MessageBoxButtons.YesNo:
                     AddButton("No", DialogResult.No, false);

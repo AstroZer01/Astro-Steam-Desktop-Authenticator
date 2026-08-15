@@ -1,4 +1,6 @@
+using Google.Protobuf;
 using Newtonsoft.Json;
+using SteamAuth.Protocol;
 using System;
 using System.Collections.Specialized;
 using System.Linq;
@@ -60,6 +62,9 @@ namespace SteamAuth
 
         public SessionData Session { get; set; }
 
+        [JsonIgnore]
+        public string LastAuthenticatorOperationError { get; private set; }
+
         private static byte[] steamGuardCodeTranslations = new byte[] { 50, 51, 52, 53, 54, 55, 56, 57, 66, 67, 68, 70, 71, 72, 74, 75, 77, 78, 80, 81, 82, 84, 86, 87, 88, 89 };
 
         /// <summary>
@@ -69,17 +74,58 @@ namespace SteamAuth
         /// <returns></returns>
         public async Task<bool> DeactivateAuthenticator(int scheme = 1)
         {
-            var postBody = new NameValueCollection();
-            postBody.Add("revocation_code", this.RevocationCode);
-            postBody.Add("revocation_reason", "1");
-            postBody.Add("steamguard_scheme", scheme.ToString());
-            string response = await SteamWeb.POSTRequest("https://api.steampowered.com/ITwoFactorService/RemoveAuthenticator/v1?access_token=" + this.Session.AccessToken, null, postBody);
+            LastAuthenticatorOperationError = null;
+            if (String.IsNullOrWhiteSpace(RevocationCode))
+            {
+                LastAuthenticatorOperationError = "This account does not contain a Steam Guard recovery code, so Steam Guard cannot be removed.";
+                return false;
+            }
+            if (scheme != 1 && scheme != 2)
+            {
+                LastAuthenticatorOperationError = "The requested Steam Guard removal method is invalid.";
+                return false;
+            }
+            if (Session == null || String.IsNullOrWhiteSpace(Session.AccessToken))
+            {
+                LastAuthenticatorOperationError = "The saved Steam session has expired. Sign in again before removing Steam Guard.";
+                return false;
+            }
 
-            // Parse to object
-            var removeResponse = JsonConvert.DeserializeObject<RemoveAuthenticatorResponse>(response);
+            try
+            {
+                SteamProtobufAuthenticatorTransport transport = new SteamProtobufAuthenticatorTransport();
+                SteamProtocolResponse<CTwoFactor_RemoveAuthenticator_Response> response = await transport.SendAsync(
+                    "ITwoFactorService",
+                    "RemoveAuthenticator",
+                    new CTwoFactor_RemoveAuthenticator_Request
+                    {
+                        RevocationCode = RevocationCode,
+                        RevocationReason = 1,
+                        SteamguardScheme = (uint)scheme
+                    },
+                    Session.AccessToken,
+                    CTwoFactor_RemoveAuthenticator_Response.Parser);
 
-            if (removeResponse == null || removeResponse.Response == null || !removeResponse.Response.Success) return false;
-            return true;
+                if (response == null || response.Result != 1 || response.Body == null || !response.Body.Success)
+                {
+                    if (response != null && (response.Result == 84 || response.Result == 87))
+                        LastAuthenticatorOperationError = "Steam is rate limiting Steam Guard removal. Wait a while before trying again.";
+                    else if (response != null && !String.IsNullOrWhiteSpace(response.ErrorMessage))
+                        LastAuthenticatorOperationError = "Steam could not remove Steam Guard: " + response.ErrorMessage;
+                    else
+                        LastAuthenticatorOperationError = "Steam could not remove Steam Guard (result " + (response == null ? 0 : response.Result) + ").";
+                    SteamAuthDiagnostics.Log(new InvalidOperationException(LastAuthenticatorOperationError), "Steam Guard removal was rejected.");
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                SteamAuthDiagnostics.Log(ex, "Steam Guard removal request failed.");
+                LastAuthenticatorOperationError = "Steam Guard removal could not be completed. Check your connection and try again.";
+                return false;
+            }
         }
 
         public string GenerateSteamGuardCode()
@@ -92,13 +138,11 @@ namespace SteamAuth
             return GenerateSteamGuardCodeForTime(await TimeAligner.GetSteamTimeAsync());
         }
 
-        public async Task<string> SignInViaQR(string idOfQR) { 
-            var postBody = new NameValueCollection();
-            postBody.Add("version", "1");
-            postBody.Add("client_id", idOfQR);
-            postBody.Add("steamid", this.Session.SteamID.ToString());
-            postBody.Add("confirm", "true");
-            postBody.Add("persistence", "1");
+        public async Task<string> SignInViaQR(string idOfQR) {
+            if (Session == null || String.IsNullOrWhiteSpace(Session.AccessToken))
+                throw new InvalidOperationException("The saved Steam session has expired. Log in again before approving a QR login.");
+            if (!UInt64.TryParse(idOfQR, out ulong clientId))
+                throw new ArgumentException("Steam provided an invalid QR login identifier.", nameof(idOfQR));
 
             byte[] sharedSecretBytes = Convert.FromBase64String(this.SharedSecret);
             byte[] signatureData = new byte[18];
@@ -118,13 +162,23 @@ namespace SteamAuth
             using (var hmac = new System.Security.Cryptography.HMACSHA256(sharedSecretBytes))
             {
                 byte[] signature = hmac.ComputeHash(signatureData);
-                postBody.Add("signature", Convert.ToBase64String(signature));
+                SteamProtobufAuthenticatorTransport transport = new SteamProtobufAuthenticatorTransport();
+                SteamProtocolResponse<CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response> response = await transport.SendAsync(
+                    "IAuthenticationService",
+                    "UpdateAuthSessionWithMobileConfirmation",
+                    new CAuthentication_UpdateAuthSessionWithMobileConfirmation_Request
+                    {
+                        Version = 1,
+                        ClientId = clientId,
+                        Steamid = Session.SteamID,
+                        Signature = ByteString.CopyFrom(signature),
+                        Confirm = true,
+                        Persistence = ESessionPersistence.KEsessionPersistencePersistent
+                    },
+                    Session.AccessToken,
+                    CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response.Parser);
+                return (response?.Result ?? 0).ToString();
             }
-
-            string url = "https://api.steampowered.com/IAuthenticationService/UpdateAuthSessionWithMobileConfirmation/v1/?access_token=" + this.Session.AccessToken;
-            var response = await SteamWeb.POSTRequest(url, null, postBody, "X-eresult");
-            
-            return response;
         }
 
         public string GenerateSteamGuardCodeForTime(long time)
@@ -255,22 +309,20 @@ namespace SteamAuth
             string url = APIEndpoints.COMMUNITY_BASE + "/mobileconf/multiajaxop";
             // tag is different from op now
             string tag = op == "allow" ? "accept" : "reject";
-            string query = "op=" + op + "&" + GenerateConfirmationQueryParams(tag);
+            NameValueCollection body = GenerateConfirmationQueryParamsAsNVC(tag);
+            body.Add("op", op);
             foreach (var conf in confs)
             {
-                query += "&cid[]=" + conf.ID + "&ck[]=" + conf.Key;
+                body.Add("cid[]", conf.ID.ToString());
+                body.Add("ck[]", conf.Key.ToString());
             }
 
-            string response;
-            using (CookieAwareWebClient wc = new CookieAwareWebClient())
-            {
-                wc.Encoding = Encoding.UTF8;
-                wc.CookieContainer = this.Session.GetCookies();
-                wc.Headers["Origin"] = APIEndpoints.COMMUNITY_BASE;
-                wc.Headers[HttpRequestHeader.UserAgent] = SteamWeb.MOBILE_APP_USER_AGENT;
-                wc.Headers[HttpRequestHeader.ContentType] = "application/x-www-form-urlencoded; charset=UTF-8";
-                response = await wc.UploadStringTaskAsync(new Uri(url), "POST", query);
-            }
+            SteamWebResponse steamResponse = await SteamWeb.POSTRequestWithHeaders(
+                url,
+                this.Session.GetCookies(),
+                body,
+                new System.Collections.Generic.Dictionary<string, string> { ["Origin"] = APIEndpoints.COMMUNITY_BASE });
+            string response = steamResponse.Body;
             if (response == null) return false;
 
             SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response);
@@ -361,21 +413,6 @@ namespace SteamAuth
 
         public class WGTokenExpiredException : Exception
         {
-        }
-
-        private class RemoveAuthenticatorResponse
-        {
-            [JsonProperty("response")]
-            public RemoveAuthenticatorInternalResponse Response { get; set; }
-
-            internal class RemoveAuthenticatorInternalResponse
-            {
-                [JsonProperty("success")]
-                public bool Success { get; set; }
-
-                [JsonProperty("revocation_attempts_remaining")]
-                public int RevocationAttemptsRemaining { get; set; }
-            }
         }
 
         private class SendConfirmationResponse

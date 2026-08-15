@@ -9,6 +9,7 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using Newtonsoft.Json.Linq;
 using System.Drawing;
+using System.Threading;
 
 namespace Steam_Desktop_Authenticator
 {
@@ -51,6 +52,16 @@ namespace Steam_Desktop_Authenticator
         }
 
         private WebView2 webView;
+        private const int SteamConnectionTimeoutMilliseconds = 20000;
+        private CancellationTokenSource loginCancellationSource;
+        private SteamClient activeSteamClient;
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            loginCancellationSource?.Cancel();
+            activeSteamClient?.Disconnect();
+            base.OnFormClosing(e);
+        }
         private async void SetupModernUI()
         {
             this.Size = new Size(450, 750);
@@ -154,12 +165,27 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
-        private void ResetLoginButton()
+        private void ResetLoginButton(CancellationToken attemptCancellationToken)
         {
+            if (IsDisposed || loginCancellationSource == null || loginCancellationSource.Token != attemptCancellationToken)
+                return;
             btnSteamLogin.Enabled = true;
             btnSteamLogin.Text = "Login";
             if (webView != null && webView.CoreWebView2 != null)
                 _ = webView.CoreWebView2.ExecuteScriptAsync("setButtonState('LOGIN', false)");
+        }
+
+        private static async Task WaitForSteamConnectionAsync(SteamClient steamClient, CancellationToken cancellationToken)
+        {
+            DateTime deadlineUtc = DateTime.UtcNow.AddMilliseconds(SteamConnectionTimeoutMilliseconds);
+            while (!steamClient.IsConnected)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (DateTime.UtcNow >= deadlineUtc)
+                    throw new TimeoutException("SteamKit did not establish a connection before the login deadline.");
+
+                await Task.Delay(250, cancellationToken);
+            }
         }
 
         private async void btnSteamLogin_Click(object sender, EventArgs e)
@@ -173,15 +199,35 @@ namespace Steam_Desktop_Authenticator
             string username = txtUsername.Text;
             string password = txtPassword.Text;
 
-            // Start a new SteamClient instance
+            // A prior connection attempt can still be waiting on SteamKit. Cancel and
+            // disconnect it before replacing the active client, but do not dispose its
+            // source while that attempt may still be observing the token.
+            loginCancellationSource?.Cancel();
+            activeSteamClient?.Disconnect();
+            loginCancellationSource = new CancellationTokenSource();
+            CancellationToken cancellationToken = loginCancellationSource.Token;
+
+            // Start a new SteamClient instance and bound the connection wait.
             SteamClient steamClient = new SteamClient();
-
-            // Connect to Steam
-            steamClient.Connect();
-
-            // Really basic way to wait until Steam is connected
-            while (!steamClient.IsConnected)
-                await Task.Delay(500);
+            activeSteamClient = steamClient;
+            try
+            {
+                steamClient.Connect();
+                await WaitForSteamConnectionAsync(steamClient, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                DiagnosticErrorLogger.Log("Steam login", new OperationCanceledException(), "The sign-in was canceled before Steam connected.");
+                ResetLoginButton(cancellationToken);
+                return;
+            }
+            catch (TimeoutException ex)
+            {
+                DiagnosticErrorLogger.Log("Steam login", ex, "Steam did not connect before the configured deadline.");
+                AstroMessageBox.Show("Steam did not connect in time. Check your connection and try again.", "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ResetLoginButton(cancellationToken);
+                return;
+            }
 
             // Create a new auth session
             CredentialsAuthSession authSession;
@@ -195,13 +241,36 @@ namespace Steam_Desktop_Authenticator
                     IsPersistentSession = false,
                     PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_MobileApp,
                     ClientOSType = EOSType.Android9,
-                    Authenticator = new UserFormAuthenticator(this.account),
+                    Authenticator = new UserFormAuthenticator(this.account, this, cancellationToken),
                 });
+            }
+            catch (OperationCanceledException)
+            {
+                ResetLoginButton(cancellationToken);
+                return;
+            }
+            catch (AuthenticationException ex)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    ResetLoginButton(cancellationToken);
+                    return;
+                }
+                DiagnosticErrorLogger.Log("Steam login polling", ex, "Steam rejected the sign-in or confirmation code.");
+                AstroMessageBox.Show(GetLoginErrorMessage(ex), "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ResetLoginButton(cancellationToken);
+                return;
             }
             catch (Exception ex)
             {
-                AstroMessageBox.Show(ex.Message, "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                this.Close();
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    ResetLoginButton(cancellationToken);
+                    return;
+                }
+                DiagnosticErrorLogger.Log("Steam login start", ex, "Steam could not start the login request.");
+                AstroMessageBox.Show("Steam could not start the sign-in request. Check your connection and try again.", "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ResetLoginButton(cancellationToken);
                 return;
             }
 
@@ -211,10 +280,32 @@ namespace Steam_Desktop_Authenticator
             {
                 pollResponse = await authSession.PollingWaitForResultAsync();
             }
+            catch (OperationCanceledException)
+            {
+                ResetLoginButton(cancellationToken);
+                return;
+            }
+            catch (AuthenticationException ex)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    ResetLoginButton(cancellationToken);
+                    return;
+                }
+                AstroMessageBox.Show(GetLoginErrorMessage(ex), "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ResetLoginButton(cancellationToken);
+                return;
+            }
             catch (Exception ex)
             {
-                AstroMessageBox.Show(ex.Message, "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                this.Close();
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    ResetLoginButton(cancellationToken);
+                    return;
+                }
+                DiagnosticErrorLogger.Log("Steam login polling", ex, "Steam could not complete the login request.");
+                AstroMessageBox.Show("Steam could not complete the sign-in. Check your connection and try again.", "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ResetLoginButton(cancellationToken);
                 return;
             }
 
@@ -247,73 +338,41 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            // Show a dialog to make sure they really want to add their authenticator
-            var result = AstroMessageBox.Show("Steam account login succeeded. Press OK to continue adding SDA as your authenticator.", "Steam Login", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
-            if (result == DialogResult.Cancel)
-            {
-                AstroMessageBox.Show("Adding authenticator aborted.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                ResetLoginButton();
-                return;
-            }
-
             // Begin linking mobile authenticator
             AuthenticatorLinker linker = new AuthenticatorLinker(sessionData);
+            linker.FinalizationProgress += UpdateFinalizationProgress;
 
-            AuthenticatorLinker.LinkResult linkResponse = AuthenticatorLinker.LinkResult.GeneralFailure;
-            while (linkResponse != AuthenticatorLinker.LinkResult.AwaitingFinalization)
+            AuthenticatorEnrollmentCoordinator coordinator = new AuthenticatorEnrollmentCoordinator(
+                linker,
+                new LoginPhoneEnrollmentInteraction(account, this));
+            AuthenticatorEnrollmentOutcome enrollmentOutcome = await coordinator.StartAsync(cancellationToken);
+            switch (enrollmentOutcome.Result)
             {
-                try
-                {
-                    linkResponse = await linker.AddAuthenticator();
-                }
-                catch (Exception ex)
-                {
-                    AstroMessageBox.Show("Error adding your authenticator: " + ex.Message, "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    ResetLoginButton();
+                case AuthenticatorEnrollmentResult.AwaitingFinalization:
+                    break;
+
+                case AuthenticatorEnrollmentResult.AuthenticatorPresent:
+                    AstroMessageBox.Show("This account already has an authenticator linked. You must remove that authenticator to add SDA as your authenticator.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    this.Close();
                     return;
-                }
 
-                switch (linkResponse)
-                {
-                    case AuthenticatorLinker.LinkResult.MustProvidePhoneNumber:
+                case AuthenticatorEnrollmentResult.Canceled:
+                    ResetLoginButton(cancellationToken);
+                    return;
 
-                        // Show the phone input form
-                        PhoneInputForm phoneInputForm = new PhoneInputForm(account);
-                        phoneInputForm.ShowDialog();
-                        if (phoneInputForm.Canceled)
-                        {
-                            this.Close();
-                            return;
-                        }
-
-                        linker.PhoneNumber = phoneInputForm.PhoneNumber;
-                        linker.PhoneCountryCode = phoneInputForm.CountryCode;
-                        break;
-
-                    case AuthenticatorLinker.LinkResult.AuthenticatorPresent:
-                        AstroMessageBox.Show("This account already has an authenticator linked. You must remove that authenticator to add SDA as your authenticator.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        this.Close();
-                        return;
-
-                    case AuthenticatorLinker.LinkResult.FailureAddingPhone:
-                        AstroMessageBox.Show("Failed to add your phone number. Please try again or use a different phone number.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        linker.PhoneNumber = null;
-                        break;
-
-                    case AuthenticatorLinker.LinkResult.MustRemovePhoneNumber:
-                        linker.PhoneNumber = null;
-                        break;
-
-                    case AuthenticatorLinker.LinkResult.MustConfirmEmail:
-                        AstroMessageBox.Show("Please check your email, and click the link Steam sent you before continuing.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        break;
-
-                    case AuthenticatorLinker.LinkResult.GeneralFailure:
-                        AstroMessageBox.Show("Error adding your authenticator.", "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        this.Close();
-                        return;
-                }
-            } // End while loop checking for AwaitingFinalization
+                case AuthenticatorEnrollmentResult.Failed:
+                default:
+                    string enrollmentError = String.IsNullOrWhiteSpace(enrollmentOutcome.ErrorMessage)
+                        ? "Steam did not accept the authenticator enrollment request. Please try again later."
+                        : enrollmentOutcome.ErrorMessage;
+                    DiagnosticErrorLogger.Log(
+                        "Authenticator enrollment",
+                        new InvalidOperationException(enrollmentError),
+                        "Steam rejected or could not complete authenticator enrollment.");
+                    AstroMessageBox.Show("Error adding your authenticator: " + enrollmentError, "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    ResetLoginButton(cancellationToken);
+                    return;
+            }
 
             Manifest manifest = Manifest.GetManifest();
             string passKey = null;
@@ -326,64 +385,93 @@ namespace Steam_Desktop_Authenticator
                 bool passKeyValid = false;
                 while (!passKeyValid)
                 {
-                    InputForm passKeyForm = new InputForm("Please enter your current encryption passkey.");
-                    passKeyForm.ShowDialog();
-                    if (!passKeyForm.Canceled)
+                    using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey."))
                     {
-                        passKey = passKeyForm.txtBox.Text;
-                        passKeyValid = manifest.VerifyPasskey(passKey);
-                        if (!passKeyValid)
+                        passKeyForm.ShowDialog(this);
+                        if (!passKeyForm.Canceled)
                         {
-                            AstroMessageBox.Show("That passkey is invalid. Please enter the same passkey you used for your other accounts.");
+                            passKey = passKeyForm.txtBox.Text;
+                            passKeyValid = manifest.VerifyPasskey(passKey);
+                            if (!passKeyValid)
+                            {
+                                AstroMessageBox.Show("That passkey is invalid. Please enter the same passkey you used for your other accounts.");
+                            }
                         }
-                    }
-                    else
-                    {
-                        this.Close();
-                        return;
+                        else
+                        {
+                            this.Close();
+                            return;
+                        }
                     }
                 }
             }
 
             //Save the file immediately; losing this would be bad.
-            if (!manifest.SaveAccount(linker.LinkedAccount, passKey != null, passKey))
+            StorageResult initialSaveResult = manifest.SaveAccount(linker.LinkedAccount, passKey != null, passKey);
+            if (!initialSaveResult.Succeeded)
             {
-                manifest.RemoveAccount(linker.LinkedAccount);
-                AstroMessageBox.Show("Unable to save mobile authenticator file. The mobile authenticator has not been linked.");
+                DiagnosticErrorLogger.Log("Authenticator storage", initialSaveResult.Exception, "The initial authenticator record could not be saved.");
+                AstroMessageBox.Show(initialSaveResult.UserMessage ?? "Unable to save the mobile authenticator file. The setup was stopped before finalization.");
                 this.Close();
                 return;
             }
 
-            AstroMessageBox.Show("The Mobile Authenticator has not yet been linked. Before finalizing the authenticator, please write down your revocation code: " + linker.LinkedAccount.RevocationCode);
+            ShowRecoveryCode(linker.LinkedAccount, "The mobile authenticator is not linked yet. Save this recovery code before continuing.", true);
 
             AuthenticatorLinker.FinalizeResult finalizeResponse = AuthenticatorLinker.FinalizeResult.GeneralFailure;
+            bool previousFinalizationCodeWasInvalid = false;
             while (finalizeResponse != AuthenticatorLinker.FinalizeResult.Success)
             {
-                InputForm smsCodeForm = new InputForm("Please input the SMS code sent to your phone.");
-                smsCodeForm.ShowDialog();
-                if (smsCodeForm.Canceled)
+                string confirmationDestination = linker.FinalizationConfirmationType == AuthenticatorLinker.ConfirmationCodeType.Email
+                    ? "email address associated with your Steam account"
+                    : linker.FinalizationConfirmationType == AuthenticatorLinker.ConfirmationCodeType.SMS
+                        ? "phone number associated with your Steam account"
+                        : "confirmation method selected by Steam";
+                string confirmationCode;
+                using (InputForm confirmationCodeForm = new InputForm(
+                    previousFinalizationCodeWasInvalid
+                        ? "That confirmation code was not accepted. Please enter the correct code sent to your " + confirmationDestination + "."
+                        : "Please input the confirmation code sent to your " + confirmationDestination + "."))
                 {
-                    manifest.RemoveAccount(linker.LinkedAccount);
-                    this.Close();
+                    confirmationCodeForm.ShowDialog(this);
+                    if (confirmationCodeForm.Canceled)
+                    {
+                        manifest.RemoveAccount(linker.LinkedAccount);
+                        this.Close();
+                        return;
+                    }
+
+                    confirmationCode = confirmationCodeForm.txtBox.Text;
+                }
+                try
+                {
+                    finalizeResponse = await linker.FinalizeAddAuthenticator(confirmationCode, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    ResetLoginButton(cancellationToken);
                     return;
                 }
 
-                InputForm confirmRevocationCode = new InputForm("Please enter your revocation code to ensure you've saved it.");
-                confirmRevocationCode.ShowDialog();
-                if (confirmRevocationCode.txtBox.Text.ToUpper() != linker.LinkedAccount.RevocationCode)
+                if (finalizeResponse != AuthenticatorLinker.FinalizeResult.Success)
                 {
-                    AstroMessageBox.Show("Revocation code incorrect; the authenticator has not been linked.");
-                    manifest.RemoveAccount(linker.LinkedAccount);
-                    this.Close();
-                    return;
+                    DiagnosticErrorLogger.Log(
+                        "Authenticator finalization",
+                        new InvalidOperationException(linker.LastErrorMessage ?? "Steam did not finalize the authenticator."),
+                        "Steam rejected or could not confirm authenticator finalization.");
                 }
-
-                string smsCode = smsCodeForm.txtBox.Text;
-                finalizeResponse = await linker.FinalizeAddAuthenticator(smsCode);
 
                 switch (finalizeResponse)
                 {
-                    case AuthenticatorLinker.FinalizeResult.BadSMSCode:
+                    case AuthenticatorLinker.FinalizeResult.BadConfirmationCode:
+                        AstroMessageBox.Show(
+                            String.IsNullOrWhiteSpace(linker.LastErrorMessage)
+                                ? "Steam did not accept that confirmation code. Enter the current code sent to your email or phone and try again."
+                                : linker.LastErrorMessage,
+                            "Invalid Confirmation Code",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        previousFinalizationCodeWasInvalid = true;
                         continue;
 
                     case AuthenticatorLinker.FinalizeResult.UnableToGenerateCorrectCodes:
@@ -393,17 +481,148 @@ namespace Steam_Desktop_Authenticator
                         return;
 
                     case AuthenticatorLinker.FinalizeResult.GeneralFailure:
-                        AstroMessageBox.Show("Unable to finalize this authenticator. The authenticator should not have been linked. In the off-chance it was, please write down your revocation code, as this is the last chance to see it: " + linker.LinkedAccount.RevocationCode);
-                        manifest.RemoveAccount(linker.LinkedAccount);
-                        this.Close();
-                        return;
+                        AstroMessageBox.Show(String.IsNullOrWhiteSpace(linker.LastErrorMessage)
+                            ? "Steam could not finalize the authenticator yet. This may be temporary; enter a current confirmation code to try again, or cancel to stop setup."
+                            : linker.LastErrorMessage, "Steam Guard Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        previousFinalizationCodeWasInvalid = false;
+                        continue;
+
+                    case AuthenticatorLinker.FinalizeResult.RateLimited:
+                    case AuthenticatorLinker.FinalizeResult.NotFinalized:
+                        AstroMessageBox.Show(
+                            String.IsNullOrWhiteSpace(linker.LastErrorMessage)
+                                ? "Steam could not finalize the authenticator yet. This may be temporary; enter a current confirmation code to try again, or cancel to stop setup."
+                                : linker.LastErrorMessage,
+                            "Steam Guard Setup",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        previousFinalizationCodeWasInvalid = false;
+                        continue;
                 }
             }
 
-            //Linked, finally. Re-save with FullyEnrolled property.
-            manifest.SaveAccount(linker.LinkedAccount, passKey != null, passKey);
-            AstroMessageBox.Show("Mobile authenticator successfully linked. Please write down your revocation code: " + linker.LinkedAccount.RevocationCode);
+            // Linked, finally. Do not report success until the finalized record is durable.
+            StorageResult finalSaveResult = manifest.SaveAccount(linker.LinkedAccount, passKey != null, passKey);
+            if (!finalSaveResult.Succeeded)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", finalSaveResult.Exception, "Steam finalized the authenticator, but the finalized local record could not be saved.");
+                AstroMessageBox.Show(
+                    (finalSaveResult.UserMessage ?? "The finalized authenticator record could not be saved.") +
+                    " Steam may have linked the authenticator already. Keep the recovery code you downloaded and try opening the app again before making further account changes.",
+                    "Steam Guard Setup",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                this.Close();
+                return;
+            }
+            ShowRecoveryCode(linker.LinkedAccount, "Mobile authenticator successfully linked. Keep this recovery code safe.");
             this.Close();
+        }
+
+        private static string GetLoginErrorMessage(AuthenticationException exception)
+        {
+            switch (exception.Result)
+            {
+                case EResult.InvalidPassword:
+                    return "Steam rejected the username or password. Check both and try again.";
+
+                case EResult.RateLimitExceeded:
+                case EResult.AccountLoginDeniedThrottle:
+                    return "Steam is rate limiting sign-in attempts. Wait a while before trying again.";
+
+                case EResult.InvalidLoginAuthCode:
+                case EResult.TwoFactorCodeMismatch:
+                    return "Steam did not accept the email or Steam Guard code. Request or enter a newer code, then try again.";
+
+                case EResult.AccountLogonDenied:
+                case EResult.AccessDenied:
+                    return "Steam denied this sign-in attempt. Wait a while and check Steam Guard or account-security notifications before trying again.";
+
+                default:
+                    return "Steam rejected the sign-in request (" + exception.Result + "). Please try again later.";
+            }
+        }
+
+        private void UpdateFinalizationProgress(string message)
+        {
+            if (IsDisposed || String.IsNullOrWhiteSpace(message))
+                return;
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke((MethodInvoker)(() => UpdateFinalizationProgress(message)));
+                }
+                catch (InvalidOperationException)
+                {
+                    // The form was closed while the cancellation request was in flight.
+                }
+                return;
+            }
+
+            labelLoginExplanation.Text = message;
+            if (webView?.CoreWebView2 != null)
+                _ = webView.CoreWebView2.ExecuteScriptAsync("setExplanation(" + Newtonsoft.Json.JsonConvert.SerializeObject(message) + ");");
+        }
+
+        private sealed class LoginPhoneEnrollmentInteraction : IPhoneEnrollmentInteraction
+        {
+            private readonly SteamGuardAccount account;
+            private readonly Form owner;
+
+            public LoginPhoneEnrollmentInteraction(SteamGuardAccount account, Form owner)
+            {
+                this.account = account;
+                this.owner = owner;
+            }
+
+            public PhoneEnrollmentDetails RequestPhoneNumber()
+            {
+                using (PhoneInputForm phoneInputForm = new PhoneInputForm(account))
+                {
+                    phoneInputForm.ShowDialog(owner);
+                    return phoneInputForm.Canceled
+                        ? null
+                        : new PhoneEnrollmentDetails(phoneInputForm.PhoneNumber, phoneInputForm.CountryCode, phoneInputForm.ContinueWithoutPhone);
+                }
+            }
+
+            public bool ConfirmPhoneRequired()
+            {
+                DialogResult result = AstroMessageBox.ShowWithCustomButtons(
+                    "Steam requires a verified phone number to set up a mobile authenticator for this account. Continue to add and verify a phone number, or cancel setup.",
+                    "Phone Number Required",
+                    MessageBoxButtons.OKCancel,
+                    MessageBoxIcon.Information,
+                    "Continue",
+                    "Cancel");
+                return result == DialogResult.OK;
+            }
+
+            public bool ConfirmEmail(string confirmationEmailAddress)
+            {
+                string destination = string.IsNullOrWhiteSpace(confirmationEmailAddress)
+                    ? "your Steam account email address"
+                    : confirmationEmailAddress;
+                DialogResult result = AstroMessageBox.Show(
+                    "Steam sent a confirmation link to " + destination + ". Click that link, then select OK to send the SMS verification code.",
+                    "Confirm Phone Number",
+                    MessageBoxButtons.OKCancel,
+                    MessageBoxIcon.Information);
+                return result == DialogResult.OK;
+            }
+
+            public string RequestSmsCode(bool previousCodeWasInvalid)
+            {
+                string message = previousCodeWasInvalid
+                    ? "That SMS code was not accepted. Please enter the new code sent to your phone."
+                    : "Please enter the SMS code sent to your phone to verify the phone number.";
+                using (InputForm smsCodeForm = new InputForm(message))
+                {
+                    smsCodeForm.ShowDialog(owner);
+                    return smsCodeForm.Canceled ? null : smsCodeForm.txtBox.Text;
+                }
+            }
         }
 
         private void HandleManifest(Manifest man, bool IsRefreshing = false)
@@ -418,35 +637,55 @@ namespace Steam_Desktop_Authenticator
                 bool passKeyValid = false;
                 while (!passKeyValid)
                 {
-                    InputForm passKeyForm = new InputForm("Please enter your current encryption passkey.");
-                    passKeyForm.ShowDialog();
-                    if (!passKeyForm.Canceled)
+                    using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey."))
                     {
-                        passKey = passKeyForm.txtBox.Text;
-                        passKeyValid = man.VerifyPasskey(passKey);
-                        if (!passKeyValid)
+                        passKeyForm.ShowDialog(this);
+                        if (!passKeyForm.Canceled)
                         {
-                            AstroMessageBox.Show("That passkey is invalid. Please enter the same passkey you used for your other accounts.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            passKey = passKeyForm.txtBox.Text;
+                            passKeyValid = man.VerifyPasskey(passKey);
+                            if (!passKeyValid)
+                            {
+                                AstroMessageBox.Show("That passkey is invalid. Please enter the same passkey you used for your other accounts.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
                         }
-                    }
-                    else
-                    {
-                        this.Close();
-                        return;
+                        else
+                        {
+                            this.Close();
+                            return;
+                        }
                     }
                 }
             }
 
-            man.SaveAccount(account, passKey != null, passKey);
+            StorageResult saveResult = man.SaveAccount(account, passKey != null, passKey);
+            if (!saveResult.Succeeded)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", saveResult.Exception, IsRefreshing
+                    ? "The refreshed Steam session could not be saved."
+                    : "The finalized authenticator record could not be saved.");
+                AstroMessageBox.Show(saveResult.UserMessage ?? (IsRefreshing
+                    ? "The refreshed session could not be saved."
+                    : "The finalized authenticator record could not be saved."), "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
             if (IsRefreshing)
             {
                 AstroMessageBox.Show("Your session was refreshed.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
-                AstroMessageBox.Show("Mobile authenticator successfully linked. Please write down your revocation code: " + account.RevocationCode, "Steam Login", MessageBoxButtons.OK);
+                ShowRecoveryCode(account, "Mobile authenticator successfully linked. Keep this recovery code safe.");
             }
             this.Close();
+        }
+
+        private void ShowRecoveryCode(SteamGuardAccount recoveryAccount, string statusMessage, bool requireBackupBeforeContinue = false)
+        {
+            using (RecoveryCodeForm recoveryCodeForm = new RecoveryCodeForm(recoveryAccount, statusMessage, requireBackupBeforeContinue))
+            {
+                recoveryCodeForm.ShowDialog(this);
+            }
         }
 
         private void LoginForm_Load(object sender, EventArgs e)

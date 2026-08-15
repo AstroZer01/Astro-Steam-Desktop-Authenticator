@@ -46,20 +46,21 @@ namespace Steam_Desktop_Authenticator
 
         private void btnImport_Click(object sender, EventArgs e)
         {
+            Form dialogOwner = Owner;
             this.Close();
 
-            OpenFileDialog openFileDialog1 = new OpenFileDialog();
-            openFileDialog1.Filter = "maFiles (.maFile)|*.maFile|All Files (*.*)|*.*";
-            openFileDialog1.FilterIndex = 1;
-            openFileDialog1.Multiselect = false;
-
-            if (openFileDialog1.ShowDialog() != DialogResult.OK) return;
-
-            string fullPath = openFileDialog1.FileName;
-            string fileContents = File.ReadAllText(fullPath);
-
-            try
+            using (OpenFileDialog openFileDialog1 = new OpenFileDialog())
             {
+                openFileDialog1.Filter = "maFiles (.maFile)|*.maFile|All Files (*.*)|*.*";
+                openFileDialog1.FilterIndex = 1;
+                openFileDialog1.Multiselect = false;
+
+                if (openFileDialog1.ShowDialog(dialogOwner) != DialogResult.OK) return;
+
+                try
+                {
+                string fullPath = openFileDialog1.FileName;
+                string fileContents = File.ReadAllText(fullPath);
                 SteamGuardAccount maFile = null;
                 bool isEncrypted = false;
                 string salt = null;
@@ -93,9 +94,9 @@ namespace Steam_Desktop_Authenticator
                             }
                         }
                     }
-                    catch (Exception)
+                    catch (Exception ex)
                     {
-                        // Ignore manifest parse errors
+                        DiagnosticErrorLogger.Log("Account import", ex, "The source manifest could not be read; the selected maFile will be imported without its source encryption metadata.");
                     }
                 }
 
@@ -111,11 +112,13 @@ namespace Steam_Desktop_Authenticator
                     if (decryptedText == null)
                     {
                         // Prompt user for import passkey
-                        InputForm passKeyForm = new InputForm("Enter the passkey for the imported account.");
-                        passKeyForm.ShowDialog();
-                        if (passKeyForm.Canceled) return;
-
-                        string importedPassKey = passKeyForm.txtBox.Text;
+                        string importedPassKey;
+                        using (InputForm passKeyForm = new InputForm("Enter the passkey for the imported account.", true))
+                        {
+                            ShowOwnedDialog(passKeyForm, dialogOwner);
+                            if (passKeyForm.Canceled) return;
+                            importedPassKey = passKeyForm.txtBox.Text;
+                        }
                         decryptedText = FileEncryptor.DecryptData(importedPassKey, salt, iv, fileContents);
 
                         if (decryptedText == null)
@@ -129,30 +132,48 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 maFile = JsonConvert.DeserializeObject<SteamGuardAccount>(fileContents);
-                if (maFile == null) throw new Exception();
+                if (maFile == null) throw new InvalidDataException("The selected file did not contain a Steam Guard account.");
 
                 if (maFile.Session == null || maFile.Session.SteamID == 0 || maFile.Session.IsAccessTokenExpired())
                 {
-                    LoginForm loginForm = new LoginForm(LoginForm.LoginType.Import, maFile);
-                    loginForm.ShowDialog();
-
-                    if (loginForm.Session == null || loginForm.Session.SteamID == 0)
+                    using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Import, maFile))
                     {
-                        MessageBox.Show("Login failed. Try to import this account again.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        return;
-                    }
+                        ShowOwnedDialog(loginForm, dialogOwner);
+                        if (loginForm.Session == null || loginForm.Session.SteamID == 0)
+                        {
+                            MessageBox.Show("Login failed. Try to import this account again.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
 
-                    maFile.Session = loginForm.Session;
+                        maFile.Session = loginForm.Session;
+                    }
                 }
 
-                // Save account, applying destination encryption securely
-                mManifest.SaveAccount(maFile, mManifest.Encrypted, mCurrentPassKey);
+                // Save account, applying destination encryption securely.
+                StorageResult saveResult = mManifest.SaveAccount(maFile, mManifest.Encrypted, mCurrentPassKey);
+                if (!saveResult.Succeeded)
+                {
+                    DiagnosticErrorLogger.Log("Account import", saveResult.Exception, "The import was canceled because local account persistence failed.");
+                    AstroMessageBox.Show(saveResult.UserMessage ?? "The account could not be saved. No import was completed.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
                 MessageBox.Show("Account Imported!", "Account Import", MessageBoxButtons.OK);
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Account import", ex, "The selected maFile could not be imported.");
+                    MessageBox.Show("This file is not a valid SteamAuth maFile or decryption failed.\nImport Failed.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
-            catch (Exception)
-            {
-                MessageBox.Show("This file is not a valid SteamAuth maFile or decryption failed.\nImport Failed.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+        }
+
+        private static void ShowOwnedDialog(Form dialog, Form dialogOwner)
+        {
+            if (dialogOwner != null && dialogOwner.Visible && !dialogOwner.IsDisposed)
+                dialog.ShowDialog(dialogOwner);
+            else
+                dialog.ShowDialog();
         }
 
         private void btnCancel_Click(object sender, EventArgs e)

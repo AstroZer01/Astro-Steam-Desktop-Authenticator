@@ -5,6 +5,7 @@ using CommandLine;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using SteamAuth;
 
 namespace Steam_Desktop_Authenticator
 {
@@ -117,6 +118,7 @@ namespace Steam_Desktop_Authenticator
         [STAThread]
         static void Main(string[] args)
         {
+            SteamAuthDiagnostics.ErrorLogger = (exception, context) => DiagnosticErrorLogger.Log("SteamAuth", exception, context);
             bool createdNew;
             instanceMutex = new Mutex(true, InstanceMutexName, out createdNew);
             if (!createdNew)

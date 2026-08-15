@@ -33,7 +33,7 @@ namespace Steam_Desktop_Authenticator
         private Manifest manifest;
         private static SemaphoreSlim confirmationsSemaphore = new SemaphoreSlim(1, 1);
         private readonly SemaphoreSlim loginActionsSemaphore = new SemaphoreSlim(1, 1);
-        private readonly System.Windows.Forms.Timer loginActionsTimer = new System.Windows.Forms.Timer() { Interval = 5000 };
+        private readonly System.Windows.Forms.Timer loginActionsTimer = new System.Windows.Forms.Timer() { Interval = 2000 };
         private readonly HashSet<string> notifiedLoginRequests = new HashSet<string>();
         private readonly HashSet<string> notifiedUnavailableLoginAccounts = new HashSet<string>();
         private readonly Dictionary<string, DateTime> automatedLoginActionNotifications = new Dictionary<string, DateTime>();
@@ -58,6 +58,12 @@ namespace Steam_Desktop_Authenticator
         private DateTime tradeRateLimitedUntilUtc = DateTime.MinValue;
         private readonly object loginRateLimitLock = new object();
         private DateTime loginRateLimitedUntilUtc = DateTime.MinValue;
+        private readonly Dictionary<ulong, LoginMonitorSchedule> loginMonitorSchedules = new Dictionary<ulong, LoginMonitorSchedule>();
+        private int loginMonitoringAccountIndex;
+        private long loginMonitorRequestCount;
+        private static readonly TimeSpan LoginMonitorSuccessInterval = TimeSpan.FromSeconds(12);
+        private static readonly TimeSpan LoginMonitorInitialFailureBackoff = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan LoginMonitorMaximumFailureBackoff = TimeSpan.FromMinutes(5);
         private int tradeMonitoringAccountIndex;
         private string activeWebTab = "authenticator";
         private long tradeViewRevision;
@@ -80,7 +86,6 @@ namespace Steam_Desktop_Authenticator
         private static extern short GetAsyncKeyState(int vKey);
 
         // Forms
-        private TradePopupForm popupFrm = new TradePopupForm();
         private ToolStripMenuItem trayLoginActions;
         private ToolStripMenuItem trayAccountHeading;
         private QrScanOverlayForm qrScanOverlay;
@@ -175,7 +180,7 @@ namespace Steam_Desktop_Authenticator
                         return await account.FetchConfirmationsAsync();
                     });
                 }
-                catch (WebException ex) when (IsRateLimitedResponse(ex))
+                catch (Exception ex) when (IsRateLimitedResponse(ex))
                 {
                     throw ApplyTradeRateLimit(ex);
                 }
@@ -207,17 +212,23 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private TradeRateLimitedException ApplyTradeRateLimit(WebException exception)
+        private TradeRateLimitedException ApplyTradeRateLimit(Exception exception)
         {
             TimeSpan delay = TimeSpan.FromSeconds(60);
-            if (exception.Response is HttpWebResponse response)
+            string retryAfter = null;
+            if (exception is SteamWebRequestException steamException)
             {
-                string retryAfter = response.Headers?["Retry-After"];
-                if (Int32.TryParse(retryAfter, out int retryAfterSeconds) && retryAfterSeconds > 0)
-                    delay = TimeSpan.FromSeconds(retryAfterSeconds);
-                else if (DateTimeOffset.TryParse(retryAfter, out DateTimeOffset retryAfterUtc))
-                    delay = retryAfterUtc.UtcDateTime - DateTime.UtcNow;
+                retryAfter = steamException.Headers?["Retry-After"];
             }
+            else if (exception is WebException webException && webException.Response is HttpWebResponse response)
+            {
+                retryAfter = response.Headers?["Retry-After"];
+            }
+
+            if (Int32.TryParse(retryAfter, out int retryAfterSeconds) && retryAfterSeconds > 0)
+                delay = TimeSpan.FromSeconds(retryAfterSeconds);
+            else if (DateTimeOffset.TryParse(retryAfter, out DateTimeOffset retryAfterUtc))
+                delay = retryAfterUtc.UtcDateTime - DateTime.UtcNow;
 
             if (delay < TimeSpan.FromSeconds(15))
                 delay = TimeSpan.FromSeconds(15);
@@ -235,9 +246,13 @@ namespace Steam_Desktop_Authenticator
             return new TradeRateLimitedException(message);
         }
 
-        private static bool IsRateLimitedResponse(WebException exception)
+        private static bool IsRateLimitedResponse(Exception exception)
         {
-            return exception?.Response is HttpWebResponse response && (int)response.StatusCode == 429;
+            if (exception is SteamWebRequestException steamException)
+                return steamException.StatusCode == HttpStatusCode.TooManyRequests;
+            return exception is WebException webException &&
+                webException.Response is HttpWebResponse response &&
+                response.StatusCode == HttpStatusCode.TooManyRequests;
         }
 
         private bool TryGetLoginRateLimitMessage(out string message)
@@ -472,8 +487,10 @@ namespace Steam_Desktop_Authenticator
 
         private void btnSteamLogin_Click(object sender, EventArgs e)
         {
-            var loginForm = new LoginForm();
-            loginForm.ShowDialog();
+            using (LoginForm loginForm = new LoginForm())
+            {
+                loginForm.ShowDialog(this);
+            }
             this.loadAccountsList();
         }
 
@@ -605,13 +622,17 @@ namespace Steam_Desktop_Authenticator
                     {
                         string response = await currentAccount.SignInViaQR(idOfQR);
                         if (response != "1")
-                            AstroMessageBox.Show($"Can't log in to account.\n\nDebug Info:\nID: {idOfQR}\nEResult: {response}\n\nTry refreshing the Steam login page and scan again.", "Something went wrong!", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        {
+                            DiagnosticErrorLogger.Log("QR login approval", new InvalidOperationException("Steam rejected a QR login approval with EResult " + response + "."), "The QR login approval was not accepted.");
+                            AstroMessageBox.Show(GetQrLoginFailureMessage(response), "QR Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
                         else
                             AstroMessageBox.Show("Successfully logged in via QR code!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                     catch (Exception ex)
                     {
-                        AstroMessageBox.Show($"Exception during QR Login:\n\nID: {idOfQR}\nError: {ex.Message}", "API Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        DiagnosticErrorLogger.Log("QR login approval", ex, "The QR login approval request failed.");
+                        AstroMessageBox.Show("Steam could not complete the QR login approval. Refresh the Steam login page and scan a new QR code, then try again.", "QR Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 }
             }
@@ -630,19 +651,21 @@ namespace Steam_Desktop_Authenticator
         {
             if (manifest.Encrypted)
             {
-                InputForm currentPassKeyForm = new InputForm("Enter current passkey to remove encryption", true);
-                currentPassKeyForm.ShowDialog();
-
-                if (currentPassKeyForm.Canceled)
+                string curPassKey;
+                using (InputForm currentPassKeyForm = new InputForm("Enter current passkey to remove encryption", true))
                 {
-                    return;
+                    currentPassKeyForm.ShowDialog(this);
+                    if (currentPassKeyForm.Canceled)
+                        return;
+
+                    curPassKey = currentPassKeyForm.txtBox.Text;
                 }
 
-                string curPassKey = currentPassKeyForm.txtBox.Text;
-
-                if (!manifest.ChangeEncryptionKey(curPassKey, null))
+                StorageResult encryptionResult = manifest.ChangeEncryptionKey(curPassKey, null);
+                if (!encryptionResult.Succeeded)
                 {
-                    AstroMessageBox.Show("Unable to remove passkey. Incorrect passkey?");
+                    DiagnosticErrorLogger.Log("Authenticator storage", encryptionResult.Exception, "Removing encryption from authenticator files failed.");
+                    AstroMessageBox.Show(encryptionResult.UserMessage ?? "Unable to remove passkey. Incorrect passkey?");
                 }
                 else
                 {
@@ -695,9 +718,15 @@ namespace Steam_Desktop_Authenticator
                 DialogResult res = AstroMessageBox.Show("This will remove the selected account from the manifest file.\nUse this to move a maFile to another computer.\nThis will NOT delete your maFile.", "Remove from manifest", MessageBoxButtons.OKCancel);
                 if (res == DialogResult.OK)
                 {
-                    manifest.RemoveAccount(currentAccount, false);
-                    AstroMessageBox.Show("Account removed from manifest.\nYou can now move its maFile to another computer and import it using the File menu.", "Remove from manifest");
-                    loadAccountsList();
+                    if (manifest.RemoveAccount(currentAccount, passKey, false))
+                    {
+                        AstroMessageBox.Show("Account removed from manifest.\nYou can now move its maFile to another computer and import it using the File menu.", "Remove from manifest");
+                        loadAccountsList();
+                    }
+                    else
+                    {
+                        AstroMessageBox.Show("This app could not remove the account from the manifest. No files were deleted.", "Remove from manifest", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
                 }
             }
         }
@@ -710,7 +739,7 @@ namespace Steam_Desktop_Authenticator
         private void menuImportAccount_Click(object sender, EventArgs e)
         {
             ImportAccountForm currentImport_maFile_Form = new ImportAccountForm(this.passKey);
-            currentImport_maFile_Form.ShowDialog();
+            currentImport_maFile_Form.ShowDialog(this);
             loadAccountsList();
         }
 
@@ -739,7 +768,8 @@ namespace Steam_Desktop_Authenticator
                 }
                 catch (Exception ex)
                 {
-                    AstroMessageBox.Show(ex.Message, "Deactivate Authenticator Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    DiagnosticErrorLogger.Log("Steam Guard deactivation", ex, "Steam Guard could not be removed from the selected account.");
+                    AstroMessageBox.Show("Steam Guard could not be removed. Check the account's login status and try again.", "Deactivate Authenticator Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
             }
@@ -762,15 +792,16 @@ namespace Steam_Desktop_Authenticator
             if (scheme != 0)
             {
                 string confCode = currentAccount.GenerateSteamGuardCode();
-                InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", currentAccount.AccountName, confCode));
-                confirmationDialog.ShowDialog();
-
-                if (confirmationDialog.Canceled)
+                string enteredCode;
+                using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", currentAccount.AccountName, confCode)))
                 {
-                    return;
+                    confirmationDialog.ShowDialog(this);
+                    if (confirmationDialog.Canceled)
+                        return;
+
+                    enteredCode = confirmationDialog.txtBox.Text.ToUpperInvariant();
                 }
 
-                string enteredCode = confirmationDialog.txtBox.Text.ToUpper();
                 if (enteredCode != confCode)
                 {
                     AstroMessageBox.Show("Confirmation codes do not match. Steam Guard not removed.");
@@ -786,12 +817,178 @@ namespace Steam_Desktop_Authenticator
                 }
                 else
                 {
-                    AstroMessageBox.Show("Steam Guard failed to deactivate.");
+                    AstroMessageBox.Show(String.IsNullOrWhiteSpace(currentAccount.LastAuthenticatorOperationError)
+                        ? "Steam Guard failed to deactivate."
+                        : currentAccount.LastAuthenticatorOperationError);
                 }
             }
             else
             {
                 AstroMessageBox.Show("Steam Guard was not removed. No action was taken.");
+            }
+        }
+
+        private static string GetQrLoginFailureMessage(string result)
+        {
+            if (!Int32.TryParse(result, out int steamResult))
+                return "Steam returned an invalid QR login response. Refresh the Steam login page and scan a new QR code.";
+
+            switch (steamResult)
+            {
+                case 84:
+                case 87:
+                    return "Steam is rate limiting QR login approvals. Wait a while, then scan a new QR code and try again.";
+                case 15:
+                    return "Steam denied this QR login approval. Refresh the Steam login page and scan a new QR code.";
+                case 20:
+                case 27:
+                case 29:
+                    return "That QR login request has expired or is no longer available. Refresh the Steam login page and scan a new QR code.";
+                default:
+                    return "Steam did not accept this QR login approval. Refresh the Steam login page and scan a new QR code.";
+            }
+        }
+
+        private async Task RemoveManagedAccountAsync(ulong? steamId, string accountName, string removalMode)
+        {
+            bool removeSteamGuard = removalMode == "unlink";
+            SteamGuardAccount account = null;
+            if (allAccounts != null)
+            {
+                if (steamId.HasValue)
+                {
+                    account = allAccounts.FirstOrDefault(candidate => candidate.Session != null && candidate.Session.SteamID == steamId.Value);
+                }
+                else if (!removeSteamGuard && !String.IsNullOrWhiteSpace(accountName))
+                {
+                    SteamGuardAccount[] localMatches = allAccounts
+                        .Where(candidate => candidate.Session == null && String.Equals(candidate.AccountName, accountName, StringComparison.Ordinal))
+                        .Take(2)
+                        .ToArray();
+                    if (localMatches.Length == 1)
+                        account = localMatches[0];
+                }
+            }
+            if (account == null)
+            {
+                AstroMessageBox.Show("That account is no longer managed by this app.", "Remove Account", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (removeSteamGuard && account.Session == null)
+            {
+                AstroMessageBox.Show("Steam Guard cannot be removed because this local account does not have a saved Steam session. You can still remove it from this app.", "Remove Steam Guard", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string confirmationText = removeSteamGuard
+                ? "This will permanently remove Steam Guard from " + account.AccountName + ", then delete this account's local maFile and manifest entry. This decision is final. Continue?"
+                : "This will permanently delete only " + account.AccountName + "'s local maFile and manifest entry. Steam Guard will remain enabled on the Steam account. This decision is final. Continue?";
+            DialogResult confirmation = AstroMessageBox.Show(
+                confirmationText,
+                removeSteamGuard ? "Remove Steam Guard" : "Remove Account from App",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (confirmation != DialogResult.Yes)
+                return;
+
+            bool steamGuardWasRemoved = false;
+            bool steamGuardRemovalStatusUnknown = false;
+            if (removeSteamGuard)
+            {
+                if (account.Session.IsRefreshTokenExpired())
+                {
+                    AstroMessageBox.Show("Your session has expired. Log in again before removing Steam Guard.", "Remove Steam Guard", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                if (account.Session.IsAccessTokenExpired())
+                {
+                    try
+                    {
+                        await account.Session.RefreshAccessToken();
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Managed account removal", ex, "The Steam session could not be refreshed before Steam Guard removal.");
+                        AstroMessageBox.Show("Steam could not refresh this account session. Check your connection or sign in again before removing Steam Guard.", "Remove Steam Guard Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                }
+
+                string confirmationCode = account.GenerateSteamGuardCode();
+                string enteredConfirmationCode;
+                using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", account.AccountName, confirmationCode)))
+                {
+                    confirmationDialog.ShowDialog(this);
+                    if (confirmationDialog.Canceled)
+                        return;
+
+                    enteredConfirmationCode = confirmationDialog.txtBox.Text;
+                }
+
+                if (!String.Equals(enteredConfirmationCode, confirmationCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    AstroMessageBox.Show("Confirmation codes do not match. Steam Guard was not removed.", "Remove Steam Guard", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                if (!await account.DeactivateAuthenticator(2))
+                {
+                    string failureMessage = String.IsNullOrWhiteSpace(account.LastAuthenticatorOperationError)
+                        ? "Steam Guard removal could not be verified."
+                        : account.LastAuthenticatorOperationError;
+                    DialogResult removeLocalData = AstroMessageBox.Show(
+                        failureMessage + "\n\nSteam Guard may already have been removed. Remove only this account's local data now, or cancel and verify the Steam Guard status first.",
+                        "Remove Steam Guard",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning);
+                    if (removeLocalData != DialogResult.Yes)
+                        return;
+
+                    steamGuardRemovalStatusUnknown = true;
+                }
+                else
+                {
+                    steamGuardWasRemoved = true;
+                }
+            }
+
+            if (!manifest.RemoveAccount(account, passKey))
+            {
+                AstroMessageBox.Show(
+                    steamGuardWasRemoved
+                        ? "Steam Guard was removed, but this app could not remove the local account data. Use Remove user from app to retry only the local cleanup."
+                        : steamGuardRemovalStatusUnknown
+                        ? "The app could not verify the Steam Guard status and could not remove this account's local data. Verify Steam Guard on Steam, then use Remove user from app to retry only the local cleanup."
+                        : "This app could not remove the local account data. Retry the removal to finish the cleanup.",
+                    steamGuardWasRemoved ? "Steam Guard Removed" : "Remove Account Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
+            loadAccountsList();
+            AstroMessageBox.Show(
+                steamGuardWasRemoved
+                    ? "Steam Guard was removed and this account's local data was deleted."
+                    : steamGuardRemovalStatusUnknown
+                    ? "This account's local data was deleted. The app could not verify whether Steam Guard was removed; check the account on Steam."
+                    : "This account's local data was deleted. Steam Guard remains enabled on Steam.",
+                steamGuardWasRemoved ? "Steam Guard Removed" : "Account Removed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+
+        private async Task RemoveManagedAccountFromWebAsync(ulong? steamId, string accountName, string removalMode)
+        {
+            try
+            {
+                await RemoveManagedAccountAsync(steamId, accountName, removalMode);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Managed account removal", ex, "The account removal command failed.");
+                AstroMessageBox.Show("This app could not complete the account removal. No other accounts were changed.", "Remove Account", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -1067,12 +1264,22 @@ namespace Steam_Desktop_Authenticator
             {
                 string currentDeviceIp = null;
                 bool currentDeviceIpChecked = false;
-                foreach (SteamGuardAccount account in allAccounts)
+                SteamGuardAccount nextAccount = GetNextLoginAccountToMonitor();
+                if (nextAccount == null)
+                    return;
+
+                foreach (SteamGuardAccount account in new[] { nextAccount })
                 {
+                    Dictionary<ulong, PendingLoginRequest> knownRequests = pendingLoginRequests.Values
+                        .Where(request => request.SteamId == account.Session.SteamID)
+                        .GroupBy(request => request.ClientId)
+                        .ToDictionary(group => group.Key, group => group.First());
+                    Interlocked.Increment(ref loginMonitorRequestCount);
                     LoginApprovalFetchResult result = await RunSteamAccountOperationAsync(account,
-                        () => loginApprovalService.FetchPendingRequestsAsync(account));
+                        () => loginApprovalService.FetchPendingRequestsAsync(account, knownRequests));
                     if (result.ErrorKind == LoginApprovalErrorKind.SessionExpired)
                     {
+                        ScheduleLoginAccountScan(account, TimeSpan.FromMinutes(5), true);
                         unavailableLoginAccounts[account.AccountName] = result.ErrorMessage;
                         if (notifiedUnavailableLoginAccounts.Add(account.AccountName))
                         {
@@ -1084,12 +1291,16 @@ namespace Steam_Desktop_Authenticator
                     if (result.ErrorKind == LoginApprovalErrorKind.RateLimited)
                     {
                         ApplyLoginRateLimit();
+                        ScheduleLoginAccountScan(account, LoginMonitorMaximumFailureBackoff, true);
                         DiagnosticErrorLogger.Log("Login action monitor", new InvalidOperationException(result.ErrorMessage), "Steam rate limited the login-request monitor.");
                         return;
                     }
 
                     if (result.ErrorKind != LoginApprovalErrorKind.None)
+                    {
+                        ScheduleLoginAccountFailure(account);
                         continue;
+                    }
 
                     notifiedUnavailableLoginAccounts.Remove(account.AccountName);
                     unavailableLoginAccounts.Remove(account.AccountName);
@@ -1148,6 +1359,7 @@ namespace Steam_Desktop_Authenticator
                         if (actionResult.ErrorKind == LoginApprovalErrorKind.RateLimited)
                         {
                             ApplyLoginRateLimit();
+                            ScheduleLoginAccountScan(account, LoginMonitorMaximumFailureBackoff, true);
                             DiagnosticErrorLogger.Log("Login action monitor", new InvalidOperationException(actionResult.ErrorMessage), "Steam rate limited an automatic login action.");
                             return;
                         }
@@ -1176,6 +1388,7 @@ namespace Steam_Desktop_Authenticator
                     }
 
                     ReconcilePendingLoginRequestsForAccount(account, result.Requests);
+                    ScheduleLoginAccountScan(account, LoginMonitorSuccessInterval, true);
                 }
             }
             finally
@@ -1286,7 +1499,77 @@ namespace Steam_Desktop_Authenticator
 
         private bool PersistLoginSession(SteamGuardAccount account)
         {
-            return manifest != null && manifest.SaveAccount(account, manifest.Encrypted, passKey);
+            if (manifest == null)
+                return false;
+
+            StorageResult saveResult = manifest.SaveAccount(account, manifest.Encrypted, passKey);
+            if (!saveResult.Succeeded)
+                DiagnosticErrorLogger.Log("Authenticator storage", saveResult.Exception, "The updated Steam login session could not be saved.");
+            return saveResult.Succeeded;
+        }
+
+        private SteamGuardAccount GetNextLoginAccountToMonitor()
+        {
+            SteamGuardAccount[] accountsToMonitor = (allAccounts ?? Array.Empty<SteamGuardAccount>())
+                .Where(account => account?.Session != null)
+                .ToArray();
+            if (accountsToMonitor.Length == 0)
+                return null;
+
+            DateTime now = DateTime.UtcNow;
+            for (int attempt = 0; attempt < accountsToMonitor.Length; attempt++)
+            {
+                loginMonitoringAccountIndex = ((loginMonitoringAccountIndex % accountsToMonitor.Length) + accountsToMonitor.Length) % accountsToMonitor.Length;
+                SteamGuardAccount candidate = accountsToMonitor[loginMonitoringAccountIndex];
+                loginMonitoringAccountIndex = (loginMonitoringAccountIndex + 1) % accountsToMonitor.Length;
+                if (!loginMonitorSchedules.TryGetValue(candidate.Session.SteamID, out LoginMonitorSchedule schedule) || schedule.NextScanUtc <= now)
+                    return candidate;
+            }
+
+            return null;
+        }
+
+        private void ScheduleLoginAccountScan(SteamGuardAccount account, TimeSpan interval, bool resetFailureCount)
+        {
+            if (account?.Session == null)
+                return;
+
+            if (!loginMonitorSchedules.TryGetValue(account.Session.SteamID, out LoginMonitorSchedule schedule))
+            {
+                schedule = new LoginMonitorSchedule();
+                loginMonitorSchedules[account.Session.SteamID] = schedule;
+            }
+            if (resetFailureCount)
+                schedule.ConsecutiveFailures = 0;
+
+            // Stable per-account jitter prevents accounts from re-forming a request burst.
+            int jitterMilliseconds = (int)(account.Session.SteamID % 3001) - 1500;
+            schedule.NextScanUtc = DateTime.UtcNow.Add(interval).AddMilliseconds(jitterMilliseconds);
+            Debug.WriteLine("Login monitor scheduled next scan; account=" + account.Session.SteamID + "; next=" + schedule.NextScanUtc.ToString("O") + "; requests=" + Interlocked.Read(ref loginMonitorRequestCount));
+        }
+
+        private void ScheduleLoginAccountFailure(SteamGuardAccount account)
+        {
+            if (account?.Session == null)
+                return;
+
+            if (!loginMonitorSchedules.TryGetValue(account.Session.SteamID, out LoginMonitorSchedule schedule))
+            {
+                schedule = new LoginMonitorSchedule();
+                loginMonitorSchedules[account.Session.SteamID] = schedule;
+            }
+            schedule.ConsecutiveFailures = Math.Min(schedule.ConsecutiveFailures + 1, 10);
+            double multiplier = Math.Pow(2, schedule.ConsecutiveFailures - 1);
+            TimeSpan backoff = TimeSpan.FromSeconds(Math.Min(
+                LoginMonitorInitialFailureBackoff.TotalSeconds * multiplier,
+                LoginMonitorMaximumFailureBackoff.TotalSeconds));
+            ScheduleLoginAccountScan(account, backoff, false);
+        }
+
+        private sealed class LoginMonitorSchedule
+        {
+            public DateTime NextScanUtc { get; set; }
+            public int ConsecutiveFailures { get; set; }
         }
 
         private static string BuildLoginRequestKey(ulong steamId, ulong clientId)
@@ -1755,10 +2038,9 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            var loginForm = new LoginForm(LoginForm.LoginType.Refresh, account);
-            if (!loginForm.IsDisposed)
+            using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Refresh, account))
             {
-                loginForm.ShowDialog();
+                loginForm.ShowDialog(this);
             }
         }
 
@@ -1769,7 +2051,6 @@ namespace Steam_Desktop_Authenticator
         {
             if (currentAccount != null && steamTime != 0)
             {
-                popupFrm.Account = currentAccount;
                 string token = currentAccount.GenerateSteamGuardCodeForTime(steamTime);
                 txtLoginToken.Text = token;
                 groupAccount.Text = "Account: " + currentAccount.AccountName;
@@ -1843,9 +2124,13 @@ namespace Steam_Desktop_Authenticator
 
             if (webView != null && webView.CoreWebView2 != null)
             {
-                var names = allAccounts.Select(a => a.AccountName).ToArray();
-                string jsonNames = JsonConvert.SerializeObject(names);
-                webView.CoreWebView2.ExecuteScriptAsync($"updateAccountList({jsonNames})");
+                var accounts = allAccounts.Select(a => new
+                {
+                    name = a.AccountName,
+                    steamId = a.Session == null ? null : a.Session.SteamID.ToString()
+                }).ToArray();
+                string jsonAccounts = JsonConvert.SerializeObject(accounts);
+                webView.CoreWebView2.ExecuteScriptAsync($"updateAccountList({jsonAccounts})");
                 webView.CoreWebView2.ExecuteScriptAsync($"updateEncryptionState({manifest.Encrypted.ToString().ToLower()}, {hasAccounts.ToString().ToLower()})");
             }
         }
@@ -2236,7 +2521,7 @@ namespace Steam_Desktop_Authenticator
             {
                 this.BeginInvoke((MethodInvoker)delegate { 
                     ImportAccountForm importForm = new ImportAccountForm(this.passKey);
-                    importForm.ShowDialog();
+                    importForm.ShowDialog(this);
                     this.loadAccountsList();
                 });
             }
@@ -2248,14 +2533,42 @@ namespace Steam_Desktop_Authenticator
             else if (action == "switch_account")
             {
                 string accName = (string)payload["accountName"];
-                for (int i = 0; i < allAccounts.Length; i++)
+                string steamIdText = (string)payload["steamId"];
+                ulong steamId;
+                SteamGuardAccount selectedAccount = null;
+                if (allAccounts != null && ulong.TryParse(steamIdText, out steamId))
                 {
-                    if (allAccounts[i].AccountName == accName)
-                    {
-                        currentAccount = allAccounts[i];
-                        loadAccountInfo();
-                        break;
-                    }
+                    selectedAccount = allAccounts.FirstOrDefault(account => account.Session != null && account.Session.SteamID == steamId);
+                }
+
+                if (allAccounts != null && selectedAccount == null)
+                    selectedAccount = allAccounts.FirstOrDefault(account => account.AccountName == accName);
+
+                if (selectedAccount != null)
+                {
+                    currentAccount = selectedAccount;
+                    loadAccountInfo();
+                }
+            }
+            else if (action == "remove_account")
+            {
+                string steamIdText = (string)payload["steamId"];
+                string accountName = (string)payload["accountName"];
+                string removalMode = (string)payload["removalMode"];
+                ulong steamId;
+                bool hasSteamId = ulong.TryParse(steamIdText, out steamId);
+                bool validMode = removalMode == "unlink" || removalMode == "remove";
+                bool validLocalRemoval = removalMode == "remove" && !String.IsNullOrWhiteSpace(accountName);
+                if (validMode && (hasSteamId || validLocalRemoval))
+                {
+                    ulong? selectedSteamId = hasSteamId ? steamId : (ulong?)null;
+                    this.BeginInvoke((MethodInvoker)delegate { _ = RemoveManagedAccountFromWebAsync(selectedSteamId, accountName, removalMode); });
+                }
+                else
+                {
+                    AstroMessageBox.Show("The requested account removal is invalid. Refresh the account list and try again.", "Remove Account", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    if (webView != null && webView.CoreWebView2 != null)
+                        _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner();");
                 }
             }
             else if (action == "load_settings")
@@ -2423,9 +2736,11 @@ namespace Steam_Desktop_Authenticator
                 await confirmationsSemaphore.WaitAsync();
                 try
                 {
-                    await RunSteamAccountOperationAsync(entry.Account, () => accept
+                    bool steamAcceptedAction = await RunSteamAccountOperationAsync(entry.Account, () => accept
                         ? entry.Account.AcceptConfirmation(entry.Confirmation)
                         : entry.Account.DenyConfirmation(entry.Confirmation));
+                    if (!steamAcceptedAction)
+                        throw new InvalidOperationException("Steam did not accept that confirmation action. The confirmation remains pending.");
                     actionSucceeded = true;
                 }
                 finally

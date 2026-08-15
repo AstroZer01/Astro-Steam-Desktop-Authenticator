@@ -8,6 +8,12 @@ body { background-color: #0b1326; color: #dae2fd; font-family: 'Inter', sans-ser
 .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
 input { background: #131B2E !important; color: white !important; border: 1px solid rgba(255, 255, 255, 0.2) !important; border-radius: 8px !important; padding: 12px !important; width: 100%; outline: none; transition: border-color 0.2s; }
 input:focus { border-color: #00daf3 !important; }
+.password-field { position: relative; }
+.password-field input { padding-right: 48px !important; }
+.password-toggle { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: #ffffff; padding: 6px; line-height: 0; cursor: pointer; }
+.password-toggle:hover, .password-toggle:focus { color: #c3f5ff; outline: none; }
+.password-toggle svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+input::-ms-reveal { display: none; }
 .btn-primary { background: #00E5FF; color: #00363D; font-weight: bold; padding: 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s; border: none; }
 .btn-primary:hover { background: #9cf0ff; }
 .btn-secondary { background: #2D3449; color: #DAE2FD; font-weight: bold; padding: 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s; border: none; border: 1px solid rgba(255, 255, 255, 0.1); }
@@ -24,7 +30,12 @@ input:focus { border-color: #00daf3 !important; }
     </div>
     
     <div class="flex flex-col gap-2">
-        <input type="text" id="input-box" aria-labelledby="label-text" placeholder="..." />
+        <div id="password-field" class="password-field">
+            <input type="text" id="input-box" aria-labelledby="label-text" placeholder="..." />
+            <button id="password-toggle" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" style="display: none;">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+            </button>
+        </div>
     </div>
 
     <div class="flex gap-4 mt-2">
@@ -57,10 +68,25 @@ input:focus { border-color: #00daf3 !important; }
 
     function setupInput(label, isPassword) {
         document.getElementById('label-text').innerText = label;
-        document.getElementById('input-box').type = isPassword ? 'password' : 'text';
-        document.getElementById('input-box').focus();
+        const input = document.getElementById('input-box');
+        const toggle = document.getElementById('password-toggle');
+        input.type = isPassword ? 'password' : 'text';
+        toggle.style.display = isPassword ? 'block' : 'none';
+        toggle.setAttribute('aria-label', 'Show password');
+        toggle.setAttribute('aria-pressed', 'false');
+        input.focus();
         
         resizeObserver.observe(document.querySelector('.glass-panel'));
     }
+
+    document.getElementById('password-toggle').addEventListener('click', () => {
+        const input = document.getElementById('input-box');
+        const toggle = document.getElementById('password-toggle');
+        const visible = input.type === 'password';
+        input.type = visible ? 'text' : 'password';
+        toggle.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
+        toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
+        input.focus();
+    });
 </script>
 </body></html>
