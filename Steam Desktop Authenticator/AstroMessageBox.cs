@@ -49,7 +49,7 @@ namespace Steam_Desktop_Authenticator
         private static DialogResult ShowWithActiveOwner(AstroMessageBoxForm form)
         {
             Form owner = Form.ActiveForm;
-            if (owner != null && owner.Visible && owner != form)
+            if (owner != null && owner.Visible && !owner.Disposing && !owner.IsDisposed && owner != form)
                 return form.ShowDialog(owner);
 
             form.StartPosition = FormStartPosition.CenterScreen;

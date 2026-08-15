@@ -436,7 +436,14 @@ namespace Steam_Desktop_Authenticator
                     confirmationCodeForm.ShowDialog(this);
                     if (confirmationCodeForm.Canceled)
                     {
-                        manifest.RemoveAccount(linker.LinkedAccount);
+                        if (!manifest.RemoveAccount(linker.LinkedAccount))
+                        {
+                            const string removalError = "The unfinished authenticator record could not be removed safely. It may still be present in the app; restart the app before making further account changes.";
+                            DiagnosticErrorLogger.Log("Authenticator storage", new InvalidOperationException(removalError), "Removing the unfinished authenticator record after setup cancellation failed.");
+                            AstroMessageBox.Show(removalError, "Steam Guard Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            ResetLoginButton(cancellationToken);
+                            return;
+                        }
                         this.Close();
                         return;
                     }

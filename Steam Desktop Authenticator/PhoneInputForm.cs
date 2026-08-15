@@ -158,9 +158,9 @@ namespace Steam_Desktop_Authenticator
             string countryDialingDigits = selectedCountry == null
                 ? String.Empty
                 : new String(selectedCountry.DialingCode.Where(character => character >= '0' && character <= '9').ToArray());
-            if (selectedCountry == null || digits.Length <= countryDialingDigits.Length || !enteredNumber.TrimStart().StartsWith("+"))
+            if (selectedCountry == null || String.IsNullOrWhiteSpace(selectedCountry.RegionCode) || selectedCountry.RegionCode.Length != 2 || digits.Length <= countryDialingDigits.Length || !enteredNumber.TrimStart().StartsWith("+"))
             {
-                AstroMessageBox.Show("Choose a country or region and enter the phone number after the country code, starting with +.", "Phone Number", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AstroMessageBox.Show("Choose a country or region with a valid two-letter country code and enter the phone number after the country code, starting with +.", "Phone Number", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
@@ -261,8 +261,7 @@ namespace Steam_Desktop_Authenticator
             new CountryOption("South Korea", "KR", "+82"), new CountryOption("Spain", "ES", "+34"), new CountryOption("Sweden", "SE", "+46"),
             new CountryOption("Switzerland", "CH", "+41"), new CountryOption("Taiwan", "TW", "+886"), new CountryOption("Thailand", "TH", "+66"),
             new CountryOption("Turkey", "TR", "+90"), new CountryOption("Ukraine", "UA", "+380"), new CountryOption("United Arab Emirates", "AE", "+971"),
-            new CountryOption("United Kingdom", "GB", "+44"), new CountryOption("United States", "US", "+1"), new CountryOption("Vietnam", "VN", "+84"),
-            new CountryOption("Other country / region", null, "+")
+            new CountryOption("United Kingdom", "GB", "+44"), new CountryOption("United States", "US", "+1"), new CountryOption("Vietnam", "VN", "+84")
         };
 
         private sealed class CountryOption

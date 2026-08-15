@@ -19,7 +19,7 @@ namespace SteamAuth
         public static long GetSteamTime()
         {
             if (!_aligned && CanAttemptAlignment())
-                _ = AlignTimeAsync();
+                AlignTime();
 
             return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + _timeDifference;
         }

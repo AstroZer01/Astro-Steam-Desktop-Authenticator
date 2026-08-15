@@ -11,7 +11,8 @@ input:focus { border-color: #00daf3 !important; }
 .password-field { position: relative; }
 .password-field input { padding-right: 48px !important; }
 .password-toggle { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: #ffffff; padding: 6px; line-height: 0; cursor: pointer; }
-.password-toggle:hover, .password-toggle:focus { color: #c3f5ff; outline: none; }
+.password-toggle:hover, .password-toggle:focus { color: #c3f5ff; }
+.password-toggle:focus-visible { outline: 2px solid #00daf3; outline-offset: 2px; }
 .password-toggle svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 input::-ms-reveal { display: none; }
 .btn-primary { background: #00E5FF; color: #00363D; font-weight: bold; padding: 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s; border: none; }

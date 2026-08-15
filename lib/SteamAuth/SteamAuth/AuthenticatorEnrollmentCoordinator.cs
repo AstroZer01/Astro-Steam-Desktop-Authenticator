@@ -99,7 +99,7 @@ namespace SteamAuth
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (attempt > 0)
-                    await Task.Delay(PhoneEnrollmentRetryDelay, cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(PhoneEnrollmentRetryDelay, cancellationToken);
                 AuthenticatorLinker.PhoneLinkResult phoneResult = await linker.AddPhoneNumber(cancellationToken);
                 switch (phoneResult)
                 {

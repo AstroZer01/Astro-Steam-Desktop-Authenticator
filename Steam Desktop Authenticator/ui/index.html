@@ -318,7 +318,7 @@
             <h2 id="remove-account-title" class="font-semibold text-on-surface">Remove account</h2>
             <p class="text-sm text-on-surface-variant mt-2">Choose what to do with <span id="remove-account-name" class="font-semibold text-on-surface"></span>.</p>
         </div>
-        <button id="btn-unlink-steam-guard" class="w-full text-left rounded-lg border border-error/40 bg-error-container/20 p-3 hover:bg-error-container/30 transition-colors">
+        <button id="btn-unlink-steam-guard" class="w-full text-left rounded-lg border border-error/40 bg-error-container/20 p-3 hover:bg-error-container/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-error-container/20">
             <span class="block font-semibold text-error">Unlink Steam Guard</span>
             <span class="block text-sm text-on-surface-variant mt-1">Removes Steam Guard from Steam, then deletes this account's local data.</span>
         </button>
@@ -577,6 +577,7 @@
     }
 
     let accountPendingRemoval = null;
+    let removeAccountEscapeHandler = null;
     function openRemoveAccountModal(account) {
         accountPendingRemoval = account;
         document.getElementById('remove-account-name').textContent = account.name;
@@ -587,10 +588,20 @@
         const modal = document.getElementById('remove-account-modal');
         modal.classList.remove('hidden');
         modal.classList.add('flex');
+        if (removeAccountEscapeHandler)
+            document.removeEventListener('keydown', removeAccountEscapeHandler);
+        removeAccountEscapeHandler = event => {
+            if (event.key === 'Escape') closeRemoveAccountModal();
+        };
+        document.addEventListener('keydown', removeAccountEscapeHandler);
         document.getElementById('btn-cancel-remove-account').focus();
     }
 
     function closeRemoveAccountModal() {
+        if (removeAccountEscapeHandler) {
+            document.removeEventListener('keydown', removeAccountEscapeHandler);
+            removeAccountEscapeHandler = null;
+        }
         accountPendingRemoval = null;
         const modal = document.getElementById('remove-account-modal');
         modal.classList.add('hidden');

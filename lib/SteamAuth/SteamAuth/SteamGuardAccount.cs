@@ -322,7 +322,7 @@ namespace SteamAuth
                 this.Session.GetCookies(),
                 body,
                 new System.Collections.Generic.Dictionary<string, string> { ["Origin"] = APIEndpoints.COMMUNITY_BASE });
-            string response = steamResponse.Body;
+            string response = steamResponse?.Body;
             if (response == null) return false;
 
             SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response);

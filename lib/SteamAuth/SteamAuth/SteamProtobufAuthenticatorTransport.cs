@@ -97,16 +97,15 @@ namespace SteamAuth
 
             string url = "https://api.steampowered.com/" + service + "/" + method + "/v1";
             string encodedRequest = Convert.ToBase64String(request.ToByteArray());
-            using (HttpRequestMessage httpRequest = new HttpRequestMessage(requestMethod == SteamProtocolRequestMethod.Get ? HttpMethod.Get : HttpMethod.Post, url))
+            bool useGet = requestMethod == SteamProtocolRequestMethod.Get && String.IsNullOrWhiteSpace(accessToken);
+            using (HttpRequestMessage httpRequest = new HttpRequestMessage(useGet ? HttpMethod.Get : HttpMethod.Post, url))
             {
-                if (requestMethod == SteamProtocolRequestMethod.Get)
+                if (useGet)
                 {
                     var query = new List<KeyValuePair<string, string>>
                     {
                         new KeyValuePair<string, string>("input_protobuf_encoded", encodedRequest)
                     };
-                    if (!String.IsNullOrWhiteSpace(accessToken))
-                        query.Add(new KeyValuePair<string, string>("access_token", accessToken));
                     httpRequest.RequestUri = new Uri(url + "?" + String.Join("&", query.ConvertAll(item => Uri.EscapeDataString(item.Key) + "=" + Uri.EscapeDataString(item.Value))));
                 }
                 else
@@ -123,7 +122,17 @@ namespace SteamAuth
                 using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                 {
                     timeoutSource.CancelAfter(requestTimeout);
-                    using (HttpResponseMessage response = await httpClient.SendAsync(httpRequest, timeoutSource.Token).ConfigureAwait(false))
+                    HttpResponseMessage response;
+                    try
+                    {
+                        response = await httpClient.SendAsync(httpRequest, timeoutSource.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        throw new TimeoutException("The Steam request timed out.");
+                    }
+
+                    using (response)
                     {
                     int result = GetHeaderResult(response);
                     string errorMessage = GetHeaderValue(response, "X-error_message");

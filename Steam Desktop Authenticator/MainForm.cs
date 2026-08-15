@@ -738,8 +738,10 @@ namespace Steam_Desktop_Authenticator
 
         private void menuImportAccount_Click(object sender, EventArgs e)
         {
-            ImportAccountForm currentImport_maFile_Form = new ImportAccountForm(this.passKey);
-            currentImport_maFile_Form.ShowDialog(this);
+            using (ImportAccountForm currentImportMaFileForm = new ImportAccountForm(this.passKey))
+            {
+                currentImportMaFileForm.ShowDialog(this);
+            }
             loadAccountsList();
         }
 
@@ -2520,8 +2522,10 @@ namespace Steam_Desktop_Authenticator
             else if (action == "import_account")
             {
                 this.BeginInvoke((MethodInvoker)delegate { 
-                    ImportAccountForm importForm = new ImportAccountForm(this.passKey);
-                    importForm.ShowDialog(this);
+                    using (ImportAccountForm importForm = new ImportAccountForm(this.passKey))
+                    {
+                        importForm.ShowDialog(this);
+                    }
                     this.loadAccountsList();
                 });
             }

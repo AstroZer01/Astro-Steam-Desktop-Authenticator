@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
-    <img src="https://img.shields.io/badge/Download_Latest_Release-Windows_10+-blue?style=for-the-badge&logo=windows" alt="Download Latest Release" />
+    <img src="https://img.shields.io/github/v/release/AstroZer01/Astro-Steam-Desktop-Authenticator?label=Download%20Latest&style=for-the-badge&logo=windows" alt="Download Latest Release" />
   </a>
 </p>
 
@@ -90,7 +90,7 @@ Save this as a `.bat` file. Set `PROJECT_ROOT` to the repository root and `OUTPU
 ```bat
 @echo off
 setlocal EnableExtensions
-title Build Astro Steam Desktop Assistant
+title Build Astro Steam Desktop Authenticator
 
 set "PROJECT_ROOT="
 set "OUTPUT="
@@ -153,12 +153,10 @@ The hook runs only when staged UI templates, the Tailwind configuration, or the 
 
 
 <p align="center">
-  <strong>
-    ❕ Alternatively you can download the latest version without technical knowledge and run it directly<br>
-    <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
-      Click here to Download
-    </a>
-  </strong>
+  ❕ Alternatively, download and run the latest release without building from source.<br>
+  <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
+    <img src="https://img.shields.io/github/v/release/AstroZer01/Astro-Steam-Desktop-Authenticator?label=Download%20Latest&style=for-the-badge&logo=windows" alt="Download Latest Release" />
+  </a>
 </p>
 
 

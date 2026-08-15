@@ -17,16 +17,12 @@ namespace Steam_Desktop_Authenticator
     {
         public bool Canceled = false;
         private bool userClosed = true;
-        private readonly Form fallbackOwner;
 
         public InputForm(string label, bool password = false)
         {
             InitializeComponent();
             AstroTheme.ApplyTheme(this);
-            fallbackOwner = Form.ActiveForm;
-            StartPosition = fallbackOwner != null && fallbackOwner.Visible && !fallbackOwner.IsDisposed
-                ? FormStartPosition.CenterParent
-                : FormStartPosition.CenterScreen;
+            StartPosition = FormStartPosition.CenterScreen;
 
             this.labelText.Text = label;
 
@@ -40,11 +36,47 @@ namespace Steam_Desktop_Authenticator
 
         public new DialogResult ShowDialog()
         {
-            if (fallbackOwner != null && fallbackOwner.Visible && !fallbackOwner.IsDisposed)
-                return base.ShowDialog(fallbackOwner);
+            return ShowDialogWithCurrentOwner(null);
+        }
 
+        public new DialogResult ShowDialog(IWin32Window owner)
+        {
+            return ShowDialogWithCurrentOwner(owner);
+        }
+
+        private DialogResult ShowDialogWithCurrentOwner(IWin32Window requestedOwner)
+        {
+            IWin32Window owner = requestedOwner;
+            if (!IsValidOwner(owner))
+                owner = Form.ActiveForm;
+
+            if (IsValidOwner(owner))
+            {
+                StartPosition = FormStartPosition.CenterParent;
+                return base.ShowDialog(owner);
+            }
             StartPosition = FormStartPosition.CenterScreen;
             return base.ShowDialog();
+        }
+
+        private bool IsValidOwner(IWin32Window owner)
+        {
+            if (owner == null || ReferenceEquals(owner, this))
+                return false;
+
+            if (owner is Form form)
+                return form.Visible && !form.Disposing && !form.IsDisposed;
+            if (owner is Control control)
+                return control.Visible && !control.Disposing && !control.IsDisposed && control.IsHandleCreated;
+
+            try
+            {
+                return owner.Handle != IntPtr.Zero;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private WebView2 webView;

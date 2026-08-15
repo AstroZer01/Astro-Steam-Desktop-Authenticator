@@ -72,7 +72,7 @@ namespace SteamAuth
             IReadOnlyDictionary<string, string> headers, TimeSpan timeout, CancellationToken cancellationToken,
             bool followRedirects = true)
         {
-            if (timeout < Timeout.InfiniteTimeSpan)
+            if (timeout == TimeSpan.Zero || timeout < Timeout.InfiniteTimeSpan)
                 throw new ArgumentOutOfRangeException(nameof(timeout));
 
             byte[] requestBody = content == null ? null : await content.ReadAsByteArrayAsync().ConfigureAwait(false);

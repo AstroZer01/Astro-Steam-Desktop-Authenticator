@@ -79,6 +79,7 @@ namespace Steam_Desktop_Authenticator
             buttonPanel.Dock = DockStyle.Fill;
             buttonPanel.FlowDirection = FlowDirection.RightToLeft;
             buttonPanel.WrapContents = false;
+            buttonPanel.AutoScroll = true;
             layout.Controls.Add(buttonPanel, 0, currentRow);
 
             SetupButtons(buttons);
@@ -120,9 +121,10 @@ namespace Steam_Desktop_Authenticator
         {
             Button btn = new Button();
             btn.Text = text;
-            btn.Size = new Size(80, 32);
             btn.FlatStyle = FlatStyle.Flat;
             btn.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+            int buttonWidth = Math.Max(80, TextRenderer.MeasureText(text, btn.Font, Size.Empty, TextFormatFlags.SingleLine).Width + 24);
+            btn.Size = new Size(buttonWidth, 32);
             btn.Cursor = Cursors.Hand;
             btn.Margin = new Padding(10, 0, 0, 0);
             
@@ -142,6 +144,20 @@ namespace Steam_Desktop_Authenticator
             };
 
             buttonPanel.Controls.Add(btn);
+            EnsureButtonPanelWidth();
+        }
+
+        private void EnsureButtonPanelWidth()
+        {
+            int requiredPanelWidth = 0;
+            foreach (Control control in buttonPanel.Controls)
+                requiredPanelWidth += control.Width + control.Margin.Horizontal;
+
+            int requiredDialogWidth = Math.Min(MaximumSize.Width, Math.Max(Width, requiredPanelWidth + 50));
+            if (Width < requiredDialogWidth)
+                Width = requiredDialogWidth;
+
+            buttonPanel.AutoScroll = requiredPanelWidth + 30 > ClientSize.Width;
         }
     }
 }

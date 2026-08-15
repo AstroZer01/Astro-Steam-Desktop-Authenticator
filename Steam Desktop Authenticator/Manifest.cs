@@ -439,7 +439,7 @@ namespace Steam_Desktop_Authenticator
                 try
                 {
                 Manifest stagedManifest = CloneForStorage();
-                ManifestEntry stagedEntry = stagedManifest.Entries.FirstOrDefault(candidate => candidate.SteamID == entry.SteamID);
+                ManifestEntry stagedEntry = stagedManifest.Entries.FirstOrDefault(candidate => String.Equals(candidate.Filename, entry.Filename, StringComparison.OrdinalIgnoreCase));
                 if (stagedEntry == null)
                     return false;
                 stagedManifest.Entries.Remove(stagedEntry);
@@ -511,6 +511,9 @@ namespace Steam_Desktop_Authenticator
 
                 try
                 {
+                if (this.Encrypted && !this.VerifyPasskey(passKey))
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid. The account was not saved.");
+
                 string salt = null;
                 string iV = null;
                 string jsonAccount = JsonConvert.SerializeObject(account);
@@ -639,6 +642,9 @@ namespace Steam_Desktop_Authenticator
                     string manifestContents = JsonConvert.SerializeObject(stagedManifest);
                     Directory.CreateDirectory(maDir);
 
+                    foreach (string filename in obsoleteFilenames)
+                        ValidateStorageFilename(filename);
+
                     foreach (KeyValuePair<string, string> stagedFile in stagedFiles)
                     {
                         ValidateStorageFilename(stagedFile.Key);
@@ -730,8 +736,26 @@ namespace Steam_Desktop_Authenticator
                 catch (Exception ex)
                 {
                     DiagnosticErrorLogger.Log("Authenticator storage", ex, "A pending storage transaction could not be recovered automatically.");
-                    throw new ManifestParseException();
+                    QuarantineStorageJournal(journalFilename);
                 }
+            }
+        }
+
+        private static void QuarantineStorageJournal(string journalFilename)
+        {
+            try
+            {
+                if (!File.Exists(journalFilename))
+                    return;
+
+                string directory = Path.GetDirectoryName(journalFilename);
+                string filename = Path.GetFileName(journalFilename);
+                string quarantineFilename = Path.Combine(directory, filename + "." + Guid.NewGuid().ToString("N") + ".quarantine");
+                File.Move(journalFilename, quarantineFilename);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "The unrecoverable storage journal could not be quarantined.");
             }
         }
 
