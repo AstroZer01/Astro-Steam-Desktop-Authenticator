@@ -154,6 +154,7 @@ The hook runs only when staged UI templates, the Tailwind configuration, or the 
 
 <p align="center">
   ❕ Alternatively, download and run the latest release without building from source.<br>
+  
   <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
     <img src="https://img.shields.io/github/v/release/AstroZer01/Astro-Steam-Desktop-Authenticator?label=Download%20Latest&style=for-the-badge&logo=windows" alt="Download Latest Release" />
   </a>
@@ -163,25 +164,6 @@ The hook runs only when staged UI templates, the Tailwind configuration, or the 
 ## Current Focus & To-Do
 
 ### To-Do List
-
-#### Core API & Session
-- [x] Fix SSL/TLS 1.2+ handshake errors breaking connections.
-- [x] Implement QR Code Login (using mobile HMAC-SHA256 signature).
-- [x] Stabilize Steam API endpoints for trade confirmations — fetch, accept, and decline are all functional.
-- [x] API support for confirming/declining trade offers — implemented via `AcceptConfirmation` / `DenyConfirmation`.
-- [x] Improve API session refresh reliability — `IsRefreshTokenExpired` + `RefreshAccessToken` checks are in place with user-facing alerts on expiry.
-- [x] Manage Steam login approvals and denials, including optional automatic login rules and IP allowlisting.
-
-#### UI Rehaul
-- [x] Full UI rehaul — replaced original WinForms UI with a modern WebView2-based interface (dark theme, Tailwind CSS, glassmorphism).
-- [x] Animated startup loading screen with spinner and live status text.
-- [x] Dark mode title bar (inherits Windows theme via DwmSetWindowAttribute).
-- [x] Steam Guard code display with copy button and animated progress bar.
-- [x] Account list with search/filter, scroll support, and one-click switching.
-- [x] Trade Confirmations tab — list view with Accept/Decline per confirmation, per-account switcher dropdown, and refresh button.
-- [x] Settings tab — periodic check toggle, check interval, auto-confirm options, with saved feedback.
-- [x] Proxy Settings section (UI layout — Coming Soon, pending backend implementation).
-- [x] Desktop notifications for pending trade confirmations and login requests.
 
 #### In Progress / Remaining
 - [ ] API endpoint for trading automation
