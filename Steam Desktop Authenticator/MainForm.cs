@@ -797,7 +797,7 @@ namespace Steam_Desktop_Authenticator
 
             if (scheme != 0)
             {
-                string confCode = currentAccount.GenerateSteamGuardCode();
+                string confCode = await currentAccount.GenerateSteamGuardCodeAsync();
                 string enteredCode;
                 using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", currentAccount.AccountName, confCode)))
                 {
@@ -925,7 +925,7 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
-                string confirmationCode = account.GenerateSteamGuardCode();
+                string confirmationCode = await account.GenerateSteamGuardCodeAsync();
                 string enteredConfirmationCode;
                 using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", account.AccountName, confirmationCode)))
                 {

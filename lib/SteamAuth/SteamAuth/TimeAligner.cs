@@ -16,14 +16,14 @@ namespace SteamAuth
         private static int _backgroundAlignmentScheduled = 0;
         private static readonly SemaphoreSlim _alignmentLock = new SemaphoreSlim(1, 1);
         private static readonly TimeSpan AlignmentRetryBackoff = TimeSpan.FromSeconds(30);
-        private static readonly TimeSpan InitialAlignmentTimeout = TimeSpan.FromSeconds(3);
+        private static readonly TimeSpan MaxAllowedTimeDifference = TimeSpan.FromDays(1);
 
         public static long GetSteamTime()
         {
             if (Volatile.Read(ref _aligned) == 0 &&
                 Volatile.Read(ref _backgroundAlignmentScheduled) == 0 &&
                 CanAttemptAlignment())
-                AlignInitialTimeBounded();
+                StartBackgroundAlignment();
 
             return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Volatile.Read(ref _timeDifference);
         }
@@ -64,7 +64,21 @@ namespace SteamAuth
                     return;
                 }
 
-                Volatile.Write(ref _timeDifference, (int)((long)response.Body.ServerTime - currentTime));
+                if (response.Body.ServerTime > Int64.MaxValue)
+                {
+                    RecordAlignmentFailure();
+                    return;
+                }
+
+                long difference = (long)response.Body.ServerTime - currentTime;
+                if (difference < -MaxAllowedTimeDifference.TotalSeconds ||
+                    difference > MaxAllowedTimeDifference.TotalSeconds)
+                {
+                    RecordAlignmentFailure();
+                    return;
+                }
+
+                Volatile.Write(ref _timeDifference, (int)difference);
                 Interlocked.Exchange(ref _lastAlignmentFailureUtcTicks, DateTime.MinValue.Ticks);
                 Volatile.Write(ref _aligned, 1);
             }
@@ -101,23 +115,6 @@ namespace SteamAuth
                 return;
 
             _ = AlignInBackgroundAsync();
-        }
-
-        private static void AlignInitialTimeBounded()
-        {
-            using (CancellationTokenSource timeoutSource = new CancellationTokenSource(InitialAlignmentTimeout))
-            {
-                try
-                {
-                    AlignTimeAsync(timeoutSource.Token).GetAwaiter().GetResult();
-                }
-                catch (OperationCanceledException) when (timeoutSource.IsCancellationRequested)
-                {
-                    // The immediate caller must not wait for Steam's full transport timeout.
-                    // Keep aligning in the background for later code-generation requests.
-                    StartBackgroundAlignment();
-                }
-            }
         }
 
         private static async Task AlignInBackgroundAsync()
