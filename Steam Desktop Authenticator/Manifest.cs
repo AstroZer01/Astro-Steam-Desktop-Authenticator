@@ -487,7 +487,11 @@ namespace Steam_Desktop_Authenticator
                 {
                     string contents = File.ReadAllText(Path.Combine(maDir, candidate.Filename));
                     if (Encrypted)
+                    {
                         contents = FileEncryptor.DecryptData(passKey, candidate.Salt, candidate.IV, contents);
+                        if (contents == null)
+                            return null;
+                    }
                     SteamGuardAccount storedAccount = JsonConvert.DeserializeObject<SteamGuardAccount>(contents);
                     if (storedAccount != null && String.Equals(storedAccount.AccountName, account.AccountName, StringComparison.Ordinal))
                         matchingEntries.Add(candidate);
@@ -747,7 +751,9 @@ namespace Steam_Desktop_Authenticator
                         : DeleteFilesBestEffort(maDir, created, "A temporary authenticator file could not be removed during storage recovery.");
 
                     if (!cleanupSucceeded)
-                        return false;
+                        // The committed manifest is safe to use. Keep its journal so the
+                        // obsolete-file cleanup is retried during a later recovery.
+                        return manifestCommitted;
 
                     bool backupDeleted = backupFilename == null ||
                         DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");

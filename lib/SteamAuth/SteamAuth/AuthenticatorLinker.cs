@@ -259,7 +259,7 @@ namespace SteamAuth
                 }
                 if (response.Body.WantMore)
                 {
-                    if (response.Body.ServerTime == 0)
+                    if (response.Body.ServerTime == 0 || response.Body.ServerTime > Int64.MaxValue)
                     {
                         LastErrorMessage = "Steam requested another authenticator code but did not provide its current time. Please try again.";
                         return FinalizeResult.GeneralFailure;
@@ -354,9 +354,22 @@ namespace SteamAuth
                 return;
             }
 
-            Task cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            if (await Task.WhenAny(waitForNextAuthenticatorCodeAsync(delay), cancellationTask) == cancellationTask)
-                cancellationToken.ThrowIfCancellationRequested();
+            using (CancellationTokenSource waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                Task delayTask = waitForNextAuthenticatorCodeAsync(delay);
+                Task cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, waitCancellation.Token);
+                try
+                {
+                    if (await Task.WhenAny(delayTask, cancellationTask) == cancellationTask)
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                    await delayTask;
+                }
+                finally
+                {
+                    waitCancellation.Cancel();
+                }
+            }
         }
 
         private PhoneLinkResult PhoneFailure<TResponse>(SteamProtocolResponse<TResponse> response, string action)
