@@ -55,6 +55,7 @@ namespace SteamAuth
     public sealed class AuthenticatorEnrollmentCoordinator
     {
         private const int MaxPhoneEnrollmentAttempts = 10;
+        private const int MaxPhoneEnrollmentStatusChecks = 60;
         private static readonly TimeSpan PhoneEnrollmentRetryDelay = TimeSpan.FromSeconds(1);
         private readonly AuthenticatorLinker linker;
         private readonly IPhoneEnrollmentInteraction interaction;
@@ -98,6 +99,11 @@ namespace SteamAuth
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (++enrollmentState.StatusChecks > MaxPhoneEnrollmentStatusChecks)
+                {
+                    return Failed("Steam did not complete phone registration after several status checks. Please try again later.");
+                }
+
                 if (previousCodeWasInvalid)
                     await Task.Delay(PhoneEnrollmentRetryDelay, cancellationToken);
 
@@ -201,6 +207,7 @@ namespace SteamAuth
         private sealed class PhoneEnrollmentState
         {
             public int Attempts { get; set; }
+            public int StatusChecks { get; set; }
         }
     }
 }
