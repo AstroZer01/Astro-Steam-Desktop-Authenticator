@@ -93,7 +93,8 @@ namespace Steam_Desktop_Authenticator
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
             string manifestFile = Path.Combine(maDir, "manifest.json");
 
-            RecoverPendingStorageTransaction(maDir, manifestFile);
+            if (!RecoverPendingStorageTransaction(maDir, manifestFile))
+                throw new ManifestParseException();
 
             // If there's no config dir, create it
             if (!Directory.Exists(maDir))
@@ -736,10 +737,13 @@ namespace Steam_Desktop_Authenticator
                     if (!cleanupSucceeded)
                         return false;
 
-                    if (!String.IsNullOrWhiteSpace(journal.BackupFilename))
+                    bool backupDeleted = String.IsNullOrWhiteSpace(journal.BackupFilename) ||
                         DeleteFileBestEffort(Path.Combine(maDir, Path.GetFileName(journal.BackupFilename)), "A completed manifest backup could not be removed during storage recovery.");
-                    DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.");
-                    return !File.Exists(journalFilename);
+                    if (!backupDeleted)
+                        return false;
+
+                    bool journalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.");
+                    return journalDeleted && !File.Exists(journalFilename);
                 }
                 catch (Exception ex)
                 {
@@ -832,16 +836,18 @@ namespace Steam_Desktop_Authenticator
             return succeeded;
         }
 
-        private static void DeleteFileBestEffort(string filename, string context)
+        private static bool DeleteFileBestEffort(string filename, string context)
         {
             try
             {
                 if (File.Exists(filename))
                     File.Delete(filename);
+                return true;
             }
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", ex, context);
+                return false;
             }
         }
 
