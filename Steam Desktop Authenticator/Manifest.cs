@@ -582,7 +582,10 @@ namespace Steam_Desktop_Authenticator
                 {
                     string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
                     Directory.CreateDirectory(maDir);
-                    RecoverPendingStorageTransaction(maDir, Path.Combine(maDir, "manifest.json"));
+                    if (!RecoverPendingStorageTransaction(maDir, Path.Combine(maDir, "manifest.json")))
+                    {
+                        return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data save could not be recovered safely. No settings were changed.");
+                    }
                     string contents = JsonConvert.SerializeObject(this);
                     string backupFilename = CreateBackupFilename(maDir);
                     WriteAllTextAtomically(Path.Combine(maDir, "manifest.json"), contents, backupFilename);
@@ -638,7 +641,11 @@ namespace Steam_Desktop_Authenticator
                 {
                     // A cleanup failure leaves the previous journal intentionally. Complete it
                     // before replacing it so its obsolete files remain recoverable.
-                    RecoverPendingStorageTransaction(maDir, manifestFilename);
+                    if (!RecoverPendingStorageTransaction(maDir, manifestFilename))
+                    {
+                        return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data transaction could not be recovered safely. No account data was changed.");
+                    }
+
                     string manifestContents = JsonConvert.SerializeObject(stagedManifest);
                     Directory.CreateDirectory(maDir);
 
@@ -701,13 +708,13 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static void RecoverPendingStorageTransaction(string maDir, string manifestFilename)
+        private static bool RecoverPendingStorageTransaction(string maDir, string manifestFilename)
         {
             string journalFilename = Path.Combine(maDir, StorageJournalFilename);
             lock (storageLock)
             {
                 if (!File.Exists(journalFilename))
-                    return;
+                    return true;
 
                 try
                 {
@@ -727,16 +734,18 @@ namespace Steam_Desktop_Authenticator
                         : DeleteFilesBestEffort(maDir, created, "A temporary authenticator file could not be removed during storage recovery.");
 
                     if (!cleanupSucceeded)
-                        return;
+                        return false;
 
                     if (!String.IsNullOrWhiteSpace(journal.BackupFilename))
                         DeleteFileBestEffort(Path.Combine(maDir, Path.GetFileName(journal.BackupFilename)), "A completed manifest backup could not be removed during storage recovery.");
                     DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.");
+                    return !File.Exists(journalFilename);
                 }
                 catch (Exception ex)
                 {
                     DiagnosticErrorLogger.Log("Authenticator storage", ex, "A pending storage transaction could not be recovered automatically.");
                     QuarantineStorageJournal(journalFilename);
+                    return false;
                 }
             }
         }
