@@ -34,7 +34,7 @@ namespace Steam_Desktop_Authenticator
             string configuredDataDirectory = Environment.GetEnvironmentVariable(DataDirectoryEnvironmentVariable);
             if (String.IsNullOrWhiteSpace(configuredDataDirectory))
             {
-                return InstallDirectory;
+                return ResolvePortableDataDirectory() ?? InstallDirectory;
             }
 
             try
@@ -45,6 +45,22 @@ namespace Steam_Desktop_Authenticator
             {
                 return InstallDirectory;
             }
+        }
+
+        private static string ResolvePortableDataDirectory()
+        {
+            DirectoryInfo installDirectory = new DirectoryInfo(InstallDirectory);
+            DirectoryInfo portableRoot = installDirectory.Parent;
+            if (portableRoot == null || !String.Equals(installDirectory.Name, "bin", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            string executableName = Path.GetFileName(Environment.ProcessPath);
+            string launcherPath = Path.Combine(portableRoot.FullName, executableName);
+            string uiDirectory = Path.Combine(installDirectory.FullName, "app", "ui");
+            if (!File.Exists(launcherPath) || !Directory.Exists(uiDirectory))
+                return null;
+
+            return portableRoot.FullName;
         }
 
         public static bool TryGetMissingWebResource(out string missingResource)
