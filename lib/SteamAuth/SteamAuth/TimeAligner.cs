@@ -15,15 +15,30 @@ namespace SteamAuth
         private static long _lastAlignmentFailureUtcTicks = DateTime.MinValue.Ticks;
         private static int _backgroundAlignmentScheduled = 0;
         private static readonly SemaphoreSlim _alignmentLock = new SemaphoreSlim(1, 1);
+        private static readonly object _backgroundAlignmentLock = new object();
+        private static Task _backgroundAlignmentTask = Task.CompletedTask;
         private static readonly TimeSpan AlignmentRetryBackoff = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan FirstAlignmentWait = TimeSpan.FromSeconds(3);
         private static readonly TimeSpan MaxAllowedTimeDifference = TimeSpan.FromDays(1);
 
         public static long GetSteamTime()
         {
-            if (Volatile.Read(ref _aligned) == 0 &&
-                Volatile.Read(ref _backgroundAlignmentScheduled) == 0 &&
-                CanAttemptAlignment())
-                StartBackgroundAlignment();
+            if (Volatile.Read(ref _aligned) == 0 && CanAttemptAlignment())
+            {
+                bool startedAlignment;
+                Task alignmentTask = StartBackgroundAlignment(out startedAlignment);
+                if (startedAlignment)
+                {
+                    try
+                    {
+                        alignmentTask.Wait(FirstAlignmentWait);
+                    }
+                    catch (AggregateException ex)
+                    {
+                        SteamAuthDiagnostics.Log(ex.Flatten(), "Steam time alignment failed during the initial bounded wait.");
+                    }
+                }
+            }
 
             return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Volatile.Read(ref _timeDifference);
         }
@@ -64,7 +79,7 @@ namespace SteamAuth
                     return;
                 }
 
-                if (response.Body.ServerTime > Int64.MaxValue)
+                if (response.Body.ServerTime > (ulong)Int64.MaxValue)
                 {
                     RecordAlignmentFailure();
                     return;
@@ -109,12 +124,21 @@ namespace SteamAuth
             Interlocked.Exchange(ref _lastAlignmentFailureUtcTicks, DateTime.UtcNow.Ticks);
         }
 
-        private static void StartBackgroundAlignment()
+        private static Task StartBackgroundAlignment(out bool startedAlignment)
         {
-            if (Interlocked.CompareExchange(ref _backgroundAlignmentScheduled, 1, 0) != 0)
-                return;
+            lock (_backgroundAlignmentLock)
+            {
+                if (Volatile.Read(ref _backgroundAlignmentScheduled) != 0)
+                {
+                    startedAlignment = false;
+                    return _backgroundAlignmentTask;
+                }
 
-            _ = AlignInBackgroundAsync();
+                Volatile.Write(ref _backgroundAlignmentScheduled, 1);
+                _backgroundAlignmentTask = AlignInBackgroundAsync();
+                startedAlignment = true;
+                return _backgroundAlignmentTask;
+            }
         }
 
         private static async Task AlignInBackgroundAsync()

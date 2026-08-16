@@ -181,7 +181,11 @@ namespace SteamAuth
 
         private static HttpClient CreateHttpClient()
         {
-            HttpClient client = new HttpClient();
+            HttpClient client = new HttpClient(new HttpClientHandler
+            {
+                UseCookies = false,
+                AllowAutoRedirect = false
+            });
             client.Timeout = Timeout.InfiniteTimeSpan;
             client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", SteamWeb.MOBILE_APP_USER_AGENT);
             return client;

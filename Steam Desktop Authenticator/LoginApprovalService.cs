@@ -315,6 +315,11 @@ namespace Steam_Desktop_Authenticator
                 DiagnosticErrorLogger.Log("Login approval transport", exception, "A login approval request failed at the transport layer.");
                 throw CreateNetworkException(null);
             }
+            catch (TimeoutException exception)
+            {
+                DiagnosticErrorLogger.Log("Login approval transport", exception, "A login approval request timed out.");
+                throw CreateNetworkException("Steam did not respond in time.");
+            }
             catch (TaskCanceledException)
             {
                 throw CreateNetworkException("Steam did not respond in time.");

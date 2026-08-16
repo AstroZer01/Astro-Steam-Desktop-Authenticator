@@ -619,6 +619,13 @@ namespace Steam_Desktop_Authenticator
                 {
                     return StorageResult.Failure(StorageFailureKind.Serialization, "The application settings could not be prepared for saving.", ex);
                 }
+                catch (NotSupportedException ex)
+                {
+                    return StorageResult.Failure(
+                        StorageFailureKind.Io,
+                        "The selected data folder does not support the safe atomic saves required for authenticator data. Move the data folder to a local drive and try again.",
+                        ex);
+                }
                 catch (Exception ex)
                 {
                     return StorageResult.Failure(StorageFailureKind.Manifest, "The application settings could not be saved. Check that the data folder is available and try again.", ex);
@@ -639,6 +646,24 @@ namespace Steam_Desktop_Authenticator
         {
             Entries = source.Entries;
             Encrypted = source.Encrypted;
+        }
+
+        private void CopySettingsInto(Manifest destination)
+        {
+            destination.FirstRun = FirstRun;
+            destination.FirstQR = FirstQR;
+            destination.TradeConfirmationCustomIntervalEnabled = TradeConfirmationCustomIntervalEnabled;
+            destination.TradeConfirmationCheckInterval = TradeConfirmationCheckInterval;
+            destination.AutoConfirmMarketTransactions = AutoConfirmMarketTransactions;
+            destination.AutoConfirmTrades = AutoConfirmTrades;
+            destination.MinimizeToTray = MinimizeToTray;
+            destination.CheckForUpdates = CheckForUpdates;
+            destination.DiagnosticErrorLoggingEnabled = DiagnosticErrorLoggingEnabled;
+            destination.LoginActionMonitoringEnabled = LoginActionMonitoringEnabled;
+            destination.LoginActionMode = LoginActionMode;
+            destination.LoginActionAutoAllowIpEnabled = LoginActionAutoAllowIpEnabled;
+            destination.LoginActionAutoAllowCurrentDeviceIp = LoginActionAutoAllowCurrentDeviceIp;
+            destination.LoginActionAutoAllowIp = LoginActionAutoAllowIp;
         }
 
         private StorageResult CommitStorageTransaction(
@@ -664,11 +689,19 @@ namespace Steam_Desktop_Authenticator
                 {
                     // A cleanup failure leaves the previous journal intentionally. Complete it
                     // before replacing it so its obsolete files remain recoverable.
-                    if (!RecoverPendingStorageTransaction(maDir, manifestFilename))
+                    List<string> retainedObsoleteFilenames = new List<string>();
+                    if (!RecoverPendingStorageTransaction(maDir, manifestFilename, retainedObsoleteFilenames))
                     {
                         return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data transaction could not be recovered safely. No account data was changed.");
                     }
 
+                    foreach (string filename in retainedObsoleteFilenames)
+                    {
+                        if (!obsoleteFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase))
+                            obsoleteFilenames.Add(filename);
+                    }
+
+                    CopySettingsInto(stagedManifest);
                     string manifestContents = JsonConvert.SerializeObject(stagedManifest);
                     Directory.CreateDirectory(maDir);
 
@@ -707,6 +740,15 @@ namespace Steam_Desktop_Authenticator
                         RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, manifestCommitStarted);
                     return StorageResult.Failure(StorageFailureKind.Serialization, "The account data could not be prepared for saving.", ex);
                 }
+                catch (NotSupportedException ex)
+                {
+                    if (!manifestCommitted)
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, manifestCommitStarted);
+                    return StorageResult.Failure(
+                        StorageFailureKind.Io,
+                        "The selected data folder does not support the safe atomic saves required for authenticator data. Move the data folder to a local drive and try again.",
+                        ex);
+                }
                 catch (Exception ex)
                 {
                     if (!manifestCommitted)
@@ -733,7 +775,7 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static bool RecoverPendingStorageTransaction(string maDir, string manifestFilename)
+        private static bool RecoverPendingStorageTransaction(string maDir, string manifestFilename, ICollection<string> retainedObsoleteFilenames = null)
         {
             string journalFilename = Path.Combine(maDir, StorageJournalFilename);
             lock (storageLock)
@@ -774,6 +816,11 @@ namespace Steam_Desktop_Authenticator
                         // later settings save to replace the manifest.
                         journal.CreatedFilenames = new List<string>();
                         WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal));
+                        if (retainedObsoleteFilenames != null)
+                        {
+                            foreach (string filename in obsolete)
+                                retainedObsoleteFilenames.Add(filename);
+                        }
                         return true;
                     }
 
@@ -845,7 +892,16 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 if (File.Exists(filename))
-                    File.Replace(temporaryFilename, filename, backupFilename);
+                {
+                    try
+                    {
+                        File.Replace(temporaryFilename, filename, backupFilename);
+                    }
+                    catch (NotSupportedException ex)
+                    {
+                        throw new NotSupportedException("The selected data folder does not support the atomic file replacement required to safely save authenticator data.", ex);
+                    }
+                }
                 else
                     File.Move(temporaryFilename, filename);
             }

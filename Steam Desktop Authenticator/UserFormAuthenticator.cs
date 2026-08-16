@@ -77,7 +77,29 @@ namespace Steam_Desktop_Authenticator
                     : "Enter the code Steam sent to " + email + ".";
                 using (InputForm emailForm = new InputForm(message))
                 {
-                    emailForm.ShowInputDialog(owner);
+                    using (CancellationTokenRegistration cancellationRegistration = cancellationToken.Register(() =>
+                    {
+                        try
+                        {
+                            if (!owner.IsDisposed && owner.IsHandleCreated)
+                            {
+                                owner.BeginInvoke((MethodInvoker)delegate
+                                {
+                                    if (!emailForm.IsDisposed && emailForm.Visible)
+                                        emailForm.Close();
+                                });
+                            }
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            // The owner can be disposed while a canceled login is closing.
+                        }
+                    }))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        emailForm.ShowInputDialog(owner);
+                    }
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (emailForm.Canceled)
                         throw new OperationCanceledException(cancellationToken);
                     return emailForm.txtBox.Text;

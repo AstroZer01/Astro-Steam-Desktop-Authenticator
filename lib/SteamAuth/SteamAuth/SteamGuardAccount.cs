@@ -110,6 +110,8 @@ namespace SteamAuth
                 {
                     if (response != null && (response.Result == 84 || response.Result == 87))
                         LastAuthenticatorOperationError = "Steam is rate limiting Steam Guard removal. Wait a while before trying again.";
+                    else if (response != null && response.Result == 1 && response.Body != null && !response.Body.Success)
+                        LastAuthenticatorOperationError = "Steam did not confirm Steam Guard removal. Please try again later.";
                     else if (response != null && !String.IsNullOrWhiteSpace(response.ErrorMessage))
                         LastAuthenticatorOperationError = "Steam could not remove Steam Guard: " + response.ErrorMessage;
                     else

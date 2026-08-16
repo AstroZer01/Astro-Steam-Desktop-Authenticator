@@ -356,6 +356,8 @@ namespace Steam_Desktop_Authenticator
                 linker,
                 new LoginPhoneEnrollmentInteraction(account, this));
             AuthenticatorEnrollmentOutcome enrollmentOutcome = await coordinator.StartAsync(cancellationToken);
+            if (IsDisposed || Disposing)
+                return;
             switch (enrollmentOutcome.Result)
             {
                 case AuthenticatorEnrollmentResult.AwaitingFinalization:
@@ -418,6 +420,8 @@ namespace Steam_Desktop_Authenticator
 
             //Save the file immediately; losing this would be bad.
             StorageResult initialSaveResult = manifest.SaveAccount(linker.LinkedAccount, passKey != null, passKey);
+            if (IsDisposed || Disposing)
+                return;
             if (!initialSaveResult.Succeeded)
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", initialSaveResult.Exception, "The initial authenticator record could not be saved.");
@@ -430,7 +434,8 @@ namespace Steam_Desktop_Authenticator
 
             AuthenticatorLinker.FinalizeResult finalizeResponse = AuthenticatorLinker.FinalizeResult.GeneralFailure;
             bool previousFinalizationCodeWasInvalid = false;
-            while (finalizeResponse != AuthenticatorLinker.FinalizeResult.Success)
+            while (finalizeResponse != AuthenticatorLinker.FinalizeResult.Success &&
+                finalizeResponse != AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified)
             {
                 string confirmationDestination = linker.FinalizationConfirmationType == AuthenticatorLinker.ConfirmationCodeType.Email
                     ? "email address associated with your Steam account"
@@ -470,7 +475,8 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                if (finalizeResponse != AuthenticatorLinker.FinalizeResult.Success)
+                if (finalizeResponse != AuthenticatorLinker.FinalizeResult.Success &&
+                    finalizeResponse != AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified)
                 {
                     DiagnosticErrorLogger.Log(
                         "Authenticator finalization",
@@ -532,7 +538,11 @@ namespace Steam_Desktop_Authenticator
                 this.Close();
                 return;
             }
-            ShowRecoveryCode(linker.LinkedAccount, "Mobile authenticator successfully linked. Keep this recovery code safe.");
+            ShowRecoveryCode(
+                linker.LinkedAccount,
+                finalizeResponse == AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified
+                    ? "Steam accepted the authenticator finalization, but its status could not be verified. The authenticator record was saved; keep this recovery code safe."
+                    : "Mobile authenticator successfully linked. Keep this recovery code safe.");
             this.Close();
         }
 

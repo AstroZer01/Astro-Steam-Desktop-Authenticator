@@ -133,14 +133,17 @@ namespace SteamAuth
 
                     SteamProtocolResponse<CPhone_VerifyAccountPhoneWithCode_Response> verifySms = await SendAsync(
                         "IPhoneService", "VerifyAccountPhoneWithCode", new CPhone_VerifyAccountPhoneWithCode_Request { Code = PhoneSMSCode }, CPhone_VerifyAccountPhoneWithCode_Response.Parser, cancellationToken);
-                    PhoneSMSCode = null;
                     if (HasResult(verifySms, EResultOK))
                     {
+                        PhoneSMSCode = null;
                         phoneLinkStep = PhoneLinkStep.Verified;
                         return PhoneLinkResult.PhoneAdded;
                     }
                     if (HasResultCode(verifySms, EResultActivationCodeMismatch))
+                    {
+                        PhoneSMSCode = null;
                         return PhoneLinkResult.InvalidSMSCode;
+                    }
 
                     return PhoneFailure(verifySms, "verify the phone code");
 
@@ -188,6 +191,12 @@ namespace SteamAuth
             if (response.Body.Status != 1)
             {
                 LastErrorMessage = "Steam could not start authenticator enrollment (status " + response.Body.Status + "). Please try again later.";
+                return LinkResult.GeneralFailure;
+            }
+            if (response.Body.SharedSecret == null || response.Body.SharedSecret.Length == 0 ||
+                String.IsNullOrWhiteSpace(response.Body.RevocationCode))
+            {
+                LastErrorMessage = "Steam returned incomplete authenticator data. Please try adding the authenticator again.";
                 return LinkResult.GeneralFailure;
             }
 
@@ -259,7 +268,7 @@ namespace SteamAuth
                 }
                 if (response.Body.WantMore)
                 {
-                    if (response.Body.ServerTime == 0 || response.Body.ServerTime > Int64.MaxValue)
+                    if (response.Body.ServerTime == 0 || response.Body.ServerTime > (ulong)Int64.MaxValue)
                     {
                         LastErrorMessage = "Steam requested another authenticator code but did not provide its current time. Please try again.";
                         return FinalizeResult.GeneralFailure;
@@ -279,7 +288,30 @@ namespace SteamAuth
                     return FinalizeResult.GeneralFailure;
                 }
 
-                return await VerifyFinalizedAuthenticatorAsync(cancellationToken);
+                FinalizeResult statusResult;
+                try
+                {
+                    statusResult = await VerifyFinalizedAuthenticatorAsync(cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    SteamAuthDiagnostics.Log(ex, "Steam finalized the authenticator but its status could not be verified.");
+                    statusResult = FinalizeResult.GeneralFailure;
+                }
+
+                if (statusResult == FinalizeResult.GeneralFailure || statusResult == FinalizeResult.RateLimited)
+                {
+                    LinkedAccount.FullyEnrolled = true;
+                    Finalized = true;
+                    LastErrorMessage = "Steam accepted authenticator finalization, but its activation status could not be verified. The authenticator will be saved locally.";
+                    return FinalizeResult.FinalizedStatusUnverified;
+                }
+
+                return statusResult;
             }
 
             LastErrorMessage = "Steam could not verify enough authenticator codes to finalize setup. Please try again later.";
@@ -475,7 +507,8 @@ namespace SteamAuth
             Success,
             GeneralFailure,
             RateLimited,
-            NotFinalized
+            NotFinalized,
+            FinalizedStatusUnverified
         }
 
         public enum ConfirmationCodeType

@@ -549,18 +549,21 @@
         container.innerHTML = "";
         allAccs.forEach(acc => {
             if (filterText && !acc.name.toLowerCase().includes(filterText)) return;
-            const div = document.createElement('div');
+            const row = document.createElement('div');
             if (acc.name === currentAcc) {
-                div.className = "bg-primary-container/20 text-white px-3 py-2 cursor-pointer border-l-2 border-primary font-bold";
+                row.className = "bg-primary-container/20 text-white px-3 py-2 border-l-2 border-primary font-bold";
             } else {
-                div.className = "text-white px-3 py-2 hover:bg-surface-variant cursor-pointer transition-colors";
+                row.className = "text-white px-3 py-2 hover:bg-surface-variant transition-colors";
             }
+            row.classList.add('flex', 'items-center', 'gap-2');
+            const accountButton = document.createElement('button');
+            accountButton.type = 'button';
+            accountButton.className = "min-w-0 flex-1 border-0 bg-transparent p-0 text-left text-inherit cursor-pointer";
             const name = document.createElement('span');
             name.className = "block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ellipsis";
             name.textContent = acc.name;
-            div.appendChild(name);
-            div.classList.add('flex', 'items-center', 'gap-2');
-            div.onclick = () => { window.chrome.webview.postMessage({ action: 'switch_account', accountName: acc.name, steamId: acc.steamId }); };
+            accountButton.appendChild(name);
+            accountButton.onclick = () => { window.chrome.webview.postMessage({ action: 'switch_account', accountName: acc.name, steamId: acc.steamId }); };
 
             const removeButton = document.createElement('button');
             removeButton.className = "shrink-0 rounded p-1 text-on-surface-variant hover:bg-error-container/30 hover:text-error transition-colors";
@@ -571,8 +574,9 @@
                 event.stopPropagation();
                 openRemoveAccountModal(acc);
             };
-            div.appendChild(removeButton);
-            container.appendChild(div);
+            row.appendChild(accountButton);
+            row.appendChild(removeButton);
+            container.appendChild(row);
         });
     }
 
