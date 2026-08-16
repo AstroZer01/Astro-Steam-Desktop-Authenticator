@@ -343,7 +343,8 @@ namespace SteamAuth
 
             var queryParams = GenerateConfirmationQueryParamsAsNVC(tag);
 
-            return string.Join("&", queryParams.AllKeys.Select(key => $"{key}={queryParams[key]}"));
+            return string.Join("&", queryParams.AllKeys.Select(key =>
+                WebUtility.UrlEncode(key) + "=" + WebUtility.UrlEncode(queryParams[key])));
         }
 
         public NameValueCollection GenerateConfirmationQueryParamsAsNVC(string tag)
@@ -401,9 +402,7 @@ namespace SteamAuth
             {
                 hmacGenerator.Key = decode;
                 byte[] hashedData = hmacGenerator.ComputeHash(array);
-                string encodedData = Convert.ToBase64String(hashedData, Base64FormattingOptions.None);
-                string hash = WebUtility.UrlEncode(encodedData);
-                return hash;
+                return Convert.ToBase64String(hashedData, Base64FormattingOptions.None);
             }
         }
 

@@ -26,6 +26,8 @@ namespace Steam_Desktop_Authenticator
         public RecoveryCodeForm(SteamGuardAccount account, string statusMessage, bool requireBackupBeforeContinue = false)
         {
             this.account = account ?? throw new ArgumentNullException(nameof(account));
+            if (String.IsNullOrWhiteSpace(this.account.RevocationCode))
+                throw new ArgumentException("The account does not have a Steam Guard recovery code.", nameof(account));
             this.requireBackupBeforeContinue = requireBackupBeforeContinue;
 
             Text = "Steam Guard Recovery Code";

@@ -54,7 +54,13 @@ namespace Steam_Desktop_Authenticator
             if (portableRoot == null || !String.Equals(installDirectory.Name, "bin", StringComparison.OrdinalIgnoreCase))
                 return null;
 
-            string executableName = Path.GetFileName(Environment.ProcessPath);
+            string processPath = Environment.ProcessPath;
+            if (String.IsNullOrWhiteSpace(processPath))
+                return null;
+
+            string executableName = Path.GetFileName(processPath);
+            if (String.IsNullOrWhiteSpace(executableName))
+                return null;
             string launcherPath = Path.Combine(portableRoot.FullName, executableName);
             string uiDirectory = Path.Combine(installDirectory.FullName, "app", "ui");
             if (!File.Exists(launcherPath) || !Directory.Exists(uiDirectory))

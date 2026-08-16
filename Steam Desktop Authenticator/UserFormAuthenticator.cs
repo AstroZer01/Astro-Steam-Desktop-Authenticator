@@ -111,20 +111,53 @@ namespace Steam_Desktop_Authenticator
             }
 
             TaskCompletionSource<T> completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-            EventHandler ownerDisposed = (sender, args) => completion.TrySetCanceled();
-            CancellationTokenRegistration cancellationRegistration = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
+            CancellationTokenRegistration cancellationRegistration = default;
+            EventHandler ownerUnavailable = null;
+            Action cleanup = null;
+            int cleanupRequested = 0;
+            cleanup = () =>
+            {
+                if (Interlocked.Exchange(ref cleanupRequested, 1) != 0)
+                    return;
+
+                owner.Disposed -= ownerUnavailable;
+                owner.HandleDestroyed -= ownerUnavailable;
+                cancellationRegistration.Dispose();
+            };
+            ownerUnavailable = (sender, args) =>
+            {
+                completion.TrySetCanceled();
+                cleanup();
+            };
+            owner.Disposed += ownerUnavailable;
+            owner.HandleDestroyed += ownerUnavailable;
+            if (Volatile.Read(ref cleanupRequested) != 0)
+            {
+                owner.Disposed -= ownerUnavailable;
+                owner.HandleDestroyed -= ownerUnavailable;
+                return completion.Task;
+            }
+            cancellationRegistration = cancellationToken.Register(() =>
+            {
+                completion.TrySetCanceled(cancellationToken);
+                cleanup();
+            });
+            if (Volatile.Read(ref cleanupRequested) != 0)
+            {
+                cancellationRegistration.Dispose();
+                return completion.Task;
+            }
             try
             {
                 owner.BeginInvoke((MethodInvoker)delegate
                 {
                     if (cancellationToken.IsCancellationRequested || owner.IsDisposed)
                     {
-                        cancellationRegistration.Dispose();
                         completion.TrySetCanceled(cancellationToken);
+                        cleanup();
                         return;
                     }
 
-                    owner.Disposed += ownerDisposed;
                     try
                     {
                         completion.TrySetResult(action());
@@ -139,20 +172,19 @@ namespace Steam_Desktop_Authenticator
                     }
                     finally
                     {
-                        owner.Disposed -= ownerDisposed;
-                        cancellationRegistration.Dispose();
+                        cleanup();
                     }
                 });
             }
             catch (OperationCanceledException ex)
             {
-                cancellationRegistration.Dispose();
                 completion.TrySetCanceled(ex.CancellationToken);
+                cleanup();
             }
             catch (Exception ex)
             {
-                cancellationRegistration.Dispose();
                 completion.TrySetException(ex);
+                cleanup();
             }
 
             return completion.Task;
