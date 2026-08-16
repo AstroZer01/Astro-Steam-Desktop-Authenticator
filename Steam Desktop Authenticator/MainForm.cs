@@ -847,6 +847,7 @@ namespace Steam_Desktop_Authenticator
                 case 15:
                     return "Steam denied this QR login approval. Refresh the Steam login page and scan a new QR code.";
                 case 20:
+                    return "Steam's QR approval service is temporarily unavailable. Wait a while, then try again.";
                 case 27:
                 case 29:
                     return "That QR login request has expired or is no longer available. Refresh the Steam login page and scan a new QR code.";

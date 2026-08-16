@@ -1,4 +1,5 @@
 using SteamAuth;
+using PhoneNumbers;
 using System;
 using System.Collections.Generic;
 using System.Windows.Forms;
@@ -18,6 +19,7 @@ namespace Steam_Desktop_Authenticator
         private ComboBox countrySelector;
         private TextBox phoneNumberInput;
         private string displayedDialingCode;
+        private static readonly PhoneNumberUtil PhoneNumbers = PhoneNumberUtil.GetInstance();
 
         public PhoneInputForm(SteamGuardAccount account)
         {
@@ -28,6 +30,7 @@ namespace Steam_Desktop_Authenticator
             this.ClientSize = new Size(540, 320);
             this.MinimumSize = new Size(540, 320);
             this.MaximumSize = new Size(720, 500);
+            this.AutoScroll = true;
             this.MaximizeBox = false;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.Text = "Add a phone number";
@@ -40,12 +43,15 @@ namespace Steam_Desktop_Authenticator
             Controls.Clear();
             foreach (Control designerControl in designerControls)
                 designerControl.Dispose();
-            AutoScroll = false;
+            AutoScroll = true;
             BackColor = AstroTheme.Background;
 
             TableLayoutPanel layout = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                GrowStyle = TableLayoutPanelGrowStyle.AddRows,
                 Padding = new Padding(20),
                 ColumnCount = 1,
                 RowCount = 5,
@@ -158,9 +164,14 @@ namespace Steam_Desktop_Authenticator
             string countryDialingDigits = selectedCountry == null
                 ? String.Empty
                 : new String(selectedCountry.DialingCode.Where(character => character >= '0' && character <= '9').ToArray());
-            if (selectedCountry == null || String.IsNullOrWhiteSpace(selectedCountry.RegionCode) || selectedCountry.RegionCode.Length != 2 || digits.Length <= countryDialingDigits.Length || !enteredNumber.TrimStart().StartsWith("+"))
+            if (selectedCountry == null ||
+                String.IsNullOrWhiteSpace(selectedCountry.RegionCode) ||
+                selectedCountry.RegionCode.Length != 2 ||
+                !enteredNumber.TrimStart().StartsWith("+", StringComparison.Ordinal) ||
+                !digits.StartsWith(countryDialingDigits, StringComparison.Ordinal) ||
+                digits.Length <= countryDialingDigits.Length)
             {
-                AstroMessageBox.Show("Choose a country or region with a valid two-letter country code and enter the phone number after the country code, starting with +.", "Phone Number", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AstroMessageBox.Show("Enter an international phone number that starts with + and the dialing code of the selected country or region, followed by the local number.", "Phone Number", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
@@ -250,7 +261,7 @@ namespace Steam_Desktop_Authenticator
             {
                 currentRegion = RegionInfo.CurrentRegion.TwoLetterISORegionName;
             }
-            catch (CultureNotFoundException)
+            catch (ArgumentException)
             {
                 currentRegion = "US";
             }
@@ -259,27 +270,22 @@ namespace Steam_Desktop_Authenticator
             countrySelector.SelectedItem = currentCountry;
         }
 
-        private static IReadOnlyList<CountryOption> CountryOptions { get; } = new List<CountryOption>
+        private static IReadOnlyList<CountryOption> CountryOptions { get; } = PhoneNumbers.GetSupportedRegions()
+            .Select(regionCode => new CountryOption(GetRegionDisplayName(regionCode), regionCode, "+" + PhoneNumbers.GetCountryCodeForRegion(regionCode)))
+            .OrderBy(option => option.DisplayName, StringComparer.CurrentCulture)
+            .ToArray();
+
+        private static string GetRegionDisplayName(string regionCode)
         {
-            new CountryOption("Argentina", "AR", "+54"), new CountryOption("Australia", "AU", "+61"), new CountryOption("Austria", "AT", "+43"),
-            new CountryOption("Bangladesh", "BD", "+880"), new CountryOption("Belgium", "BE", "+32"), new CountryOption("Brazil", "BR", "+55"),
-            new CountryOption("Bulgaria", "BG", "+359"), new CountryOption("Canada", "CA", "+1"), new CountryOption("Chile", "CL", "+56"),
-            new CountryOption("China", "CN", "+86"), new CountryOption("Colombia", "CO", "+57"), new CountryOption("Croatia", "HR", "+385"),
-            new CountryOption("Czechia", "CZ", "+420"), new CountryOption("Denmark", "DK", "+45"), new CountryOption("Egypt", "EG", "+20"),
-            new CountryOption("Finland", "FI", "+358"), new CountryOption("France", "FR", "+33"), new CountryOption("Germany", "DE", "+49"),
-            new CountryOption("Greece", "GR", "+30"), new CountryOption("Hong Kong", "HK", "+852"), new CountryOption("Hungary", "HU", "+36"),
-            new CountryOption("India", "IN", "+91"), new CountryOption("Indonesia", "ID", "+62"), new CountryOption("Ireland", "IE", "+353"),
-            new CountryOption("Israel", "IL", "+972"), new CountryOption("Italy", "IT", "+39"), new CountryOption("Japan", "JP", "+81"),
-            new CountryOption("Malaysia", "MY", "+60"), new CountryOption("Mexico", "MX", "+52"), new CountryOption("Netherlands", "NL", "+31"),
-            new CountryOption("New Zealand", "NZ", "+64"), new CountryOption("Norway", "NO", "+47"), new CountryOption("Pakistan", "PK", "+92"),
-            new CountryOption("Philippines", "PH", "+63"), new CountryOption("Poland", "PL", "+48"), new CountryOption("Portugal", "PT", "+351"),
-            new CountryOption("Romania", "RO", "+40"), new CountryOption("Russia", "RU", "+7"), new CountryOption("Saudi Arabia", "SA", "+966"),
-            new CountryOption("Singapore", "SG", "+65"), new CountryOption("Slovakia", "SK", "+421"), new CountryOption("South Africa", "ZA", "+27"),
-            new CountryOption("South Korea", "KR", "+82"), new CountryOption("Spain", "ES", "+34"), new CountryOption("Sweden", "SE", "+46"),
-            new CountryOption("Switzerland", "CH", "+41"), new CountryOption("Taiwan", "TW", "+886"), new CountryOption("Thailand", "TH", "+66"),
-            new CountryOption("Turkey", "TR", "+90"), new CountryOption("Ukraine", "UA", "+380"), new CountryOption("United Arab Emirates", "AE", "+971"),
-            new CountryOption("United Kingdom", "GB", "+44"), new CountryOption("United States", "US", "+1"), new CountryOption("Vietnam", "VN", "+84")
-        };
+            try
+            {
+                return new RegionInfo(regionCode).EnglishName;
+            }
+            catch (ArgumentException)
+            {
+                return regionCode;
+            }
+        }
 
         private sealed class CountryOption
         {
