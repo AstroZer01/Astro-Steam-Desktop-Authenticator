@@ -469,6 +469,7 @@ namespace SteamAuth
         public enum FinalizeResult
         {
             BadConfirmationCode,
+            [Obsolete("Use BadConfirmationCode. Finalization accepts either an email or SMS confirmation code.")]
             BadSMSCode = BadConfirmationCode,
             UnableToGenerateCorrectCodes,
             Success,

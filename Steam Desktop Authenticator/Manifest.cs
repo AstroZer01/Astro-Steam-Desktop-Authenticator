@@ -765,9 +765,17 @@ namespace Steam_Desktop_Authenticator
                         : DeleteFilesBestEffort(maDir, created, "A temporary authenticator file could not be removed during storage recovery.");
 
                     if (!cleanupSucceeded)
-                        // The committed manifest is safe to use. Keep its journal so the
-                        // obsolete-file cleanup is retried during a later recovery.
-                        return manifestCommitted;
+                    {
+                        if (!manifestCommitted)
+                            return false;
+
+                        // The manifest is committed, so its newly created files are live.
+                        // Retain only the obsolete-file cleanup state before allowing a
+                        // later settings save to replace the manifest.
+                        journal.CreatedFilenames = new List<string>();
+                        WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal));
+                        return true;
+                    }
 
                     bool backupDeleted = backupFilename == null ||
                         DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");

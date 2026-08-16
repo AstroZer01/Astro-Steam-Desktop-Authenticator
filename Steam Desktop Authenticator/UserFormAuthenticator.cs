@@ -54,7 +54,7 @@ namespace Steam_Desktop_Authenticator
                     AstroMessageBox.Show("This account already has an authenticator linked. You must remove that authenticator to add SDA as your authenticator.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return true;
                 });
-                throw new OperationCanceledException(cancellationToken);
+                throw new AuthenticatorAlreadyLinkedException();
             }
             else
             {
@@ -188,6 +188,14 @@ namespace Steam_Desktop_Authenticator
             }
 
             return completion.Task;
+        }
+    }
+
+    internal sealed class AuthenticatorAlreadyLinkedException : InvalidOperationException
+    {
+        public AuthenticatorAlreadyLinkedException()
+            : base("This account already has an authenticator linked, so SDA cannot provide a device code.")
+        {
         }
     }
 }

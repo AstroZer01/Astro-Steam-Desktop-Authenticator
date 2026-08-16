@@ -244,6 +244,11 @@ namespace Steam_Desktop_Authenticator
                     Authenticator = new UserFormAuthenticator(this.account, this, cancellationToken),
                 });
             }
+            catch (AuthenticatorAlreadyLinkedException)
+            {
+                ResetLoginButton(cancellationToken);
+                return;
+            }
             catch (OperationCanceledException)
             {
                 ResetLoginButton(cancellationToken);
@@ -279,6 +284,11 @@ namespace Steam_Desktop_Authenticator
             try
             {
                 pollResponse = await authSession.PollingWaitForResultAsync();
+            }
+            catch (AuthenticatorAlreadyLinkedException)
+            {
+                ResetLoginButton(cancellationToken);
+                return;
             }
             catch (OperationCanceledException)
             {
