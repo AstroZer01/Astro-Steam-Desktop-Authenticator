@@ -74,6 +74,7 @@ namespace Steam_Desktop_Authenticator
         private static Manifest _manifest { get; set; }
         private static readonly object storageLock = new object();
         private const string StorageJournalFilename = ".asda-storage-transaction.json";
+        private const string SettingsBackupFilename = ".manifest.settings.bak";
 
         public static string GetExecutableDir()
         {
@@ -94,6 +95,8 @@ namespace Steam_Desktop_Authenticator
             string manifestFile = Path.Combine(maDir, "manifest.json");
 
             if (!RecoverPendingStorageTransaction(maDir, manifestFile))
+                throw new ManifestParseException();
+            if (!RestoreManifestBackupIfNeeded(manifestFile, Path.Combine(maDir, SettingsBackupFilename), false))
                 throw new ManifestParseException();
 
             // If there's no config dir, create it
@@ -588,7 +591,7 @@ namespace Steam_Desktop_Authenticator
                         return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data save could not be recovered safely. No settings were changed.");
                     }
                     string contents = JsonConvert.SerializeObject(this);
-                    string backupFilename = CreateBackupFilename(maDir);
+                    string backupFilename = Path.Combine(maDir, SettingsBackupFilename);
                     WriteAllTextAtomically(Path.Combine(maDir, "manifest.json"), contents, backupFilename);
                     DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
                     return StorageResult.Success();
@@ -683,13 +686,13 @@ namespace Steam_Desktop_Authenticator
                 catch (JsonException ex)
                 {
                     if (!manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, journalFilename, backupFilename, createdFilenames);
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, manifestCommitStarted);
                     return StorageResult.Failure(StorageFailureKind.Serialization, "The account data could not be prepared for saving.", ex);
                 }
                 catch (Exception ex)
                 {
                     if (!manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, journalFilename, backupFilename, createdFilenames);
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, manifestCommitStarted);
                     return StorageResult.Failure(
                         manifestCommitStarted ? StorageFailureKind.Manifest : StorageFailureKind.Io,
                         manifestCommitStarted
@@ -700,8 +703,11 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static void RollBackUncommittedTransaction(string maDir, string journalFilename, string backupFilename, IEnumerable<string> createdFilenames)
+        private static void RollBackUncommittedTransaction(string maDir, string manifestFilename, string journalFilename, string backupFilename, IEnumerable<string> createdFilenames, bool manifestCommitStarted)
         {
+            if (manifestCommitStarted && !RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, true))
+                return;
+
             if (DeleteFilesBestEffort(maDir, createdFilenames, "A temporary authenticator file could not be removed after a failed save."))
             {
                 DeleteFileBestEffort(journalFilename, "A storage journal could not be removed after a failed save.");
@@ -728,6 +734,12 @@ namespace Steam_Desktop_Authenticator
                     foreach (string filename in created.Concat(obsolete))
                         ValidateStorageFilename(filename);
 
+                    string backupFilename = String.IsNullOrWhiteSpace(journal.BackupFilename)
+                        ? null
+                        : Path.Combine(maDir, Path.GetFileName(journal.BackupFilename));
+                    if (!RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, false))
+                        return false;
+
                     bool manifestCommitted = File.Exists(manifestFilename) &&
                         String.Equals(GetContentHash(File.ReadAllText(manifestFilename)), journal.ManifestHash, StringComparison.Ordinal);
                     bool cleanupSucceeded = manifestCommitted
@@ -737,8 +749,8 @@ namespace Steam_Desktop_Authenticator
                     if (!cleanupSucceeded)
                         return false;
 
-                    bool backupDeleted = String.IsNullOrWhiteSpace(journal.BackupFilename) ||
-                        DeleteFileBestEffort(Path.Combine(maDir, Path.GetFileName(journal.BackupFilename)), "A completed manifest backup could not be removed during storage recovery.");
+                    bool backupDeleted = backupFilename == null ||
+                        DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
                     if (!backupDeleted)
                         return false;
 
@@ -751,6 +763,25 @@ namespace Steam_Desktop_Authenticator
                     QuarantineStorageJournal(journalFilename);
                     return false;
                 }
+            }
+        }
+
+        private static bool RestoreManifestBackupIfNeeded(string manifestFilename, string backupFilename, bool overwriteManifest)
+        {
+            if (String.IsNullOrWhiteSpace(backupFilename) || !File.Exists(backupFilename))
+                return !overwriteManifest || File.Exists(manifestFilename);
+            if (!overwriteManifest && File.Exists(manifestFilename))
+                return true;
+
+            try
+            {
+                WriteAllTextAtomically(manifestFilename, File.ReadAllText(backupFilename));
+                return File.Exists(manifestFilename);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "The manifest backup could not be restored safely.");
+                return false;
             }
         }
 

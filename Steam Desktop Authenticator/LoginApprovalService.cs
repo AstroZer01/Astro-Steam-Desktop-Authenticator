@@ -312,7 +312,8 @@ namespace Steam_Desktop_Authenticator
             }
             catch (System.Net.Http.HttpRequestException exception)
             {
-                throw CreateNetworkException(exception.Message);
+                DiagnosticErrorLogger.Log("Login approval transport", exception, "A login approval request failed at the transport layer.");
+                throw CreateNetworkException(null);
             }
             catch (TaskCanceledException)
             {
