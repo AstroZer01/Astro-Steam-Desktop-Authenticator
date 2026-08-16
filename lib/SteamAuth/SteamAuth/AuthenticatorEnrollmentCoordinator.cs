@@ -95,12 +95,12 @@ namespace SteamAuth
         private async Task<AuthenticatorEnrollmentOutcome> EnrollPhoneAsync(CancellationToken cancellationToken, PhoneEnrollmentState enrollmentState)
         {
             bool previousCodeWasInvalid = false;
-            while (enrollmentState.Attempts < MaxPhoneEnrollmentAttempts)
+            while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (enrollmentState.Attempts > 0)
+                if (previousCodeWasInvalid)
                     await Task.Delay(PhoneEnrollmentRetryDelay, cancellationToken);
-                enrollmentState.Attempts++;
+
                 AuthenticatorLinker.PhoneLinkResult phoneResult = await linker.AddPhoneNumber(cancellationToken);
                 switch (phoneResult)
                 {
@@ -127,6 +127,12 @@ namespace SteamAuth
 
                     case AuthenticatorLinker.PhoneLinkResult.MustConfirmSMS:
                     case AuthenticatorLinker.PhoneLinkResult.InvalidSMSCode:
+                        if (phoneResult == AuthenticatorLinker.PhoneLinkResult.InvalidSMSCode &&
+                            ++enrollmentState.Attempts >= MaxPhoneEnrollmentAttempts)
+                        {
+                            return Failed("Steam did not accept the SMS code after several attempts. Please request a new code and try again later.");
+                        }
+
                         string code = interaction.RequestSmsCode(previousCodeWasInvalid || phoneResult == AuthenticatorLinker.PhoneLinkResult.InvalidSMSCode);
                         if (string.IsNullOrWhiteSpace(code))
                             return new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.Canceled);
@@ -146,7 +152,6 @@ namespace SteamAuth
                 }
             }
 
-            return Failed("Steam could not complete phone registration after several attempts. Please try again later.");
         }
 
         private async Task<AuthenticatorEnrollmentOutcome> AddAuthenticatorAsync(CancellationToken cancellationToken)

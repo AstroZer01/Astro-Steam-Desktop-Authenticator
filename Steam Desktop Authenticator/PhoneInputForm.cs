@@ -222,7 +222,7 @@ namespace Steam_Desktop_Authenticator
                 return currentNumber.Substring(knownDialingCode.Length);
 
             int firstSpace = currentNumber.IndexOf(' ');
-            return firstSpace >= 0 ? currentNumber.Substring(firstSpace) : String.Empty;
+            return firstSpace >= 0 ? currentNumber.Substring(firstSpace) : " " + currentNumber;
         }
 
         private void countrySelector_DrawItem(object sender, DrawItemEventArgs e)

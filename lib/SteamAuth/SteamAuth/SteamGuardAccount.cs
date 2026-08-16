@@ -144,7 +144,7 @@ namespace SteamAuth
             if (!UInt64.TryParse(idOfQR, out ulong clientId))
                 throw new ArgumentException("Steam provided an invalid QR login identifier.", nameof(idOfQR));
 
-            byte[] sharedSecretBytes = Convert.FromBase64String(this.SharedSecret);
+            byte[] sharedSecretBytes = Convert.FromBase64String(Regex.Unescape(this.SharedSecret));
             byte[] signatureData = new byte[18];
             
             // version (uint16 LE)

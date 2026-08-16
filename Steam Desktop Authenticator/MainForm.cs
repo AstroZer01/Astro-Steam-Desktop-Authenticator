@@ -1001,6 +1001,20 @@ namespace Steam_Desktop_Authenticator
                 DiagnosticErrorLogger.Log("Managed account removal", ex, "The account removal command failed.");
                 AstroMessageBox.Show("This app could not complete the account removal. No other accounts were changed.", "Remove Account", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+            finally
+            {
+                if (webView != null && webView.CoreWebView2 != null)
+                {
+                    try
+                    {
+                        await webView.CoreWebView2.ExecuteScriptAsync("hideSpinner('remove-account');");
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Managed account removal", ex, "The account-removal loading indicator could not be cleared.");
+                    }
+                }
+            }
         }
 
         // Tray menu handlers
@@ -2581,7 +2595,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     AstroMessageBox.Show("The requested account removal is invalid. Refresh the account list and try again.", "Remove Account", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     if (webView != null && webView.CoreWebView2 != null)
-                        _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner();");
+                        _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner('remove-account');");
                 }
             }
             else if (action == "load_settings")

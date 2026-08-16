@@ -637,6 +637,7 @@
 
     function requestAccountRemoval(removalMode) {
         if (accountPendingRemoval) {
+            showSpinner('remove-account');
             window.chrome.webview.postMessage({
                 action: 'remove_account',
                 removalMode: removalMode,
