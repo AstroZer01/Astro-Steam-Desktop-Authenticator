@@ -154,7 +154,6 @@ The hook runs only when staged UI templates, the Tailwind configuration, or the 
 
 <p align="center">
   ❕ Alternatively, download and run the latest release without building from source.<br>
-  
   <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
     <img src="https://img.shields.io/github/v/release/AstroZer01/Astro-Steam-Desktop-Authenticator?label=Download%20Latest&style=for-the-badge&logo=windows" alt="Download Latest Release" />
   </a>
