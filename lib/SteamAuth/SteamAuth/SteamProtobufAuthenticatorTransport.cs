@@ -97,7 +97,7 @@ namespace SteamAuth
 
             string url = "https://api.steampowered.com/" + service + "/" + method + "/v1";
             string encodedRequest = Convert.ToBase64String(request.ToByteArray());
-            bool useGet = requestMethod == SteamProtocolRequestMethod.Get && String.IsNullOrWhiteSpace(accessToken);
+            bool useGet = requestMethod == SteamProtocolRequestMethod.Get;
             using (HttpRequestMessage httpRequest = new HttpRequestMessage(useGet ? HttpMethod.Get : HttpMethod.Post, url))
             {
                 if (useGet)
@@ -106,6 +106,8 @@ namespace SteamAuth
                     {
                         new KeyValuePair<string, string>("input_protobuf_encoded", encodedRequest)
                     };
+                    if (!String.IsNullOrWhiteSpace(accessToken))
+                        query.Add(new KeyValuePair<string, string>("access_token", accessToken));
                     httpRequest.RequestUri = new Uri(url + "?" + String.Join("&", query.ConvertAll(item => Uri.EscapeDataString(item.Key) + "=" + Uri.EscapeDataString(item.Value))));
                 }
                 else
@@ -153,7 +155,7 @@ namespace SteamAuth
                             string detail = String.IsNullOrWhiteSpace(errorMessage)
                                 ? "Steam returned HTTP " + (int)response.StatusCode + " (" + response.ReasonPhrase + ")."
                                 : errorMessage;
-                            throw new SteamWebRequestException(detail, response.StatusCode, new WebHeaderCollection());
+                            throw new SteamWebRequestException(detail, response.StatusCode, CopyHeaders(response));
                         }
 
                         return new SteamProtocolResponse<TResponse>
@@ -196,6 +198,33 @@ namespace SteamAuth
             return response.Headers.TryGetValues(name, out IEnumerable<string> values)
                 ? String.Join(", ", values)
                 : null;
+        }
+
+        private static WebHeaderCollection CopyHeaders(HttpResponseMessage response)
+        {
+            WebHeaderCollection headers = new WebHeaderCollection();
+            AddHeaders(headers, response.Headers);
+            if (response.Content != null)
+                AddHeaders(headers, response.Content.Headers);
+            return headers;
+        }
+
+        private static void AddHeaders(WebHeaderCollection destination, IEnumerable<KeyValuePair<string, IEnumerable<string>>> source)
+        {
+            foreach (KeyValuePair<string, IEnumerable<string>> header in source)
+            {
+                foreach (string value in header.Value)
+                {
+                    try
+                    {
+                        destination.Add(header.Key, value);
+                    }
+                    catch (ArgumentException)
+                    {
+                        // WebHeaderCollection rejects restricted headers on some targets.
+                    }
+                }
+            }
         }
     }
 }
