@@ -74,6 +74,8 @@ namespace SteamAuth
         {
             if (timeout == TimeSpan.Zero || timeout < Timeout.InfiniteTimeSpan)
                 throw new ArgumentOutOfRangeException(nameof(timeout));
+            if (!IsHttpUri(uri))
+                throw new ArgumentException("A valid Steam URL is required.", nameof(uri));
 
             byte[] requestBody = content == null ? null : await content.ReadAsByteArrayAsync().ConfigureAwait(false);
             IEnumerable<KeyValuePair<string, IEnumerable<string>>> contentHeaders = content == null
@@ -96,7 +98,7 @@ namespace SteamAuth
                         requestMethod == HttpMethod.Get ? null : requestBody,
                         contentHeaders,
                         headers,
-                        redirectCount == 0))
+                        IsSameOrigin(uri, requestUri)))
                     {
                         try
                         {
@@ -124,7 +126,7 @@ namespace SteamAuth
                         {
                             if (redirectCount >= MaximumRedirects)
                                 throw new HttpRequestException("Steam redirected the request too many times.");
-                            if (!Uri.TryCreate(requestUri, response.Headers.Location, out Uri redirectedUri))
+                            if (!Uri.TryCreate(requestUri, response.Headers.Location, out Uri redirectedUri) || !IsHttpUri(redirectedUri))
                                 throw new HttpRequestException("Steam returned an invalid redirect location.");
                             if (requestUri.Scheme == Uri.UriSchemeHttps && redirectedUri.Scheme != Uri.UriSchemeHttps)
                                 throw new HttpRequestException("Steam redirected the request to an insecure location.");
@@ -179,6 +181,21 @@ namespace SteamAuth
                 request.Headers.TryAddWithoutValidation("User-Agent", SteamWeb.MOBILE_APP_USER_AGENT);
             }
             return request;
+        }
+
+        private static bool IsHttpUri(Uri uri)
+        {
+            return uri != null &&
+                (String.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
+                 String.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool IsSameOrigin(Uri first, Uri second)
+        {
+            return first != null && second != null &&
+                String.Equals(first.Scheme, second.Scheme, StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(first.Host, second.Host, StringComparison.OrdinalIgnoreCase) &&
+                first.Port == second.Port;
         }
 
         private static bool IsRedirect(HttpStatusCode statusCode)
@@ -268,7 +285,8 @@ namespace SteamAuth
             IReadOnlyDictionary<string, string> headers, TimeSpan timeout, CancellationToken cancellationToken,
             bool followRedirects = true)
         {
-            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri uri))
+            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri uri) ||
+                (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
                 throw new ArgumentException("A valid Steam URL is required.", nameof(url));
             Dictionary<string, string> requestHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {

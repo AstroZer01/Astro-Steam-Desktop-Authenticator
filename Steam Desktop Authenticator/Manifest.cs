@@ -142,6 +142,13 @@ namespace Steam_Desktop_Authenticator
 
                 _manifest.RecomputeExistingEntries();
 
+                lock (storageLock)
+                {
+                    DeleteFileBestEffort(
+                        Path.Combine(maDir, SettingsBackupFilename),
+                        "A stale manifest backup could not be removed after the settings were loaded.");
+                }
+
                 return _manifest;
             }
             catch (Exception)
@@ -503,6 +510,14 @@ namespace Steam_Desktop_Authenticator
                 }
             }
 
+            if (matchingEntries.Count > 1)
+            {
+                DiagnosticErrorLogger.Log(
+                    "Authenticator storage",
+                    new InvalidOperationException("Multiple local authenticator records matched the account name."),
+                    "The local account removal was canceled because the account name was ambiguous.");
+            }
+
             return matchingEntries.Count == 1 ? matchingEntries[0] : null;
         }
 
@@ -680,10 +695,9 @@ namespace Steam_Desktop_Authenticator
                     manifestCommitted = true;
 
                     bool cleanupSucceeded = DeleteFilesBestEffort(maDir, obsoleteFilenames, "The replaced authenticator file could not be removed after the manifest was committed.");
-                    if (cleanupSucceeded)
+                    if (cleanupSucceeded && DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed."))
                     {
                         DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed.");
-                        DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
                     }
                     return StorageResult.Success();
                 }
