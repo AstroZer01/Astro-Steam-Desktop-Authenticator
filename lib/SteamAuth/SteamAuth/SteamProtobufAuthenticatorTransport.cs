@@ -97,7 +97,7 @@ namespace SteamAuth
 
             string url = "https://api.steampowered.com/" + service + "/" + method + "/v1";
             string encodedRequest = Convert.ToBase64String(request.ToByteArray());
-            bool useGet = requestMethod == SteamProtocolRequestMethod.Get;
+            bool useGet = requestMethod == SteamProtocolRequestMethod.Get && String.IsNullOrWhiteSpace(accessToken);
             using (HttpRequestMessage httpRequest = new HttpRequestMessage(useGet ? HttpMethod.Get : HttpMethod.Post, url))
             {
                 if (useGet)
