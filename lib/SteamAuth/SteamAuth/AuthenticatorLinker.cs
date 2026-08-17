@@ -87,6 +87,7 @@ namespace SteamAuth
 
         public async Task<PhoneLinkResult> AddPhoneNumber(CancellationToken cancellationToken = default)
         {
+            LastErrorMessage = null;
             switch (phoneLinkStep)
             {
                 case PhoneLinkStep.None:
@@ -303,9 +304,7 @@ namespace SteamAuth
                     statusResult = FinalizeResult.GeneralFailure;
                 }
 
-                if (statusResult == FinalizeResult.GeneralFailure ||
-                    statusResult == FinalizeResult.RateLimited ||
-                    statusResult == FinalizeResult.NotFinalized)
+                if (statusResult == FinalizeResult.GeneralFailure || statusResult == FinalizeResult.RateLimited)
                 {
                     LinkedAccount.FullyEnrolled = true;
                     Finalized = true;
