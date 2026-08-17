@@ -2117,6 +2117,8 @@ namespace Steam_Desktop_Authenticator
             var activeAccountNames = new HashSet<string>(allAccounts.Select(account => account.AccountName), StringComparer.Ordinal);
             foreach (ulong steamId in pendingTradeConfirmationCounts.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
                 pendingTradeConfirmationCounts.Remove(steamId);
+            foreach (ulong steamId in loginMonitorSchedules.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
+                loginMonitorSchedules.Remove(steamId);
             loadedTradeConfirmationAccounts.RemoveWhere(steamId => !activeSteamIds.Contains(steamId));
             foreach (string accountName in unavailableLoginAccounts.Keys.Where(accountName => !activeAccountNames.Contains(accountName)).ToArray())
                 unavailableLoginAccounts.Remove(accountName);

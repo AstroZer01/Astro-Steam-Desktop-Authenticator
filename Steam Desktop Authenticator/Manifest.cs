@@ -604,14 +604,26 @@ namespace Steam_Desktop_Authenticator
                 try
                 {
                     string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+                    string manifestFilename = Path.Combine(maDir, "manifest.json");
                     Directory.CreateDirectory(maDir);
-                    if (!RecoverPendingStorageTransaction(maDir, Path.Combine(maDir, "manifest.json")))
+                    List<string> retainedObsoleteFilenames = new List<string>();
+                    if (!RecoverPendingStorageTransaction(maDir, manifestFilename, retainedObsoleteFilenames))
                     {
                         return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data save could not be recovered safely. No settings were changed.");
                     }
                     string contents = JsonConvert.SerializeObject(this);
                     string backupFilename = Path.Combine(maDir, SettingsBackupFilename);
-                    WriteAllTextAtomically(Path.Combine(maDir, "manifest.json"), contents, backupFilename);
+                    WriteAllTextAtomically(manifestFilename, contents, backupFilename);
+                    if (retainedObsoleteFilenames.Count > 0)
+                    {
+                        if (!RebaseRetainedStorageTransaction(maDir, contents) ||
+                            !RecoverPendingStorageTransaction(maDir, manifestFilename))
+                        {
+                            return StorageResult.Failure(
+                                StorageFailureKind.Io,
+                                "The settings were saved, but a previous account-data cleanup could not be completed safely. Restart the application and try again.");
+                        }
+                    }
                     DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
                     return StorageResult.Success();
                 }
@@ -836,6 +848,36 @@ namespace Steam_Desktop_Authenticator
                 {
                     DiagnosticErrorLogger.Log("Authenticator storage", ex, "A pending storage transaction could not be recovered automatically.");
                     QuarantineStorageJournal(journalFilename);
+                    return false;
+                }
+            }
+        }
+
+        private static bool RebaseRetainedStorageTransaction(string maDir, string manifestContents)
+        {
+            string journalFilename = Path.Combine(maDir, StorageJournalFilename);
+            lock (storageLock)
+            {
+                try
+                {
+                    if (!File.Exists(journalFilename))
+                        return true;
+
+                    StorageTransactionJournal journal = JsonConvert.DeserializeObject<StorageTransactionJournal>(File.ReadAllText(journalFilename));
+                    if (journal == null || String.IsNullOrWhiteSpace(journal.ManifestHash))
+                        throw new InvalidDataException("The retained storage journal is invalid.");
+
+                    foreach (string filename in (journal.ObsoleteFilenames ?? new List<string>()))
+                        ValidateStorageFilename(filename);
+
+                    journal.ManifestHash = GetContentHash(manifestContents);
+                    journal.CreatedFilenames = new List<string>();
+                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal));
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Authenticator storage", ex, "The retained storage cleanup could not be associated with the saved manifest.");
                     return false;
                 }
             }
