@@ -49,6 +49,7 @@ namespace SteamAuth
     public sealed class SteamProtobufAuthenticatorTransport : IAuthenticatorProtocolTransport
     {
         public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(20);
+        private static readonly TimeSpan MaximumRequestTimeout = TimeSpan.FromMilliseconds(Int32.MaxValue);
         private static readonly HttpClient sharedHttpClient = CreateHttpClient();
         private readonly HttpClient httpClient;
         private readonly TimeSpan requestTimeout;
@@ -70,7 +71,7 @@ namespace SteamAuth
         public SteamProtobufAuthenticatorTransport(HttpClient httpClient, TimeSpan requestTimeout)
         {
             this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
-            if (requestTimeout <= TimeSpan.Zero)
+            if (requestTimeout <= TimeSpan.Zero || requestTimeout > MaximumRequestTimeout)
                 throw new ArgumentOutOfRangeException(nameof(requestTimeout));
             this.requestTimeout = requestTimeout;
         }
