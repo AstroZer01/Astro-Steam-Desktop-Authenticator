@@ -24,7 +24,18 @@ namespace Steam_Desktop_Authenticator
         {
             using (AstroMessageBoxForm form = new AstroMessageBoxForm(text, caption, buttons, icon))
             {
-                return form.ShowDialog();
+                return ShowWithActiveOwner(form);
+            }
+        }
+
+        public static DialogResult ShowWithCustomButtons(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string primaryButtonText, string secondaryButtonText)
+        {
+            if (buttons != MessageBoxButtons.OKCancel)
+                throw new ArgumentOutOfRangeException(nameof(buttons), "Custom button labels are supported only for OK/Cancel dialogs.");
+
+            using (AstroMessageBoxForm form = new AstroMessageBoxForm(text, caption, buttons, icon, null, primaryButtonText, secondaryButtonText))
+            {
+                return ShowWithActiveOwner(form);
             }
         }
 
@@ -32,10 +43,20 @@ namespace Steam_Desktop_Authenticator
         {
             using (AstroMessageBoxForm form = new AstroMessageBoxForm(text, caption, buttons, icon, checkboxText))
             {
-                DialogResult result = form.ShowDialog();
+                DialogResult result = ShowWithActiveOwner(form);
                 isChecked = form.IsChecked;
                 return result;
             }
+        }
+
+        private static DialogResult ShowWithActiveOwner(AstroMessageBoxForm form)
+        {
+            Form owner = Form.ActiveForm;
+            if (owner != null && owner.Visible && !owner.Disposing && !owner.IsDisposed && owner != form)
+                return form.ShowDialog(owner);
+
+            form.StartPosition = FormStartPosition.CenterScreen;
+            return form.ShowDialog();
         }
     }
 }

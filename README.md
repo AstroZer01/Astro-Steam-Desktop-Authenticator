@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
-    <img src="https://img.shields.io/badge/Download_Latest_Release-Windows_10+-blue?style=for-the-badge&logo=windows" alt="Download Latest Release" />
+    <img src="https://img.shields.io/github/v/release/AstroZer01/Astro-Steam-Desktop-Authenticator?label=Download%20Latest&style=for-the-badge&logo=windows" alt="Download Latest Release" />
   </a>
 </p>
 
@@ -34,6 +34,7 @@ All credit for the original design and implementation goes to Jessecar96 and the
 ## Key Features
 
 - **Steam Guard codes and account management** — view, copy, and manage Steam Guard authenticators for multiple accounts.
+- **Phone-free authenticator setup** — add an authenticator without entering a phone number when Steam allows it. If Steam requires phone verification for the account, the app clearly guides you through the email and SMS steps instead.
 - **Trade confirmations** — review and accept or decline pending confirmations across managed accounts.
 - **Login approvals** — review Steam login requests with device and location details, then approve or deny them manually. Optional account-wide rules can automatically approve persistent sign-ins or deny requests, with IP allowlisting controls.
 - **Desktop notifications** — receive Windows notifications for pending trade confirmations and login requests, with navigation back to the relevant view.
@@ -81,17 +82,18 @@ To run the built application, install the .NET 8 Desktop Runtime if the SDK is n
 
 Keep the complete `publish\ASDA` folder together in a folder your Windows account can write to; do not install this portable package under `Program Files`. The root executable is the Launcher; it starts the real app from `publish\ASDA\bin`. The `bin` folder contains the WebView files and runtime dependencies, while the application creates `publish\ASDA\maFiles` beside the Launcher on first launch. Back up that `maFiles` folder securely.
 
-#### Reusable personal build script
+<details>
+<summary><h3>Build script</h3></summary>
 
-If you keep a personal `.bat` file outside the repository, use this version. Change the two paths to your own locations. It intentionally never deletes `%OUTPUT%`, so an existing `%OUTPUT%\maFiles\manifest.json` and its `.maFile` account secrets survive every rebuild. `dotnet clean` only removes intermediate files from the source checkout; it does not affect the release folder.
+Save this as a `.bat` file. Set `PROJECT_ROOT` to the repository root and `OUTPUT` to the directory where you want the portable application built. The script preserves existing output data while rebuilding.
 
 ```bat
 @echo off
 setlocal EnableExtensions
-title Build Astro Steam Desktop Assistant
+title Build Astro Steam Desktop Authenticator
 
-set "PROJECT_ROOT=E:\Desktop\cursor projects\SteamDesktopAuthenticator-master"
-set "OUTPUT=E:\Desktop\Astro Steam Desktop Assistant"
+set "PROJECT_ROOT="
+set "OUTPUT="
 
 cd /d "%PROJECT_ROOT%" || goto :failed
 
@@ -114,9 +116,12 @@ pause
 exit /b 1
 ```
 
-Never use `rmdir /s`, `del /s`, or a file-cleanup tool on the release root. If you need to discard a release, first copy `maFiles` somewhere secure, then remove only the files you explicitly intend to replace. Git ignores `maFiles` folders and `.maFile` exports so account secrets do not enter commits, pull requests, or releases from this repository.
+The build does not touch the manifest or `.maFile` files. When building or working on the project, make a secure backup of `manifest.json` and the `maFiles` folder so no data is lost. If you plan to commit to this repository, never include a manifest or `.maFile` file: they can expose account credentials and authenticator secrets.
 
-### Build with Visual Studio 2022
+</details>
+
+<details>
+<summary><h3>Build with Visual Studio 2022</h3></summary>
 
 1. Open `SteamDesktopAuthenticator.sln`.
 2. Select the `Release` configuration.
@@ -125,6 +130,8 @@ Never use `rmdir /s`, `del /s`, or a file-cleanup tool on the release root. If y
 5. In publish settings, enable **Produce single file** and leave trimming disabled, then select **Publish**.
 
 Visual Studio's regular **Build** command places development output under `bin`; use **Publish** when you want the portable release folder described above.
+
+</details>
 
 ### UI stylesheet for contributors
 
@@ -146,37 +153,16 @@ The hook runs only when staged UI templates, the Tailwind configuration, or the 
 
 
 <p align="center">
-  <strong>
-    ❕ Alternatively you can download the latest version without technical knowledge and run it directly<br>
-    <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
-      Click here to Download
-    </a>
-  </strong>
+  ❕ Alternatively, download and run the latest release without building from source.<br>
+  <a href="https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest">
+    <img src="https://img.shields.io/github/v/release/AstroZer01/Astro-Steam-Desktop-Authenticator?label=Download%20Latest&style=for-the-badge&logo=windows" alt="Download Latest Release" />
+  </a>
 </p>
 
 
 ## Current Focus & To-Do
 
 ### To-Do List
-
-#### Core API & Session
-- [x] Fix SSL/TLS 1.2+ handshake errors breaking connections.
-- [x] Implement QR Code Login (using mobile HMAC-SHA256 signature).
-- [x] Stabilize Steam API endpoints for trade confirmations — fetch, accept, and decline are all functional.
-- [x] API support for confirming/declining trade offers — implemented via `AcceptConfirmation` / `DenyConfirmation`.
-- [x] Improve API session refresh reliability — `IsRefreshTokenExpired` + `RefreshAccessToken` checks are in place with user-facing alerts on expiry.
-- [x] Manage Steam login approvals and denials, including optional automatic login rules and IP allowlisting.
-
-#### UI Rehaul
-- [x] Full UI rehaul — replaced original WinForms UI with a modern WebView2-based interface (dark theme, Tailwind CSS, glassmorphism).
-- [x] Animated startup loading screen with spinner and live status text.
-- [x] Dark mode title bar (inherits Windows theme via DwmSetWindowAttribute).
-- [x] Steam Guard code display with copy button and animated progress bar.
-- [x] Account list with search/filter, scroll support, and one-click switching.
-- [x] Trade Confirmations tab — list view with Accept/Decline per confirmation, per-account switcher dropdown, and refresh button.
-- [x] Settings tab — periodic check toggle, check interval, auto-confirm options, with saved feedback.
-- [x] Proxy Settings section (UI layout — Coming Soon, pending backend implementation).
-- [x] Desktop notifications for pending trade confirmations and login requests.
 
 #### In Progress / Remaining
 - [ ] API endpoint for trading automation

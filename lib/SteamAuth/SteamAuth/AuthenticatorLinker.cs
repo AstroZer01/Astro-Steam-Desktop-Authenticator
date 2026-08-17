@@ -1,406 +1,531 @@
-﻿using Newtonsoft.Json;
+using Google.Protobuf;
+using SteamAuth.Protocol;
 using System;
-using System.Collections.Specialized;
-using System.Net;
-using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SteamAuth
 {
     /// <summary>
-    /// Handles the linking process for a new mobile authenticator.
+    /// Handles the typed Steam Web API flow for linking a new mobile authenticator.
     /// </summary>
     public class AuthenticatorLinker
     {
-        /// <summary>
-        /// Session data containing an access token for a steam account generated with k_EAuthTokenPlatformType_MobileApp
-        /// </summary>
-        private SessionData Session = null;
+        private const int EResultOK = 1;
+        private const int EResultPending = 22;
+        private const int EResultAccessDenied = 15;
+        private const int EResultRateLimitExceeded = 84;
+        private const int EResultAccountLoginDeniedThrottle = 87;
+        private const int EResultActivationCodeMismatch = 89;
+        private const int MaximumFinalizationAttempts = 10;
+        private readonly SessionData session;
+        private readonly IAuthenticatorProtocolTransport transport;
+        private readonly Func<CancellationToken, Task<long>> steamTimeProvider;
+        private readonly Func<TimeSpan, Task> waitForNextAuthenticatorCodeAsync;
 
-        /// <summary>
-        /// Set to register a new phone number when linking. If a phone number is not set on the account, this must be set. If a phone number is set on the account, this must be null.
-        /// </summary>
         public string PhoneNumber = null;
         public string PhoneCountryCode = null;
         public string PhoneSMSCode = null;
 
-        /// <summary>
-        /// Randomly-generated device ID. Should only be generated once per linker.
-        /// </summary>
         public string DeviceID { get; private set; }
-
-        /// <summary>
-        /// After the initial link step, if successful, this will be the SteamGuard data for the account. PLEASE save this somewhere after generating it; it's vital data.
-        /// </summary>
         public SteamGuardAccount LinkedAccount { get; private set; }
-
-        /// <summary>
-        /// True if the authenticator has been fully finalized.
-        /// </summary>
         public bool Finalized = false;
-
-        /// <summary>
-        /// Email address the confirmation email was sent to when adding a phone number
-        /// </summary>
         public string ConfirmationEmailAddress;
+        public string LastErrorMessage { get; private set; }
+        public event Action<string> FinalizationProgress;
 
-        /// <summary>
-        /// Current step of AddPhoneNumber()
-        /// </summary>
+        public ConfirmationCodeType FinalizationConfirmationType
+        {
+            get
+            {
+                if (LinkedAccount == null)
+                    return ConfirmationCodeType.Unknown;
+
+                return LinkedAccount.ConfirmType == 1
+                    ? ConfirmationCodeType.SMS
+                    : LinkedAccount.ConfirmType == 3
+                        ? ConfirmationCodeType.Email
+                        : ConfirmationCodeType.Unknown;
+            }
+        }
+
         private PhoneLinkStep phoneLinkStep;
 
-        /// <summary>
-        /// Create a new instance of AuthenticatorLinker
-        /// </summary>
-        /// <param name="accessToken">Access token for a Steam account created with k_EAuthTokenPlatformType_MobileApp</param>
-        /// <param name="steamid">64 bit formatted steamid for the account</param>
         public AuthenticatorLinker(SessionData sessionData)
+            : this(sessionData, new SteamProtobufAuthenticatorTransport(), cancellationToken => TimeAligner.GetSteamTimeAsync(cancellationToken), delay => Task.Delay(delay))
         {
-            this.Session = sessionData;
-            this.DeviceID = GenerateDeviceID();
         }
 
-        public async Task<PhoneLinkResult> AddPhoneNumber()
+        public AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport)
+            : this(sessionData, transport, cancellationToken => TimeAligner.GetSteamTimeAsync(cancellationToken), delay => Task.Delay(delay))
         {
-            if (this.phoneLinkStep == PhoneLinkStep.None)
+        }
+
+        public AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<long> steamTimeProvider)
+            : this(sessionData, transport, WrapSteamTimeProvider(steamTimeProvider), delay => Task.Delay(delay))
+        {
+        }
+
+        public AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<long> steamTimeProvider, Func<TimeSpan, Task> waitForNextAuthenticatorCodeAsync)
+            : this(sessionData, transport, WrapSteamTimeProvider(steamTimeProvider), waitForNextAuthenticatorCodeAsync)
+        {
+        }
+
+        public AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<Task<long>> steamTimeProvider)
+            : this(sessionData, transport, WrapSteamTimeProvider(steamTimeProvider), delay => Task.Delay(delay))
+        {
+        }
+
+        private AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<CancellationToken, Task<long>> steamTimeProvider, Func<TimeSpan, Task> waitForNextAuthenticatorCodeAsync)
+        {
+            session = sessionData ?? throw new ArgumentNullException(nameof(sessionData));
+            this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
+            this.steamTimeProvider = steamTimeProvider ?? throw new ArgumentNullException(nameof(steamTimeProvider));
+            this.waitForNextAuthenticatorCodeAsync = waitForNextAuthenticatorCodeAsync ?? throw new ArgumentNullException(nameof(waitForNextAuthenticatorCodeAsync));
+            DeviceID = GenerateDeviceID();
+        }
+
+        public async Task<PhoneLinkResult> AddPhoneNumber(CancellationToken cancellationToken = default)
+        {
+            LastErrorMessage = null;
+            switch (phoneLinkStep)
             {
-                // Check if the account has a phone number on it
-                var accountPhoneStatus = await _getAccountPhoneStatus();
+                case PhoneLinkStep.None:
+                    SteamProtocolResponse<CPhone_AccountPhoneStatus_Response> phoneStatus = await SendAsync(
+                        "IPhoneService", "AccountPhoneStatus", new CPhone_AccountPhoneStatus_Request(), CPhone_AccountPhoneStatus_Response.Parser, cancellationToken);
+                    if (!HasResult(phoneStatus, EResultOK))
+                        return PhoneFailure(phoneStatus, "check whether a phone number is already attached");
 
-                if (accountPhoneStatus.Response.VerifiedPhone)
-                    return PhoneLinkResult.PhoneAdded;
+                    if (phoneStatus.Body.HasPhone)
+                        return PhoneLinkResult.PhoneAdded;
 
-                if (string.IsNullOrEmpty(this.PhoneNumber))
-                    return PhoneLinkResult.MustProvidePhoneNumber;
+                    if (String.IsNullOrWhiteSpace(PhoneNumber))
+                    {
+                        phoneLinkStep = PhoneLinkStep.PhoneNumberRequired;
+                        return PhoneLinkResult.MustProvidePhoneNumber;
+                    }
 
-                // No phone verified, add one
+                    return await SubmitPhoneNumber(cancellationToken);
 
-                // Get country code
-                string countryCode = this.PhoneCountryCode;
+                case PhoneLinkStep.PhoneNumberRequired:
+                    return String.IsNullOrWhiteSpace(PhoneNumber)
+                        ? PhoneLinkResult.MustProvidePhoneNumber
+                        : await SubmitPhoneNumber(cancellationToken);
 
-                // If given country code is null, use the one from the Steam account
-                if (string.IsNullOrEmpty(countryCode))
-                    countryCode = await getUserCountry();
+                case PhoneLinkStep.ConfirmationEmailSent:
+                    SteamProtocolResponse<CPhone_IsAccountWaitingForEmailConfirmation_Response> emailStatus = await SendAsync(
+                        "IPhoneService", "IsAccountWaitingForEmailConfirmation", new CPhone_IsAccountWaitingForEmailConfirmation_Request(), CPhone_IsAccountWaitingForEmailConfirmation_Response.Parser, cancellationToken);
+                    if (!HasResult(emailStatus, EResultOK))
+                        return PhoneFailure(emailStatus, "check the email confirmation status");
+                    if (emailStatus.Body.AwaitingEmailConfirmation)
+                        return PhoneLinkResult.MustConfirmEmail;
 
-                // Set the phone number
-                var setPhoneResponse = await _setAccountPhoneNumber(this.PhoneNumber, countryCode);
+                    SteamProtocolResponse<CPhone_SendPhoneVerificationCode_Response> sendSms = await SendAsync(
+                        "IPhoneService", "SendPhoneVerificationCode", new CPhone_SendPhoneVerificationCode_Request { Language = 0 }, CPhone_SendPhoneVerificationCode_Response.Parser, cancellationToken);
+                    if (!HasResult(sendSms, EResultOK))
+                        return PhoneFailure(sendSms, "send the phone verification code");
 
-                // Make sure it's successful then respond that we must confirm via email
-                if (setPhoneResponse != null && setPhoneResponse.Response.ConfirmationEmailAddress != null)
-                {
-                    this.ConfirmationEmailAddress = setPhoneResponse.Response.ConfirmationEmailAddress;
-                    this.phoneLinkStep = PhoneLinkStep.ConfirmationEmailSent;
-                    return PhoneLinkResult.MustConfirmEmail;
-                }
-            }
-            else if (this.phoneLinkStep == PhoneLinkStep.ConfirmationEmailSent)
-            {
-                // We are at past the "_setAccountPhoneNumber" step
-
-                // Make sure the email was confirmed
-                bool isStillWaiting = await _isAccountWaitingForEmailConfirmation();
-                if (isStillWaiting)
-                    return PhoneLinkResult.MustConfirmEmail;
-
-                // Now send the SMS to the phone number
-                await _sendPhoneVerificationCode();
-
-                // This takes time so wait a bit
-                await Task.Delay(2000);
-
-                this.phoneLinkStep = PhoneLinkStep.SMSCodeSent;
-                return PhoneLinkResult.MustConfirmSMS;
-            }
-            else if (this.phoneLinkStep == PhoneLinkStep.SMSCodeSent)
-            {
-                // Make sure PhoneSMSCode is provided
-                if (this.PhoneSMSCode == null)
+                    phoneLinkStep = PhoneLinkStep.SMSCodeSent;
                     return PhoneLinkResult.MustConfirmSMS;
 
-                var verifyResponse = await _verifyPhoneWithCode(this.PhoneSMSCode);
+                case PhoneLinkStep.SMSCodeSent:
+                    if (String.IsNullOrWhiteSpace(PhoneSMSCode))
+                        return PhoneLinkResult.MustConfirmSMS;
 
-                // TODO: What happens when it fails?
+                    SteamProtocolResponse<CPhone_VerifyAccountPhoneWithCode_Response> verifySms = await SendAsync(
+                        "IPhoneService", "VerifyAccountPhoneWithCode", new CPhone_VerifyAccountPhoneWithCode_Request { Code = PhoneSMSCode }, CPhone_VerifyAccountPhoneWithCode_Response.Parser, cancellationToken);
+                    if (HasResult(verifySms, EResultOK))
+                    {
+                        PhoneSMSCode = null;
+                        phoneLinkStep = PhoneLinkStep.Verified;
+                        return PhoneLinkResult.PhoneAdded;
+                    }
+                    if (HasResultCode(verifySms, EResultActivationCodeMismatch))
+                    {
+                        PhoneSMSCode = null;
+                        return PhoneLinkResult.InvalidSMSCode;
+                    }
 
-                return PhoneLinkResult.PhoneAdded;
+                    return PhoneFailure(verifySms, "verify the phone code");
+
+                case PhoneLinkStep.Verified:
+                    return PhoneLinkResult.PhoneAdded;
+
+                default:
+                    LastErrorMessage = "Steam returned an unsupported phone enrollment state.";
+                    return PhoneLinkResult.FailureAddingPhone;
             }
-
-            // If something else fails, we end up here
-            return PhoneLinkResult.FailureAddingPhone;
         }
 
-        /// <summary>
-        /// First step in adding a mobile authenticator to an account
-        /// </summary>
-        public async Task<LinkResult> AddAuthenticator()
+        public async Task<LinkResult> AddAuthenticator(CancellationToken cancellationToken = default)
         {
+            LastErrorMessage = null;
+            SteamProtocolResponse<CTwoFactor_AddAuthenticator_Response> response = await SendAsync(
+                "ITwoFactorService",
+                "AddAuthenticator",
+                new CTwoFactor_AddAuthenticator_Request
+                {
+                    Steamid = session.SteamID,
+                    AuthenticatorType = 1,
+                    DeviceIdentifier = DeviceID,
+                    SmsPhoneId = "1",
+                    Version = 2
+                },
+                CTwoFactor_AddAuthenticator_Response.Parser,
+                cancellationToken);
 
-            // Make request to ITwoFactorService/AddAuthenticator
-            NameValueCollection addAuthenticatorBody = new NameValueCollection();
-            addAuthenticatorBody.Add("steamid", this.Session.SteamID.ToString());
-            addAuthenticatorBody.Add("authenticator_type", "1");
-            addAuthenticatorBody.Add("device_identifier", this.DeviceID);
-            addAuthenticatorBody.Add("sms_phone_id", "1");
-            addAuthenticatorBody.Add("version", "2");
-            string addAuthenticatorResponseStr = await SteamWeb.POSTRequest("https://api.steampowered.com/ITwoFactorService/AddAuthenticator/v1/?access_token=" + this.Session.AccessToken, null, addAuthenticatorBody);
-
-            // Parse response json to object
-            var addAuthenticatorResponse = JsonConvert.DeserializeObject<AddAuthenticatorResponse>(addAuthenticatorResponseStr);
-
-            if (addAuthenticatorResponse == null || addAuthenticatorResponse.Response == null)
+            if (IsRateLimited(response))
+            {
+                LastErrorMessage = "Steam is rate limiting authenticator setup attempts. Wait a while before trying again.";
+                return LinkResult.RateLimited;
+            }
+            if (!HasResult(response, EResultOK))
+            {
+                LastErrorMessage = DescribeFailure(response, "start authenticator enrollment");
                 return LinkResult.GeneralFailure;
+            }
 
-            // Status 2 means no phone number is on the account
-            if (addAuthenticatorResponse.Response.Status == 2)
+            if (response.Body.Status == 2)
                 return LinkResult.MustProvidePhoneNumber;
-
-            if (addAuthenticatorResponse.Response.Status == 29)
+            if (response.Body.Status == 29)
                 return LinkResult.AuthenticatorPresent;
-
-            if (addAuthenticatorResponse.Response.Status != 1)
+            if (response.Body.Status != 1)
+            {
+                LastErrorMessage = "Steam could not start authenticator enrollment (status " + response.Body.Status + "). Please try again later.";
                 return LinkResult.GeneralFailure;
+            }
+            if (response.Body.SharedSecret == null || response.Body.SharedSecret.Length == 0 ||
+                String.IsNullOrWhiteSpace(response.Body.RevocationCode))
+            {
+                LastErrorMessage = "Steam returned incomplete authenticator data. Please try adding the authenticator again.";
+                return LinkResult.GeneralFailure;
+            }
 
-            // Setup this.LinkedAccount
-            this.LinkedAccount = addAuthenticatorResponse.Response;
-            this.LinkedAccount.DeviceID = this.DeviceID;
-            this.LinkedAccount.Session = this.Session;
-
+            LinkedAccount = new SteamGuardAccount
+            {
+                SharedSecret = Convert.ToBase64String(response.Body.SharedSecret.ToByteArray()),
+                SerialNumber = response.Body.SerialNumber.ToString(),
+                RevocationCode = response.Body.RevocationCode,
+                URI = response.Body.Uri,
+                ServerTime = (long)response.Body.ServerTime,
+                AccountName = response.Body.AccountName,
+                TokenGID = response.Body.TokenGid,
+                IdentitySecret = Convert.ToBase64String(response.Body.IdentitySecret.ToByteArray()),
+                Secret1 = Convert.ToBase64String(response.Body.Secret1.ToByteArray()),
+                Status = response.Body.Status,
+                PhoneNumberHint = response.Body.PhoneNumberHint,
+                ConfirmType = response.Body.ConfirmType,
+                DeviceID = DeviceID,
+                Session = session
+            };
             return LinkResult.AwaitingFinalization;
         }
 
-        public async Task<FinalizeResult> FinalizeAddAuthenticator(string smsCode)
+        public async Task<FinalizeResult> FinalizeAddAuthenticator(string confirmationCode, CancellationToken cancellationToken = default)
         {
-            int tries = 0;
-            while (tries <= 10)
+            LastErrorMessage = null;
+            if (LinkedAccount == null)
             {
-                NameValueCollection finalizeAuthenticatorValues = new NameValueCollection();
-                finalizeAuthenticatorValues.Add("steamid", this.Session.SteamID.ToString());
-                finalizeAuthenticatorValues.Add("authenticator_code", LinkedAccount.GenerateSteamGuardCode());
-                finalizeAuthenticatorValues.Add("authenticator_time", TimeAligner.GetSteamTime().ToString());
-                finalizeAuthenticatorValues.Add("activation_code", smsCode);
-                finalizeAuthenticatorValues.Add("validate_sms_code", "1");
-
-                string finalizeAuthenticatorResultStr;
-                using (WebClient wc = new WebClient())
-                {
-                    wc.Encoding = Encoding.UTF8;
-                    wc.Headers[HttpRequestHeader.UserAgent] = SteamWeb.MOBILE_APP_USER_AGENT;
-                    byte[] finalizeAuthenticatorResult = await wc.UploadValuesTaskAsync(new Uri("https://api.steampowered.com/ITwoFactorService/FinalizeAddAuthenticator/v1/?access_token=" + this.Session.AccessToken), "POST", finalizeAuthenticatorValues);
-                    finalizeAuthenticatorResultStr = Encoding.UTF8.GetString(finalizeAuthenticatorResult);
-                }
-
-                FinalizeAuthenticatorResponse finalizeAuthenticatorResponse = JsonConvert.DeserializeObject<FinalizeAuthenticatorResponse>(finalizeAuthenticatorResultStr);
-
-                if (finalizeAuthenticatorResponse == null || finalizeAuthenticatorResponse.Response == null)
-                {
-                    return FinalizeResult.GeneralFailure;
-                }
-
-                if (finalizeAuthenticatorResponse.Response.Status == 89)
-                {
-                    return FinalizeResult.BadSMSCode;
-                }
-
-                if (finalizeAuthenticatorResponse.Response.Status == 88)
-                {
-                    if (tries >= 10)
-                    {
-                        return FinalizeResult.UnableToGenerateCorrectCodes;
-                    }
-                }
-
-                if (!finalizeAuthenticatorResponse.Response.Success)
-                {
-                    return FinalizeResult.GeneralFailure;
-                }
-
-                if (finalizeAuthenticatorResponse.Response.WantMore)
-                {
-                    tries++;
-                    continue;
-                }
-
-                this.LinkedAccount.FullyEnrolled = true;
-                return FinalizeResult.Success;
+                LastErrorMessage = "Authenticator enrollment has not been started.";
+                return FinalizeResult.GeneralFailure;
             }
 
-            return FinalizeResult.GeneralFailure;
+            long authenticatorTime = await steamTimeProvider(cancellationToken);
+            for (int tries = 0; tries < MaximumFinalizationAttempts; tries++)
+            {
+                SteamProtocolResponse<CTwoFactor_FinalizeAddAuthenticator_Response> response = await SendAsync(
+                    "ITwoFactorService",
+                    "FinalizeAddAuthenticator",
+                    new CTwoFactor_FinalizeAddAuthenticator_Request
+                    {
+                        Steamid = session.SteamID,
+                        AuthenticatorCode = LinkedAccount.GenerateSteamGuardCodeForTime(authenticatorTime),
+                        AuthenticatorTime = (ulong)authenticatorTime,
+                        ActivationCode = confirmationCode,
+                        ValidateSmsCode = true
+                    },
+                        CTwoFactor_FinalizeAddAuthenticator_Response.Parser,
+                        cancellationToken);
+
+                if (response == null)
+                {
+                    LastErrorMessage = "Steam did not return a finalization response. Please try again.";
+                    return FinalizeResult.GeneralFailure;
+                }
+                if (HasResultCode(response, EResultActivationCodeMismatch))
+                {
+                    LastErrorMessage = "Steam did not accept that confirmation code. Enter the current code sent to your email or phone and try again.";
+                    return FinalizeResult.BadConfirmationCode;
+                }
+                if (IsRateLimited(response))
+                {
+                    LastErrorMessage = "Steam is rate limiting authenticator finalization. Wait a while before trying again.";
+                    return FinalizeResult.RateLimited;
+                }
+                if (!HasResult(response, EResultOK))
+                {
+                    LastErrorMessage = DescribeFailure(response, "finalize the authenticator");
+                    return FinalizeResult.GeneralFailure;
+                }
+                if (response.Body.WantMore)
+                {
+                    if (response.Body.ServerTime == 0 || response.Body.ServerTime > (ulong)Int64.MaxValue)
+                    {
+                        LastErrorMessage = "Steam requested another authenticator code but did not provide its current time. Please try again.";
+                        return FinalizeResult.GeneralFailure;
+                    }
+
+                    long serverTime = (long)response.Body.ServerTime;
+                    long nextAuthenticatorWindow = ((serverTime / 30) + 1) * 30;
+                    TimeSpan retryDelay = TimeSpan.FromSeconds(Math.Max(2, nextAuthenticatorWindow - serverTime));
+                    ReportFinalizationProgress("Steam is verifying the authenticator. Retrying in " + Math.Ceiling(retryDelay.TotalSeconds) + " seconds. You can close this window to cancel safely.");
+                    await WaitForNextAuthenticatorCodeAsync(retryDelay, cancellationToken);
+                    authenticatorTime = nextAuthenticatorWindow;
+                    continue;
+                }
+                if (!response.Body.Success)
+                {
+                    LastErrorMessage = "Steam did not finalize the authenticator (status " + response.Body.Status + ").";
+                    return FinalizeResult.GeneralFailure;
+                }
+
+                FinalizeResult statusResult;
+                try
+                {
+                    statusResult = await VerifyFinalizedAuthenticatorAsync(cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    SteamAuthDiagnostics.Log(ex, "Steam finalized the authenticator but its status could not be verified.");
+                    statusResult = FinalizeResult.GeneralFailure;
+                }
+
+                if (statusResult == FinalizeResult.GeneralFailure || statusResult == FinalizeResult.RateLimited)
+                {
+                    LinkedAccount.FullyEnrolled = true;
+                    Finalized = true;
+                    LastErrorMessage = "Steam accepted authenticator finalization, but its activation status could not be verified. The authenticator will be saved locally.";
+                    return FinalizeResult.FinalizedStatusUnverified;
+                }
+
+                return statusResult;
+            }
+
+            LastErrorMessage = "Steam could not verify enough authenticator codes to finalize setup. Please try again later.";
+            return FinalizeResult.UnableToGenerateCorrectCodes;
         }
 
-        private async Task<string> getUserCountry()
+        private async Task<FinalizeResult> VerifyFinalizedAuthenticatorAsync(CancellationToken cancellationToken)
         {
-            NameValueCollection getCountryBody = new NameValueCollection();
-            getCountryBody.Add("steamid", this.Session.SteamID.ToString());
-            string getCountryResponseStr = await SteamWeb.POSTRequest("https://api.steampowered.com/IUserAccountService/GetUserCountry/v1?access_token=" + this.Session.AccessToken, null, getCountryBody);
+            SteamProtocolResponse<CTwoFactor_Status_Response> response = await SendAsync(
+                "ITwoFactorService", "QueryStatus", new CTwoFactor_Status_Request { Steamid = session.SteamID }, CTwoFactor_Status_Response.Parser, cancellationToken);
+            if (IsRateLimited(response))
+            {
+                LastErrorMessage = "Steam is rate limiting the authenticator status check. Wait a while before trying again.";
+                return FinalizeResult.RateLimited;
+            }
+            if (!HasResult(response, EResultOK))
+            {
+                LastErrorMessage = DescribeFailure(response, "verify authenticator activation");
+                return FinalizeResult.GeneralFailure;
+            }
+            if (response.Body.State == 0)
+            {
+                LastErrorMessage = "Steam has not confirmed that the authenticator is active yet. Enter a newer confirmation code to try again.";
+                return FinalizeResult.NotFinalized;
+            }
 
-            // Parse response json to object
-            GetUserCountryResponse response = JsonConvert.DeserializeObject<GetUserCountryResponse>(getCountryResponseStr);
-            return response.Response.Country;
+            LinkedAccount.FullyEnrolled = true;
+            Finalized = true;
+            return FinalizeResult.Success;
         }
 
-        private async Task<AccountPhoneStatusResponse> _getAccountPhoneStatus()
+        private async Task<PhoneLinkResult> SubmitPhoneNumber(CancellationToken cancellationToken)
         {
-            string getCountryResponseStr = await SteamWeb.POSTRequest("https://api.steampowered.com/IPhoneService/AccountPhoneStatus/v1?access_token=" + this.Session.AccessToken, null, null);
-            return JsonConvert.DeserializeObject<AccountPhoneStatusResponse>(getCountryResponseStr);
+            if (String.IsNullOrWhiteSpace(PhoneCountryCode))
+            {
+                LastErrorMessage = "Choose a country or enter its two-letter country code before submitting the phone number.";
+                return PhoneLinkResult.FailureAddingPhone;
+            }
+
+            SteamProtocolResponse<CPhone_SetAccountPhoneNumber_Response> response = await SendAsync(
+                "IPhoneService",
+                "SetAccountPhoneNumber",
+                new CPhone_SetAccountPhoneNumber_Request { PhoneNumber = PhoneNumber, PhoneCountryCode = PhoneCountryCode },
+                CPhone_SetAccountPhoneNumber_Response.Parser,
+                cancellationToken);
+            if (!HasResult(response, EResultPending) || String.IsNullOrWhiteSpace(response.Body.ConfirmationEmailAddress))
+                return PhoneFailure(response, "submit the phone number");
+
+            ConfirmationEmailAddress = response.Body.ConfirmationEmailAddress;
+            phoneLinkStep = PhoneLinkStep.ConfirmationEmailSent;
+            return PhoneLinkResult.MustConfirmEmail;
         }
 
-        private async Task<SetAccountPhoneNumberResponse> _setAccountPhoneNumber(string phoneNumber, string countryCode)
+        private async Task<SteamProtocolResponse<TResponse>> SendAsync<TRequest, TResponse>(
+            string service,
+            string method,
+            TRequest request,
+            MessageParser<TResponse> responseParser,
+            CancellationToken cancellationToken)
+            where TRequest : class, IMessage<TRequest>
+            where TResponse : class, IMessage<TResponse>
         {
-            NameValueCollection setPhoneBody = new NameValueCollection();
-            setPhoneBody.Add("phone_number", phoneNumber);
-            setPhoneBody.Add("phone_country_code", countryCode);
-            string setPhoneResponseStr = await SteamWeb.POSTRequest("https://api.steampowered.com/IPhoneService/SetAccountPhoneNumber/v1?access_token=" + this.Session.AccessToken, null, setPhoneBody);
-            return JsonConvert.DeserializeObject<SetAccountPhoneNumberResponse>(setPhoneResponseStr);
+            return await transport.SendAsync(service, method, request, session.AccessToken, responseParser, cancellationToken: cancellationToken);
         }
 
-        private async Task<VerifyPhoneResponse> _verifyPhoneWithCode(string code)
+        private async Task WaitForNextAuthenticatorCodeAsync(TimeSpan delay, CancellationToken cancellationToken)
         {
-            NameValueCollection verifyPhoneBody = new NameValueCollection();
-            verifyPhoneBody.Add("code", code);
-            string verifyPhoneResponseStr = await SteamWeb.POSTRequest("https://api.steampowered.com/IPhoneService/VerifyAccountPhoneWithCode/v1/?access_token=" + this.Session.AccessToken, null, verifyPhoneBody);
-            return JsonConvert.DeserializeObject<VerifyPhoneResponse>(verifyPhoneResponseStr);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!cancellationToken.CanBeCanceled)
+            {
+                await waitForNextAuthenticatorCodeAsync(delay);
+                return;
+            }
+
+            using (CancellationTokenSource waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                Task delayTask = waitForNextAuthenticatorCodeAsync(delay);
+                Task cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, waitCancellation.Token);
+                try
+                {
+                    if (await Task.WhenAny(delayTask, cancellationTask) == cancellationTask)
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                    await delayTask;
+                }
+                finally
+                {
+                    waitCancellation.Cancel();
+                }
+            }
         }
 
-        private async Task<bool> _isAccountWaitingForEmailConfirmation()
+        private PhoneLinkResult PhoneFailure<TResponse>(SteamProtocolResponse<TResponse> response, string action)
+            where TResponse : class, IMessage<TResponse>
         {
-            string waitingForEmailResponse = await SteamWeb.POSTRequest("https://api.steampowered.com/IPhoneService/IsAccountWaitingForEmailConfirmation/v1?access_token=" + this.Session.AccessToken, null, null);
-
-            // Parse response json to object
-            var response = JsonConvert.DeserializeObject<IsAccountWaitingForEmailConfirmationResponse>(waitingForEmailResponse);
-            return response.Response.AwaitingEmailConfirmation;
+            LastErrorMessage = DescribeFailure(response, action);
+            return PhoneLinkResult.FailureAddingPhone;
         }
 
-        private async Task<bool> _sendPhoneVerificationCode()
+        private static bool HasResult<TResponse>(SteamProtocolResponse<TResponse> response, int expectedResult)
+            where TResponse : class, IMessage<TResponse>
         {
-            await SteamWeb.POSTRequest("https://api.steampowered.com/IPhoneService/SendPhoneVerificationCode/v1?access_token=" + this.Session.AccessToken, null, null);
-            return true;
+            return HasResultCode(response, expectedResult) && response.Body != null;
+        }
+
+        private static bool HasResultCode<TResponse>(SteamProtocolResponse<TResponse> response, int expectedResult)
+            where TResponse : class, IMessage<TResponse>
+        {
+            return response != null && response.Result == expectedResult;
+        }
+
+        private static Func<CancellationToken, Task<long>> WrapSteamTimeProvider(Func<long> steamTimeProvider)
+        {
+            if (steamTimeProvider == null)
+                throw new ArgumentNullException(nameof(steamTimeProvider));
+
+            return _ => Task.FromResult(steamTimeProvider());
+        }
+
+        private static Func<CancellationToken, Task<long>> WrapSteamTimeProvider(Func<Task<long>> steamTimeProvider)
+        {
+            if (steamTimeProvider == null)
+                throw new ArgumentNullException(nameof(steamTimeProvider));
+
+            return _ => steamTimeProvider();
+        }
+
+        private void ReportFinalizationProgress(string message)
+        {
+            try
+            {
+                FinalizationProgress?.Invoke(message);
+            }
+            catch (Exception ex)
+            {
+                SteamAuthDiagnostics.Log(ex, "The authenticator finalization progress callback failed.");
+            }
+        }
+
+        private static bool IsRateLimited(int result)
+        {
+            return result == EResultRateLimitExceeded || result == EResultAccountLoginDeniedThrottle;
+        }
+
+        private static bool IsRateLimited<TResponse>(SteamProtocolResponse<TResponse> response)
+            where TResponse : class, IMessage<TResponse>
+        {
+            return response != null && IsRateLimited(response.Result);
+        }
+
+        private static string DescribeFailure<TResponse>(SteamProtocolResponse<TResponse> response, string action)
+            where TResponse : class, IMessage<TResponse>
+        {
+            if (response == null)
+                return "Steam did not return a response while trying to " + action + ".";
+            if (IsRateLimited(response.Result))
+                return "Steam is rate limiting requests while trying to " + action + ". Wait a while before trying again.";
+            if (response.Result == EResultAccessDenied)
+                return "Steam denied the request to " + action + ". Check the account status and try again later.";
+            if (!String.IsNullOrWhiteSpace(response.ErrorMessage))
+                return "Steam could not " + action + ": " + response.ErrorMessage;
+            return "Steam could not " + action + " (result " + response.Result + "). Please try again later.";
         }
 
         public enum LinkResult
         {
-            MustProvidePhoneNumber, //No phone number on the account
-            MustRemovePhoneNumber, //A phone number is already on the account
-            MustConfirmEmail, //User need to click link from confirmation email
-            AwaitingFinalization, //Must provide an SMS code
-            GeneralFailure, //General failure (really now!)
+            MustProvidePhoneNumber,
+            MustRemovePhoneNumber,
+            MustConfirmEmail,
+            AwaitingFinalization,
+            GeneralFailure,
+            RateLimited,
             AuthenticatorPresent,
             FailureAddingPhone
         }
 
         public enum PhoneLinkResult
         {
-            MustProvidePhoneNumber, //No phone number on the account
-            MustConfirmEmail, //User need to click link from confirmation email
+            MustProvidePhoneNumber,
+            MustConfirmEmail,
             FailureAddingPhone,
             PhoneAdded,
-            MustConfirmSMS
+            MustConfirmSMS,
+            InvalidSMSCode
+        }
+
+        public enum FinalizeResult
+        {
+            BadConfirmationCode,
+            [Obsolete("Use BadConfirmationCode. Finalization accepts either an email or SMS confirmation code.")]
+            BadSMSCode = BadConfirmationCode,
+            UnableToGenerateCorrectCodes,
+            Success,
+            GeneralFailure,
+            RateLimited,
+            NotFinalized,
+            FinalizedStatusUnverified
+        }
+
+        public enum ConfirmationCodeType
+        {
+            Unknown,
+            SMS,
+            Email
         }
 
         private enum PhoneLinkStep
         {
             None,
+            PhoneNumberRequired,
             ConfirmationEmailSent,
-            SMSCodeSent
-        }
-
-        public enum FinalizeResult
-        {
-            BadSMSCode,
-            UnableToGenerateCorrectCodes,
-            Success,
-            GeneralFailure
-        }
-
-        private class GetUserCountryResponse
-        {
-            [JsonProperty("response")]
-            public GetUserCountryResponseResponse Response { get; set; }
-        }
-
-        private class GetUserCountryResponseResponse
-        {
-            [JsonProperty("country")]
-            public string Country { get; set; }
-        }
-
-        private class AccountPhoneStatusResponse
-        {
-            [JsonProperty("response")]
-            public AccountPhoneStatusResponseResponse Response { get; set; }
-        }
-
-        private class AccountPhoneStatusResponseResponse
-        {
-            [JsonProperty("verified_phone")]
-            public bool VerifiedPhone { get; set; }
-        }
-
-
-        private class VerifyPhoneResponse
-        {
-            [JsonProperty("response")]
-            public VerifyPhoneResponseResponse Response { get; set; }
-        }
-
-        private class VerifyPhoneResponseResponse
-        {
-
-        }
-
-        private class SetAccountPhoneNumberResponse
-        {
-            [JsonProperty("response")]
-            public SetAccountPhoneNumberResponseResponse Response { get; set; }
-        }
-
-        private class SetAccountPhoneNumberResponseResponse
-        {
-            [JsonProperty("confirmation_email_address")]
-            public string ConfirmationEmailAddress { get; set; }
-
-            [JsonProperty("phone_number_formatted")]
-            public string PhoneNumberFormatted { get; set; }
-        }
-
-        private class IsAccountWaitingForEmailConfirmationResponse
-        {
-            [JsonProperty("response")]
-            public IsAccountWaitingForEmailConfirmationResponseResponse Response { get; set; }
-        }
-
-        private class IsAccountWaitingForEmailConfirmationResponseResponse
-        {
-            [JsonProperty("awaiting_email_confirmation")]
-            public bool AwaitingEmailConfirmation { get; set; }
-
-            [JsonProperty("seconds_to_wait")]
-            public int SecondsToWait { get; set; }
-        }
-
-        private class AddAuthenticatorResponse
-        {
-            [JsonProperty("response")]
-            public SteamGuardAccount Response { get; set; }
-        }
-
-        private class FinalizeAuthenticatorResponse
-        {
-            [JsonProperty("response")]
-            public FinalizeAuthenticatorInternalResponse Response { get; set; }
-
-            internal class FinalizeAuthenticatorInternalResponse
-            {
-                [JsonProperty("success")]
-                public bool Success { get; set; }
-
-                [JsonProperty("want_more")]
-                public bool WantMore { get; set; }
-
-                [JsonProperty("server_time")]
-                public long ServerTime { get; set; }
-
-                [JsonProperty("status")]
-                public int Status { get; set; }
-            }
+            SMSCodeSent,
+            Verified
         }
 
         public static string GenerateDeviceID()

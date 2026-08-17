@@ -1,6 +1,6 @@
 using Newtonsoft.Json;
+using SteamAuth.Protocol;
 using System;
-using System.Collections.Specialized;
 using System.Linq;
 using System.Net;
 using System.Runtime.CompilerServices;
@@ -10,6 +10,18 @@ namespace SteamAuth
 {
     public class SessionData
     {
+        private readonly IAuthenticatorProtocolTransport protocolTransport;
+
+        public SessionData()
+            : this(new SteamProtobufAuthenticatorTransport())
+        {
+        }
+
+        public SessionData(IAuthenticatorProtocolTransport protocolTransport)
+        {
+            this.protocolTransport = protocolTransport ?? throw new ArgumentNullException(nameof(protocolTransport));
+        }
+
         public ulong SteamID { get; set; }
 
         public string AccessToken { get; set; }
@@ -32,25 +44,38 @@ namespace SteamAuth
             if (IsTokenExpired(this.RefreshToken))
                 throw new Exception("Refresh token is expired");
 
-            string responseStr;
             try
             {
-                var postData = new NameValueCollection();
-                postData.Add("refresh_token", this.RefreshToken);
-                postData.Add("steamid", this.SteamID.ToString());
-                postData.Add("renewal_type", allowRenewal ? "1" : "0");
-                responseStr = await SteamWeb.POSTRequest("https://api.steampowered.com/IAuthenticationService/GenerateAccessTokenForApp/v1/", null, postData);
+                SteamProtocolResponse<CAuthentication_AccessToken_GenerateForApp_Response> response = await protocolTransport.SendAsync(
+                    "IAuthenticationService",
+                    "GenerateAccessTokenForApp",
+                    new CAuthentication_AccessToken_GenerateForApp_Request
+                    {
+                        RefreshToken = RefreshToken,
+                        Steamid = SteamID,
+                        RenewalType = allowRenewal ? ETokenRenewalType.KEtokenRenewalTypeAllow : ETokenRenewalType.KEtokenRenewalTypeNone
+                    },
+                    AccessToken,
+                    CAuthentication_AccessToken_GenerateForApp_Response.Parser);
+                if (response == null || response.Result != 1 || response.Body == null || String.IsNullOrWhiteSpace(response.Body.AccessToken))
+                {
+                    string detail = response != null && (response.Result == 84 || response.Result == 87)
+                        ? "Steam is rate limiting access-token refresh requests. Wait a while before trying again."
+                        : response != null && !String.IsNullOrWhiteSpace(response.ErrorMessage)
+                        ? response.ErrorMessage
+                        : "Steam returned result " + (response == null ? 0 : response.Result) + ".";
+                    throw new Exception(detail);
+                }
+
+                AccessToken = response.Body.AccessToken;
+                if (!String.IsNullOrEmpty(response.Body.RefreshToken))
+                    RefreshToken = response.Body.RefreshToken;
             }
             catch (Exception ex)
             {
+                SteamAuthDiagnostics.Log(ex, "Access-token refresh failed.");
                 throw new Exception("Failed to refresh token: " + ex.Message);
             }
-
-            var response = JsonConvert.DeserializeObject<GenerateAccessTokenForAppResponse>(responseStr);
-            this.AccessToken = response.Response.AccessToken;
-
-            if (!string.IsNullOrEmpty(response.Response.RefreshToken))
-                this.RefreshToken = response.Response.RefreshToken;
         }
 
         public bool IsAccessTokenExpired()
@@ -162,19 +187,5 @@ namespace SteamAuth
             public long exp { get; set; }
         }
 
-        private class GenerateAccessTokenForAppResponse
-        {
-            [JsonProperty("response")]
-            public GenerateAccessTokenForAppResponseResponse Response { get; set; }
-        }
-
-        private class GenerateAccessTokenForAppResponseResponse
-        {
-            [JsonProperty("access_token")]
-            public string AccessToken { get; set; }
-
-            [JsonProperty("refresh_token")]
-            public string RefreshToken { get; set; }
-        }
     }
 }

@@ -312,6 +312,24 @@
     </div>
 </div>
 
+<div id="remove-account-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="remove-account-title">
+    <div class="w-full max-w-md rounded-xl border border-white/10 bg-surface-container shadow-2xl p-5 space-y-4">
+        <div>
+            <h2 id="remove-account-title" class="font-semibold text-on-surface">Remove account</h2>
+            <p class="text-sm text-on-surface-variant mt-2">Choose what to do with <span id="remove-account-name" class="font-semibold text-on-surface"></span>.</p>
+        </div>
+        <button id="btn-unlink-steam-guard" class="w-full text-left rounded-lg border border-error/40 bg-error-container/20 p-3 hover:bg-error-container/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-error-container/20">
+            <span class="block font-semibold text-error">Unlink Steam Guard</span>
+            <span class="block text-sm text-on-surface-variant mt-1">Removes Steam Guard from Steam, then deletes this account's local data.</span>
+        </button>
+        <button id="btn-remove-account" class="w-full text-left rounded-lg border border-white/10 bg-surface-variant p-3 hover:bg-surface-bright transition-colors">
+            <span class="block font-semibold text-on-surface">Remove user from app</span>
+            <span class="block text-sm text-on-surface-variant mt-1">Keeps Steam Guard enabled on Steam and deletes only this account's local data.</span>
+        </button>
+        <button id="btn-cancel-remove-account" class="w-full rounded-lg border border-white/10 py-2.5 text-sm text-on-surface-variant hover:bg-surface-variant transition-colors">Cancel</button>
+    </div>
+</div>
+
 <script>
     document.addEventListener('contextmenu', event => {
         if (event.target.tagName !== 'INPUT' && event.target.tagName !== 'TEXTAREA') {
@@ -473,11 +491,12 @@
     }
 
     let allAccs = [];
-    function updateAccountList(names) {
-        allAccs = names;
+    function updateAccountList(accounts) {
+        allAccs = accounts;
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         
-        let hasAccounts = names.length > 0;
+        const names = accounts.map(account => account.name);
+        let hasAccounts = accounts.length > 0;
         let btnCopy = document.getElementById('btn-copy');
         
         let disabledStyle = "bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm transition-colors";
@@ -529,18 +548,116 @@
         const container = document.getElementById('account-list-container');
         container.innerHTML = "";
         allAccs.forEach(acc => {
-            if (filterText && !acc.toLowerCase().includes(filterText)) return;
-            const div = document.createElement('div');
-            if (acc === currentAcc) {
-                div.className = "bg-primary-container/20 text-white px-3 py-2 cursor-pointer border-l-2 border-primary font-bold overflow-hidden whitespace-nowrap text-ellipsis";
+            if (filterText && !acc.name.toLowerCase().includes(filterText)) return;
+            const row = document.createElement('div');
+            if (acc.name === currentAcc) {
+                row.className = "bg-primary-container/20 text-white px-3 py-2 border-l-2 border-primary font-bold";
             } else {
-                div.className = "text-white px-3 py-2 hover:bg-surface-variant cursor-pointer transition-colors overflow-hidden whitespace-nowrap text-ellipsis";
+                row.className = "text-white px-3 py-2 hover:bg-surface-variant transition-colors";
             }
-            div.innerText = acc;
-            div.onclick = () => { window.chrome.webview.postMessage({ action: 'switch_account', accountName: acc }); };
-            container.appendChild(div);
+            row.classList.add('flex', 'items-center', 'gap-2');
+            const accountButton = document.createElement('button');
+            accountButton.type = 'button';
+            accountButton.className = "min-w-0 flex-1 border-0 bg-transparent p-0 text-left text-inherit cursor-pointer";
+            const name = document.createElement('span');
+            name.className = "block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ellipsis";
+            name.textContent = acc.name;
+            accountButton.appendChild(name);
+            accountButton.onclick = () => { window.chrome.webview.postMessage({ action: 'switch_account', accountName: acc.name, steamId: acc.steamId }); };
+
+            const removeButton = document.createElement('button');
+            removeButton.className = "shrink-0 rounded p-1 text-on-surface-variant hover:bg-error-container/30 hover:text-error transition-colors";
+            removeButton.title = "Remove " + acc.name;
+            removeButton.setAttribute('aria-label', "Remove " + acc.name);
+            removeButton.innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
+            removeButton.onclick = event => {
+                event.stopPropagation();
+                openRemoveAccountModal(acc);
+            };
+            row.appendChild(accountButton);
+            row.appendChild(removeButton);
+            container.appendChild(row);
         });
     }
+
+    let accountPendingRemoval = null;
+    let removeAccountEscapeHandler = null;
+    let removeAccountPreviousFocus = null;
+    function openRemoveAccountModal(account) {
+        removeAccountPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        accountPendingRemoval = account;
+        document.getElementById('remove-account-name').textContent = account.name;
+        const unlinkButton = document.getElementById('btn-unlink-steam-guard');
+        const canUnlinkSteamGuard = Boolean(account.steamId);
+        unlinkButton.disabled = !canUnlinkSteamGuard;
+        unlinkButton.title = canUnlinkSteamGuard ? '' : 'This local account has no saved Steam session to unlink Steam Guard.';
+        const modal = document.getElementById('remove-account-modal');
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+        if (removeAccountEscapeHandler)
+            document.removeEventListener('keydown', removeAccountEscapeHandler);
+        removeAccountEscapeHandler = event => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                closeRemoveAccountModal();
+                return;
+            }
+
+            if (event.key !== 'Tab') return;
+            const buttons = Array.from(modal.querySelectorAll('button:not([disabled])'));
+            if (buttons.length === 0) return;
+
+            const focusedIndex = buttons.indexOf(document.activeElement);
+            if (focusedIndex === -1) {
+                event.preventDefault();
+                buttons[event.shiftKey ? buttons.length - 1 : 0].focus();
+                return;
+            }
+
+            const nextIndex = event.shiftKey ? focusedIndex - 1 : focusedIndex + 1;
+            if (nextIndex < 0 || nextIndex >= buttons.length) {
+                event.preventDefault();
+                buttons[event.shiftKey ? buttons.length - 1 : 0].focus();
+            }
+        };
+        document.addEventListener('keydown', removeAccountEscapeHandler);
+        document.getElementById('btn-cancel-remove-account').focus();
+    }
+
+    function closeRemoveAccountModal() {
+        if (removeAccountEscapeHandler) {
+            document.removeEventListener('keydown', removeAccountEscapeHandler);
+            removeAccountEscapeHandler = null;
+        }
+        accountPendingRemoval = null;
+        const modal = document.getElementById('remove-account-modal');
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+        const focusTarget = removeAccountPreviousFocus;
+        removeAccountPreviousFocus = null;
+        if (focusTarget && focusTarget.isConnected && !focusTarget.disabled)
+            focusTarget.focus();
+    }
+
+    function requestAccountRemoval(removalMode) {
+        if (accountPendingRemoval) {
+            showSpinner('remove-account');
+            window.chrome.webview.postMessage({
+                action: 'remove_account',
+                removalMode: removalMode,
+                steamId: accountPendingRemoval.steamId,
+                accountName: accountPendingRemoval.name
+            });
+        }
+        closeRemoveAccountModal();
+    }
+
+    document.getElementById('btn-unlink-steam-guard').addEventListener('click', () => requestAccountRemoval('unlink'));
+    document.getElementById('btn-remove-account').addEventListener('click', () => requestAccountRemoval('remove'));
+    document.getElementById('btn-cancel-remove-account').addEventListener('click', closeRemoveAccountModal);
+    document.getElementById('remove-account-modal').addEventListener('click', event => {
+        if (event.target.id === 'remove-account-modal') closeRemoveAccountModal();
+    });
 
     document.getElementById('filter-input').addEventListener('input', (e) => {
         renderAccountList(e.target.value.toLowerCase());

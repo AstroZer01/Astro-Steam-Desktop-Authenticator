@@ -22,6 +22,7 @@ namespace Steam_Desktop_Authenticator
         {
             InitializeComponent();
             AstroTheme.ApplyTheme(this);
+            StartPosition = FormStartPosition.CenterScreen;
 
             this.labelText.Text = label;
 
@@ -31,6 +32,51 @@ namespace Steam_Desktop_Authenticator
             }
             
             SetupModernUI(label, password);
+        }
+
+        public DialogResult ShowInputDialog()
+        {
+            return ShowDialogWithCurrentOwner(null);
+        }
+
+        public DialogResult ShowInputDialog(IWin32Window owner)
+        {
+            return ShowDialogWithCurrentOwner(owner);
+        }
+
+        private DialogResult ShowDialogWithCurrentOwner(IWin32Window requestedOwner)
+        {
+            IWin32Window owner = requestedOwner;
+            if (!IsValidOwner(owner))
+                owner = Form.ActiveForm;
+
+            if (IsValidOwner(owner))
+            {
+                StartPosition = FormStartPosition.CenterParent;
+                return base.ShowDialog(owner);
+            }
+            StartPosition = FormStartPosition.CenterScreen;
+            return base.ShowDialog();
+        }
+
+        private bool IsValidOwner(IWin32Window owner)
+        {
+            if (owner == null || ReferenceEquals(owner, this))
+                return false;
+
+            if (owner is Form form)
+                return form.Visible && !form.Disposing && !form.IsDisposed;
+            if (owner is Control control)
+                return control.Visible && !control.Disposing && !control.IsDisposed && control.IsHandleCreated;
+
+            try
+            {
+                return owner.Handle != IntPtr.Zero;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private WebView2 webView;

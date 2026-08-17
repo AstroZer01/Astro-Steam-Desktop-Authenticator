@@ -1,9 +1,8 @@
-using Newtonsoft.Json.Linq;
+using Google.Protobuf;
 using SteamAuth;
+using SteamAuth.Protocol;
 using System;
 using System.Collections.Generic;
-using System.Collections.Specialized;
-using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -30,6 +29,7 @@ namespace Steam_Desktop_Authenticator
 
     internal sealed class PendingLoginRequest
     {
+        internal DateTime FetchedAtUtc { get; set; }
         public string AccountName { get; set; }
         public ulong SteamId { get; set; }
         public ulong ClientId { get; set; }
@@ -67,26 +67,35 @@ namespace Steam_Desktop_Authenticator
     /// </summary>
     internal sealed class LoginApprovalService
     {
-        private const string AuthenticationServiceBase = "https://api.steampowered.com/IAuthenticationService/";
+        private static readonly TimeSpan RequestDetailsCacheLifetime = TimeSpan.FromSeconds(30);
         private readonly Func<SteamGuardAccount, bool> persistAccount;
+        private readonly IAuthenticatorProtocolTransport protocolTransport;
 
         public LoginApprovalService(Func<SteamGuardAccount, bool> persistAccount)
+            : this(persistAccount, new SteamProtobufAuthenticatorTransport())
         {
-            this.persistAccount = persistAccount ?? throw new ArgumentNullException(nameof(persistAccount));
         }
 
-        public async Task<LoginApprovalFetchResult> FetchPendingRequestsAsync(SteamGuardAccount account)
+        internal LoginApprovalService(Func<SteamGuardAccount, bool> persistAccount, IAuthenticatorProtocolTransport protocolTransport)
+        {
+            this.persistAccount = persistAccount ?? throw new ArgumentNullException(nameof(persistAccount));
+            this.protocolTransport = protocolTransport ?? throw new ArgumentNullException(nameof(protocolTransport));
+        }
+
+        public async Task<LoginApprovalFetchResult> FetchPendingRequestsAsync(
+            SteamGuardAccount account,
+            IReadOnlyDictionary<ulong, PendingLoginRequest> knownRequests = null)
         {
             var result = new LoginApprovalFetchResult();
             try
             {
-                result.Requests.AddRange(await FetchPendingRequestsCoreAsync(account, false));
+                result.Requests.AddRange(await FetchPendingRequestsCoreAsync(account, false, knownRequests));
             }
             catch (LoginApprovalException ex) when (ex.Kind == LoginApprovalErrorKind.Unauthorized)
             {
                 try
                 {
-                    result.Requests.AddRange(await FetchPendingRequestsCoreAsync(account, true));
+                    result.Requests.AddRange(await FetchPendingRequestsCoreAsync(account, true, knownRequests));
                 }
                 catch (LoginApprovalException retryException)
                 {
@@ -116,17 +125,30 @@ namespace Steam_Desktop_Authenticator
             return result;
         }
 
-        private async Task<List<PendingLoginRequest>> FetchPendingRequestsCoreAsync(SteamGuardAccount account, bool forceRefresh)
+        private async Task<List<PendingLoginRequest>> FetchPendingRequestsCoreAsync(
+            SteamGuardAccount account,
+            bool forceRefresh,
+            IReadOnlyDictionary<ulong, PendingLoginRequest> knownRequests)
         {
             await EnsureAccessTokenAsync(account, forceRefresh);
-            var sessionsResponse = await SendGetAsync(account, "GetAuthSessionsForAccount", "{}");
+            SteamProtocolResponse<CAuthentication_GetAuthSessionsForAccount_Response> sessionsResponse = await SendAsync(
+                account,
+                "GetAuthSessionsForAccount",
+                new CAuthentication_GetAuthSessionsForAccount_Request(),
+                CAuthentication_GetAuthSessionsForAccount_Response.Parser);
             ThrowIfSteamFailed(sessionsResponse);
-            if (GetResponseObject(sessionsResponse.Body) == null)
+            if (sessionsResponse.Body == null)
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned an invalid pending login request response.");
 
             var requests = new List<PendingLoginRequest>();
-            foreach (ulong clientId in ParseClientIds(sessionsResponse.Body))
+            foreach (ulong clientId in sessionsResponse.Body.ClientIds)
             {
+                if (knownRequests != null && knownRequests.TryGetValue(clientId, out PendingLoginRequest existingRequest) &&
+                    DateTime.UtcNow - existingRequest.FetchedAtUtc < RequestDetailsCacheLifetime)
+                {
+                    requests.Add(existingRequest);
+                    continue;
+                }
                 try
                 {
                     var request = await FetchRequestDetailsAsync(account, clientId);
@@ -185,31 +207,35 @@ namespace Steam_Desktop_Authenticator
 
         private async Task<PendingLoginRequest> FetchRequestDetailsAsync(SteamGuardAccount account, ulong clientId)
         {
-            var body = new JObject { ["client_id"] = clientId.ToString() }.ToString(Newtonsoft.Json.Formatting.None);
-            var response = await SendPostAsync(account, "GetAuthSessionInfo", body);
+            SteamProtocolResponse<CAuthentication_GetAuthSessionInfo_Response> response = await SendAsync(
+                account,
+                "GetAuthSessionInfo",
+                new CAuthentication_GetAuthSessionInfo_Request { ClientId = clientId },
+                CAuthentication_GetAuthSessionInfo_Response.Parser);
             ThrowIfSteamFailed(response);
 
-            JObject details = GetResponseObject(response.Body);
+            CAuthentication_GetAuthSessionInfo_Response details = response.Body;
             if (details == null)
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned an invalid login request response.");
 
             return new PendingLoginRequest()
             {
+                FetchedAtUtc = DateTime.UtcNow,
                 AccountName = account.AccountName,
                 SteamId = account.Session.SteamID,
                 ClientId = clientId,
-                Version = ReadInt(details, "version", 1),
-                IPAddress = ReadString(details, "ip"),
-                Geolocation = ReadString(details, "geoloc"),
-                City = ReadString(details, "city"),
-                State = ReadString(details, "state"),
-                Country = ReadString(details, "country"),
-                Platform = PlatformName(ReadInt(details, "platform_type", 0)),
-                DeviceName = ReadString(details, "device_friendly_name"),
-                RequestedPersistence = PersistenceName(ReadInt(details, "requested_persistence", -1)),
-                SecurityHistory = SecurityHistoryName(ReadInt(details, "login_history", 0)),
-                LocationMismatch = ReadBool(details, "requestor_location_mismatch"),
-                HighUsageLogin = ReadBool(details, "high_usage_login")
+                Version = details.Version > 0 ? details.Version : 1,
+                IPAddress = details.Ip ?? String.Empty,
+                Geolocation = details.Geoloc ?? String.Empty,
+                City = details.City ?? String.Empty,
+                State = details.State ?? String.Empty,
+                Country = details.Country ?? String.Empty,
+                Platform = PlatformName((int)details.PlatformType),
+                DeviceName = details.DeviceFriendlyName ?? String.Empty,
+                RequestedPersistence = PersistenceName((int)details.RequestedPersistence),
+                SecurityHistory = SecurityHistoryName((int)details.LoginHistory),
+                LocationMismatch = details.RequestorLocationMismatch,
+                HighUsageLogin = details.HighUsageLogin
             };
         }
 
@@ -220,17 +246,19 @@ namespace Steam_Desktop_Authenticator
         {
             int version = request.Version > 0 ? request.Version : 1;
             byte[] signature = BuildMobileConfirmationSignature(account.SharedSecret, (ushort)version, request.ClientId, account.Session.SteamID);
-            var body = new JObject
-            {
-                ["version"] = version,
-                ["client_id"] = request.ClientId.ToString(),
-                ["steamid"] = account.Session.SteamID.ToString(),
-                ["signature"] = Convert.ToBase64String(signature),
-                ["confirm"] = decision == LoginApprovalDecision.ApprovePersistent,
-                ["persistence"] = 1 // Steam's persistent session value.
-            }.ToString(Newtonsoft.Json.Formatting.None);
-
-            var response = await SendPostAsync(account, "UpdateAuthSessionWithMobileConfirmation", body);
+            SteamProtocolResponse<CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response> response = await SendAsync(
+                account,
+                "UpdateAuthSessionWithMobileConfirmation",
+                new CAuthentication_UpdateAuthSessionWithMobileConfirmation_Request
+                {
+                    Version = version,
+                    ClientId = request.ClientId,
+                    Steamid = account.Session.SteamID,
+                    Signature = ByteString.CopyFrom(signature),
+                    Confirm = decision == LoginApprovalDecision.ApprovePersistent,
+                    Persistence = ESessionPersistence.KEsessionPersistencePersistent
+                },
+                CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response.Parser);
             ThrowIfSteamFailed(response);
         }
 
@@ -258,78 +286,58 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private async Task<SteamWebResponse> SendGetAsync(SteamGuardAccount account, string method, string inputJson)
+        private async Task<SteamProtocolResponse<TResponse>> SendAsync<TRequest, TResponse>(
+            SteamGuardAccount account,
+            string method,
+            TRequest request,
+            MessageParser<TResponse> responseParser,
+            SteamProtocolRequestMethod requestMethod = SteamProtocolRequestMethod.Post)
+            where TRequest : class, IMessage<TRequest>
+            where TResponse : class, IMessage<TResponse>
         {
-            string url = AuthenticationServiceBase + method + "/v1/?access_token=" + Uri.EscapeDataString(account.Session.AccessToken) + "&input_json=" + Uri.EscapeDataString(inputJson);
             try
             {
-                return await SteamWeb.GETRequestWithHeaders(url, null);
+                return await protocolTransport.SendAsync("IAuthenticationService", method, request, account.Session.AccessToken, responseParser, requestMethod);
             }
-            catch (WebException ex)
+            catch (SteamWebRequestException exception) when (
+                exception.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                exception.StatusCode == System.Net.HttpStatusCode.Forbidden)
             {
-                throw CreateWebException(ex);
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unauthorized, "Steam rejected this account session. Log in again and retry.");
+            }
+            catch (SteamWebRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                throw new LoginApprovalException(LoginApprovalErrorKind.RateLimited, "Steam is rate limiting login actions. Try again shortly.");
+            }
+            catch (System.Net.Http.HttpRequestException exception)
+            {
+                DiagnosticErrorLogger.Log("Login approval transport", exception, "A login approval request failed at the transport layer.");
+                throw CreateNetworkException(null);
+            }
+            catch (TimeoutException exception)
+            {
+                DiagnosticErrorLogger.Log("Login approval transport", exception, "A login approval request timed out.");
+                throw CreateNetworkException("Steam did not respond in time.");
+            }
+            catch (TaskCanceledException)
+            {
+                throw CreateNetworkException("Steam did not respond in time.");
             }
         }
 
-        private async Task<SteamWebResponse> SendPostAsync(SteamGuardAccount account, string method, string inputJson)
+        private static void ThrowIfSteamFailed<TResponse>(SteamProtocolResponse<TResponse> response)
+            where TResponse : class, IMessage<TResponse>
         {
-            string url = AuthenticationServiceBase + method + "/v1/?access_token=" + Uri.EscapeDataString(account.Session.AccessToken);
-            var form = new NameValueCollection();
-            form.Add("input_json", inputJson);
-            try
-            {
-                return await SteamWeb.POSTRequestWithHeaders(url, null, form);
-            }
-            catch (WebException ex)
-            {
-                throw CreateWebException(ex);
-            }
-        }
-
-        private static List<ulong> ParseClientIds(string responseBody)
-        {
-            var ids = new List<ulong>();
-            JObject response = GetResponseObject(responseBody);
-            var values = response?["client_ids"] as JArray;
-            if (values == null)
-                return ids;
-
-            foreach (JToken value in values)
-            {
-                if (ulong.TryParse(value.ToString(), out ulong id))
-                    ids.Add(id);
-            }
-            return ids;
-        }
-
-        private static JObject GetResponseObject(string body)
-        {
-            if (String.IsNullOrWhiteSpace(body))
-                return null;
-
-            try
-            {
-                JObject document = JObject.Parse(body);
-                return document["response"] as JObject ?? document;
-            }
-            catch (Newtonsoft.Json.JsonException)
-            {
-                return null;
-            }
-        }
-
-        private static void ThrowIfSteamFailed(SteamWebResponse response)
-        {
-            string value = response?.Headers?["X-eresult"];
-            if (String.IsNullOrEmpty(value) || !Int32.TryParse(value, out int result) || result == 1)
+            if (response != null && response.Result == 1)
                 return;
 
-            string message = response.Headers?["X-error_message"];
+            int result = response?.Result ?? 0;
+            string message = response?.ErrorMessage;
             if (result == 15 || result == 21)
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unauthorized, "Steam authorization expired.");
             if (result == 27 || result == 29)
                 throw new LoginApprovalException(LoginApprovalErrorKind.ExpiredOrDuplicate, "This login request has already expired or was already handled.");
-            if (result == 84)
+            if (result == 84 || result == 87)
                 throw new LoginApprovalException(LoginApprovalErrorKind.RateLimited, "Steam is rate limiting login actions. Try again shortly.");
 
             throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, String.IsNullOrWhiteSpace(message) ? "Steam rejected the login action." : message);
@@ -358,13 +366,11 @@ namespace Steam_Desktop_Authenticator
                 target[offset + i] = (byte)(value >> (8 * i));
         }
 
-        private static LoginApprovalException CreateWebException(WebException exception)
+        private static LoginApprovalException CreateNetworkException(string detail)
         {
-            if (exception.Response is HttpWebResponse response && response.StatusCode == HttpStatusCode.Unauthorized)
-                return new LoginApprovalException(LoginApprovalErrorKind.Unauthorized, "Steam authorization expired.");
-            if (exception.Response is HttpWebResponse rateLimited && (int)rateLimited.StatusCode == 429)
-                return new LoginApprovalException(LoginApprovalErrorKind.RateLimited, "Steam is rate limiting login actions. Try again shortly.");
-            return new LoginApprovalException(LoginApprovalErrorKind.Network, "Steam could not be reached while checking login requests.");
+            return new LoginApprovalException(LoginApprovalErrorKind.Network, String.IsNullOrWhiteSpace(detail)
+                ? "Steam could not be reached while checking login requests."
+                : detail);
         }
 
         private static LoginApprovalActionResult FailedAction(LoginApprovalException exception)
@@ -385,21 +391,6 @@ namespace Steam_Desktop_Authenticator
                 ErrorKind = LoginApprovalErrorKind.Unknown,
                 ErrorMessage = "Steam could not complete the login action. Try again."
             };
-        }
-
-        private static int ReadInt(JObject value, string name, int fallback)
-        {
-            return Int32.TryParse(value?[name]?.ToString(), out int parsed) ? parsed : fallback;
-        }
-
-        private static bool ReadBool(JObject value, string name)
-        {
-            return Boolean.TryParse(value?[name]?.ToString(), out bool parsed) && parsed;
-        }
-
-        private static string ReadString(JObject value, string name)
-        {
-            return value?[name]?.ToString() ?? String.Empty;
         }
 
         private static string PlatformName(int platform)
@@ -425,7 +416,17 @@ namespace Steam_Desktop_Authenticator
 
         private static string SecurityHistoryName(int history)
         {
-            return history == 0 ? "New or unknown login" : "Previously seen login";
+            switch (history)
+            {
+                case 0:
+                    return "Unknown login history";
+                case 1:
+                    return "Previously seen login";
+                case 2:
+                    return "First-time login";
+                default:
+                    return "Unknown login history";
+            }
         }
 
         private sealed class LoginApprovalException : Exception

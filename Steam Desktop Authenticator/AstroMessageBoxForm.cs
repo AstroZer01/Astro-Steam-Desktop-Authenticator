@@ -9,12 +9,16 @@ namespace Steam_Desktop_Authenticator
         private Label lblMessage;
         private FlowLayoutPanel buttonPanel;
         private CheckBox chkOption;
+        private readonly string primaryButtonText;
+        private readonly string secondaryButtonText;
         
         public DialogResult Result { get; private set; } = DialogResult.None;
         public bool IsChecked => chkOption != null && chkOption.Checked;
 
-        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null)
+        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null, string primaryButtonText = null, string secondaryButtonText = null)
         {
+            this.primaryButtonText = primaryButtonText;
+            this.secondaryButtonText = secondaryButtonText;
             this.Text = caption;
             this.Size = new Size(400, 200);
             this.MinimumSize = new Size(400, 150);
@@ -26,7 +30,7 @@ namespace Steam_Desktop_Authenticator
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.ShowIcon = false;
-            this.ShowInTaskbar = false;
+            this.ShowInTaskbar = true;
             this.BackColor = AstroTheme.Background;
             this.ForeColor = AstroTheme.OnSurface;
             AstroTheme.ApplyDarkTitleBar(this);
@@ -75,6 +79,7 @@ namespace Steam_Desktop_Authenticator
             buttonPanel.Dock = DockStyle.Fill;
             buttonPanel.FlowDirection = FlowDirection.RightToLeft;
             buttonPanel.WrapContents = false;
+            buttonPanel.AutoScroll = true;
             layout.Controls.Add(buttonPanel, 0, currentRow);
 
             SetupButtons(buttons);
@@ -88,8 +93,8 @@ namespace Steam_Desktop_Authenticator
                     AddButton("OK", DialogResult.OK, true);
                     break;
                 case MessageBoxButtons.OKCancel:
-                    AddButton("Cancel", DialogResult.Cancel, false);
-                    AddButton("OK", DialogResult.OK, true);
+                    AddButton(secondaryButtonText ?? "Cancel", DialogResult.Cancel, false);
+                    AddButton(primaryButtonText ?? "OK", DialogResult.OK, true);
                     break;
                 case MessageBoxButtons.YesNo:
                     AddButton("No", DialogResult.No, false);
@@ -109,6 +114,8 @@ namespace Steam_Desktop_Authenticator
                     AddButton("Retry", DialogResult.Retry, false);
                     AddButton("Abort", DialogResult.Abort, true);
                     break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(buttons), buttons, "The dialog button set is not supported.");
             }
         }
 
@@ -116,9 +123,10 @@ namespace Steam_Desktop_Authenticator
         {
             Button btn = new Button();
             btn.Text = text;
-            btn.Size = new Size(80, 32);
             btn.FlatStyle = FlatStyle.Flat;
             btn.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+            int buttonWidth = Math.Max(80, TextRenderer.MeasureText(text, btn.Font, Size.Empty, TextFormatFlags.SingleLine).Width + 24);
+            btn.Size = new Size(buttonWidth, 32);
             btn.Cursor = Cursors.Hand;
             btn.Margin = new Padding(10, 0, 0, 0);
             
@@ -138,6 +146,20 @@ namespace Steam_Desktop_Authenticator
             };
 
             buttonPanel.Controls.Add(btn);
+            EnsureButtonPanelWidth();
+        }
+
+        private void EnsureButtonPanelWidth()
+        {
+            int requiredPanelWidth = 0;
+            foreach (Control control in buttonPanel.Controls)
+                requiredPanelWidth += control.Width + control.Margin.Horizontal;
+
+            int requiredDialogWidth = Math.Min(MaximumSize.Width, Math.Max(Width, requiredPanelWidth + 50));
+            if (Width < requiredDialogWidth)
+                Width = requiredDialogWidth;
+
+            buttonPanel.AutoScroll = requiredPanelWidth + 30 > ClientSize.Width;
         }
     }
 }

@@ -8,6 +8,13 @@ body { background-color: #0b1326; color: #dae2fd; font-family: 'Inter', sans-ser
 .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
 input { background: #131B2E !important; color: white !important; border: 1px solid rgba(255, 255, 255, 0.2) !important; border-radius: 8px !important; padding: 12px !important; width: 100%; outline: none; transition: border-color 0.2s; }
 input:focus { border-color: #00daf3 !important; }
+.password-field { position: relative; }
+.password-field input { padding-right: 48px !important; }
+.password-toggle { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: #ffffff; padding: 6px; line-height: 0; cursor: pointer; }
+.password-toggle:hover, .password-toggle:focus { color: #c3f5ff; }
+.password-toggle:focus-visible { outline: 2px solid #00daf3; outline-offset: 2px; }
+.password-toggle svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+input::-ms-reveal { display: none; }
 </style>
 </head>
 <body class="min-h-screen flex items-center justify-center p-4">
@@ -26,7 +33,12 @@ input:focus { border-color: #00daf3 !important; }
     
     <div class="flex flex-col gap-2">
         <label class="text-sm text-[#849396] font-medium" for="password">Password</label>
-        <input type="password" id="password" placeholder="Steam Password" />
+        <div class="password-field">
+            <input type="password" id="password" placeholder="Steam Password" />
+            <button id="password-toggle" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+            </button>
+        </div>
     </div>
 
     <button id="btn-login" class="mt-4 bg-[#00E5FF] hover:bg-[#9cf0ff] text-[#00363D] font-bold py-3 rounded-lg w-full transition-colors shadow-lg shadow-[#00E5FF]/20">LOGIN</button>
@@ -39,6 +51,15 @@ input:focus { border-color: #00daf3 !important; }
     }
 
     document.getElementById('btn-login').addEventListener('click', submitLogin);
+    document.getElementById('password-toggle').addEventListener('click', () => {
+        const password = document.getElementById('password');
+        const toggle = document.getElementById('password-toggle');
+        const visible = password.type === 'password';
+        password.type = visible ? 'text' : 'password';
+        toggle.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
+        toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
+        password.focus();
+    });
     document.getElementById('password').addEventListener('keydown', event => {
         if (event.key === 'Enter') {
             event.preventDefault();
