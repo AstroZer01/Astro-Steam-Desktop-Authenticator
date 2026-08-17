@@ -797,7 +797,17 @@ namespace Steam_Desktop_Authenticator
 
             if (scheme != 0)
             {
-                string confCode = await currentAccount.GenerateSteamGuardCodeAsync();
+                string confCode;
+                try
+                {
+                    confCode = await currentAccount.GenerateSteamGuardCodeAsync();
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Steam Guard deactivation", ex, "The confirmation code could not be generated.");
+                    AstroMessageBox.Show("The confirmation code could not be generated. Check your connection and try again.", "Deactivate Authenticator Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
                 string enteredCode;
                 using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", currentAccount.AccountName, confCode)))
                 {
