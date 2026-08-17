@@ -72,16 +72,30 @@ namespace SteamAuth
             IReadOnlyDictionary<string, string> headers, TimeSpan timeout, CancellationToken cancellationToken,
             bool followRedirects = true)
         {
-            if (timeout == TimeSpan.Zero || timeout < Timeout.InfiniteTimeSpan)
+            if (timeout < TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
+            {
+                content?.Dispose();
                 throw new ArgumentOutOfRangeException(nameof(timeout));
+            }
             if (!IsHttpUri(uri))
+            {
+                content?.Dispose();
                 throw new ArgumentException("A valid Steam URL is required.", nameof(uri));
+            }
 
-            byte[] requestBody = content == null ? null : await content.ReadAsByteArrayAsync().ConfigureAwait(false);
-            IEnumerable<KeyValuePair<string, IEnumerable<string>>> contentHeaders = content == null
-                ? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>()
-                : content.Headers.ToArray();
-            content?.Dispose();
+            byte[] requestBody;
+            IEnumerable<KeyValuePair<string, IEnumerable<string>>> contentHeaders;
+            try
+            {
+                requestBody = content == null ? null : await content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                contentHeaders = content == null
+                    ? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>()
+                    : content.Headers.ToArray();
+            }
+            finally
+            {
+                content?.Dispose();
+            }
 
             using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
