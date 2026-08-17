@@ -266,7 +266,7 @@ namespace Steam_Desktop_Authenticator
                 currentRegion = "US";
             }
 
-            CountryOption currentCountry = CountryOptions.FirstOrDefault(option => option.RegionCode == currentRegion) ?? CountryOptions.First(option => option.RegionCode == "US");
+            CountryOption currentCountry = CountryOptions.FirstOrDefault(option => option.RegionCode == currentRegion) ?? CountryOptions.FirstOrDefault(option => option.RegionCode == "US");
             countrySelector.SelectedItem = currentCountry;
         }
 

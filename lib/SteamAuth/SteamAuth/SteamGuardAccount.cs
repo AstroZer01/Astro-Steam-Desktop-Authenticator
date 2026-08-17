@@ -145,6 +145,8 @@ namespace SteamAuth
                 throw new InvalidOperationException("The saved Steam session has expired. Log in again before approving a QR login.");
             if (!UInt64.TryParse(idOfQR, out ulong clientId))
                 throw new ArgumentException("Steam provided an invalid QR login identifier.", nameof(idOfQR));
+            if (String.IsNullOrWhiteSpace(SharedSecret))
+                throw new InvalidOperationException("The saved authenticator is missing its shared secret. Re-import or re-link the account before approving a QR login.");
 
             byte[] sharedSecretBytes = Convert.FromBase64String(Regex.Unescape(this.SharedSecret));
             byte[] signatureData = new byte[18];
@@ -154,7 +156,7 @@ namespace SteamAuth
             signatureData[1] = 0;
 
             // client_id (uint64 LE)
-            byte[] clientBytes = BitConverter.GetBytes(ulong.Parse(idOfQR));
+            byte[] clientBytes = BitConverter.GetBytes(clientId);
             Buffer.BlockCopy(clientBytes, 0, signatureData, 2, 8);
 
             // steamid (uint64 LE)
@@ -303,7 +305,7 @@ namespace SteamAuth
             if (response == null) return false;
 
             SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response);
-            return confResponse.Success;
+            return confResponse?.Success ?? false;
         }
 
         private async Task<bool> _sendMultiConfirmationAjax(Confirmation[] confs, string op)
@@ -328,7 +330,7 @@ namespace SteamAuth
             if (response == null) return false;
 
             SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response);
-            return confResponse.Success;
+            return confResponse?.Success ?? false;
         }
 
         public string GenerateConfirmationURL(string tag = "conf")

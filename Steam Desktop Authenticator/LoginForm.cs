@@ -526,6 +526,8 @@ namespace Steam_Desktop_Authenticator
 
             // Linked, finally. Do not report success until the finalized record is durable.
             StorageResult finalSaveResult = manifest.SaveAccount(linker.LinkedAccount, passKey != null, passKey);
+            if (IsDisposed || Disposing)
+                return;
             if (!finalSaveResult.Succeeded)
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", finalSaveResult.Exception, "Steam finalized the authenticator, but the finalized local record could not be saved.");
@@ -605,25 +607,31 @@ namespace Steam_Desktop_Authenticator
 
             public PhoneEnrollmentDetails RequestPhoneNumber()
             {
-                using (PhoneInputForm phoneInputForm = new PhoneInputForm(account))
+                return RunOnOwnerThread(() =>
                 {
-                    phoneInputForm.ShowDialog(owner);
-                    return phoneInputForm.Canceled
-                        ? null
-                        : new PhoneEnrollmentDetails(phoneInputForm.PhoneNumber, phoneInputForm.CountryCode, phoneInputForm.ContinueWithoutPhone);
-                }
+                    using (PhoneInputForm phoneInputForm = new PhoneInputForm(account))
+                    {
+                        phoneInputForm.ShowDialog(owner);
+                        return phoneInputForm.Canceled
+                            ? null
+                            : new PhoneEnrollmentDetails(phoneInputForm.PhoneNumber, phoneInputForm.CountryCode, phoneInputForm.ContinueWithoutPhone);
+                    }
+                }, null);
             }
 
             public bool ConfirmPhoneRequired()
             {
-                DialogResult result = AstroMessageBox.ShowWithCustomButtons(
-                    "Steam requires a verified phone number to set up a mobile authenticator for this account. Continue to add and verify a phone number, or cancel setup.",
-                    "Phone Number Required",
-                    MessageBoxButtons.OKCancel,
-                    MessageBoxIcon.Information,
-                    "Continue",
-                    "Cancel");
-                return result == DialogResult.OK;
+                return RunOnOwnerThread(() =>
+                {
+                    DialogResult result = AstroMessageBox.ShowWithCustomButtons(
+                        "Steam requires a verified phone number to set up a mobile authenticator for this account. Continue to add and verify a phone number, or cancel setup.",
+                        "Phone Number Required",
+                        MessageBoxButtons.OKCancel,
+                        MessageBoxIcon.Information,
+                        "Continue",
+                        "Cancel");
+                    return result == DialogResult.OK;
+                }, false);
             }
 
             public bool ConfirmEmail(string confirmationEmailAddress)
@@ -631,12 +639,15 @@ namespace Steam_Desktop_Authenticator
                 string destination = string.IsNullOrWhiteSpace(confirmationEmailAddress)
                     ? "your Steam account email address"
                     : confirmationEmailAddress;
-                DialogResult result = AstroMessageBox.Show(
-                    "Steam sent a confirmation link to " + destination + ". Click that link, then select OK to send the SMS verification code.",
-                    "Confirm Phone Number",
-                    MessageBoxButtons.OKCancel,
-                    MessageBoxIcon.Information);
-                return result == DialogResult.OK;
+                return RunOnOwnerThread(() =>
+                {
+                    DialogResult result = AstroMessageBox.Show(
+                        "Steam sent a confirmation link to " + destination + ". Click that link, then select OK to send the SMS verification code.",
+                        "Confirm Phone Number",
+                        MessageBoxButtons.OKCancel,
+                        MessageBoxIcon.Information);
+                    return result == DialogResult.OK;
+                }, false);
             }
 
             public string RequestSmsCode(bool previousCodeWasInvalid)
@@ -644,10 +655,28 @@ namespace Steam_Desktop_Authenticator
                 string message = previousCodeWasInvalid
                     ? "That SMS code was not accepted. Please enter the new code sent to your phone."
                     : "Please enter the SMS code sent to your phone to verify the phone number.";
+                return RunOnOwnerThread(() =>
+                {
                     using (InputForm smsCodeForm = new InputForm(message))
                     {
                         smsCodeForm.ShowInputDialog(owner);
-                    return smsCodeForm.Canceled ? null : smsCodeForm.txtBox.Text;
+                        return smsCodeForm.Canceled ? null : smsCodeForm.txtBox.Text;
+                    }
+                }, null);
+            }
+
+            private T RunOnOwnerThread<T>(Func<T> action, T unavailableResult)
+            {
+                if (owner == null || owner.IsDisposed || owner.Disposing || !owner.IsHandleCreated)
+                    return unavailableResult;
+
+                try
+                {
+                    return owner.InvokeRequired ? (T)owner.Invoke(action) : action();
+                }
+                catch (InvalidOperationException)
+                {
+                    return unavailableResult;
                 }
             }
         }
@@ -709,6 +738,9 @@ namespace Steam_Desktop_Authenticator
 
         private void ShowRecoveryCode(SteamGuardAccount recoveryAccount, string statusMessage, bool requireBackupBeforeContinue = false)
         {
+            if (IsDisposed || Disposing || recoveryAccount == null)
+                return;
+
             using (RecoveryCodeForm recoveryCodeForm = new RecoveryCodeForm(recoveryAccount, statusMessage, requireBackupBeforeContinue))
             {
                 recoveryCodeForm.ShowDialog(this);

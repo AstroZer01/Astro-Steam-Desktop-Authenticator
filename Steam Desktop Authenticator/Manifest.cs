@@ -506,7 +506,7 @@ namespace Steam_Desktop_Authenticator
                 catch (Exception ex)
                 {
                     DiagnosticErrorLogger.Log("Authenticator storage", ex, "Could not inspect a local account while preparing its removal.");
-                    return null;
+                    continue;
                 }
             }
 
@@ -821,11 +821,20 @@ namespace Steam_Desktop_Authenticator
                     if (!cleanupSucceeded)
                     {
                         if (!manifestCommitted)
-                            return false;
+                        {
+                            // The manifest still contains the original data. The only
+                            // remaining files are unreferenced staging files, so let
+                            // startup continue and keep the journal for diagnosis.
+                            QuarantineStorageJournal(journalFilename);
+                            return true;
+                        }
 
                         // The manifest is committed, so its newly created files are live.
                         // Retain only the obsolete-file cleanup state before allowing a
                         // later settings save to replace the manifest.
+                        if (backupFilename != null)
+                            DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
+                        journal.BackupFilename = null;
                         journal.CreatedFilenames = new List<string>();
                         WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal));
                         if (retainedObsoleteFilenames != null)
@@ -870,8 +879,15 @@ namespace Steam_Desktop_Authenticator
                     foreach (string filename in (journal.ObsoleteFilenames ?? new List<string>()))
                         ValidateStorageFilename(filename);
 
+                    string backupFilename = String.IsNullOrWhiteSpace(journal.BackupFilename)
+                        ? null
+                        : Path.Combine(maDir, Path.GetFileName(journal.BackupFilename));
+                    if (backupFilename != null)
+                        DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed while rebasing retained storage cleanup.");
+
                     journal.ManifestHash = GetContentHash(manifestContents);
                     journal.CreatedFilenames = new List<string>();
+                    journal.BackupFilename = null;
                     WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal));
                     return true;
                 }
@@ -943,6 +959,10 @@ namespace Steam_Desktop_Authenticator
                     {
                         throw new NotSupportedException("The selected data folder does not support the atomic file replacement required to safely save authenticator data.", ex);
                     }
+                    catch (IOException ex) when (IsAtomicReplacementUnsupported(ex))
+                    {
+                        throw new NotSupportedException("The selected data folder does not support the atomic file replacement required to safely save authenticator data.", ex);
+                    }
                 }
                 else
                     File.Move(temporaryFilename, filename);
@@ -957,6 +977,13 @@ namespace Steam_Desktop_Authenticator
         private static string CreateBackupFilename(string maDir)
         {
             return Path.Combine(maDir, ".manifest." + Guid.NewGuid().ToString("N") + ".bak");
+        }
+
+        private static bool IsAtomicReplacementUnsupported(IOException exception)
+        {
+            const int ErrorInvalidFunction = unchecked((int)0x80070001);
+            const int ErrorNotSupported = unchecked((int)0x80070032);
+            return exception.HResult == ErrorInvalidFunction || exception.HResult == ErrorNotSupported;
         }
 
         private static string GetContentHash(string contents)

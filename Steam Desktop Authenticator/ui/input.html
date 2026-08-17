@@ -71,7 +71,9 @@ input::-ms-reveal { display: none; }
         document.getElementById('label-text').innerText = label;
         const input = document.getElementById('input-box');
         const toggle = document.getElementById('password-toggle');
+        const passwordField = document.getElementById('password-field');
         input.type = isPassword ? 'password' : 'text';
+        passwordField.classList.toggle('password-field', isPassword);
         toggle.style.display = isPassword ? 'block' : 'none';
         toggle.setAttribute('aria-label', 'Show password');
         toggle.setAttribute('aria-pressed', 'false');

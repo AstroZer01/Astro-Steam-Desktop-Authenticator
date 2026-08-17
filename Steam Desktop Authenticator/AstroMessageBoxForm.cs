@@ -114,6 +114,8 @@ namespace Steam_Desktop_Authenticator
                     AddButton("Retry", DialogResult.Retry, false);
                     AddButton("Abort", DialogResult.Abort, true);
                     break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(buttons), buttons, "The dialog button set is not supported.");
             }
         }
 

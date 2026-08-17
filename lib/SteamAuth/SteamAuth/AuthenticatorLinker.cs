@@ -303,7 +303,9 @@ namespace SteamAuth
                     statusResult = FinalizeResult.GeneralFailure;
                 }
 
-                if (statusResult == FinalizeResult.GeneralFailure || statusResult == FinalizeResult.RateLimited)
+                if (statusResult == FinalizeResult.GeneralFailure ||
+                    statusResult == FinalizeResult.RateLimited ||
+                    statusResult == FinalizeResult.NotFinalized)
                 {
                     LinkedAccount.FullyEnrolled = true;
                     Finalized = true;

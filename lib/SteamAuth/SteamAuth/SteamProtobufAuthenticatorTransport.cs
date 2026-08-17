@@ -194,7 +194,9 @@ namespace SteamAuth
         private static int GetHeaderResult(HttpResponseMessage response)
         {
             string value = GetHeaderValue(response, "X-eresult");
-            return Int32.TryParse(value, out int result) ? result : 0;
+            return Int32.TryParse(value, out int result)
+                ? result
+                : response.IsSuccessStatusCode ? 1 : 0;
         }
 
         private static string GetHeaderValue(HttpResponseMessage response, string name)

@@ -30,6 +30,9 @@ namespace Steam_Desktop_Authenticator
 
         public static DialogResult ShowWithCustomButtons(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string primaryButtonText, string secondaryButtonText)
         {
+            if (buttons != MessageBoxButtons.OKCancel)
+                throw new ArgumentOutOfRangeException(nameof(buttons), "Custom button labels are supported only for OK/Cancel dialogs.");
+
             using (AstroMessageBoxForm form = new AstroMessageBoxForm(text, caption, buttons, icon, null, primaryButtonText, secondaryButtonText))
             {
                 return ShowWithActiveOwner(form);

@@ -417,7 +417,17 @@ namespace Steam_Desktop_Authenticator
 
         private static string SecurityHistoryName(int history)
         {
-            return history == 0 ? "New or unknown login" : "Previously seen login";
+            switch (history)
+            {
+                case 0:
+                    return "Unknown login history";
+                case 1:
+                    return "Previously seen login";
+                case 2:
+                    return "First-time login";
+                default:
+                    return "Unknown login history";
+            }
         }
 
         private sealed class LoginApprovalException : Exception
