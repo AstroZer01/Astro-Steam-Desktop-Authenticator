@@ -135,8 +135,7 @@ namespace Steam_Desktop_Authenticator
                 account,
                 "GetAuthSessionsForAccount",
                 new CAuthentication_GetAuthSessionsForAccount_Request(),
-                CAuthentication_GetAuthSessionsForAccount_Response.Parser,
-                SteamProtocolRequestMethod.Get);
+                CAuthentication_GetAuthSessionsForAccount_Response.Parser);
             ThrowIfSteamFailed(sessionsResponse);
             if (sessionsResponse.Body == null)
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned an invalid pending login request response.");

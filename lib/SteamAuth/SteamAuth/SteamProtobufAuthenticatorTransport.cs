@@ -97,7 +97,14 @@ namespace SteamAuth
 
             string url = "https://api.steampowered.com/" + service + "/" + method + "/v1";
             string encodedRequest = Convert.ToBase64String(request.ToByteArray());
-            bool useGet = requestMethod == SteamProtocolRequestMethod.Get && String.IsNullOrWhiteSpace(accessToken);
+            if (requestMethod == SteamProtocolRequestMethod.Get && !String.IsNullOrWhiteSpace(accessToken))
+            {
+                throw new ArgumentException(
+                    "Authenticated Steam protocol requests must use POST so the access token is not placed in the URL.",
+                    nameof(requestMethod));
+            }
+
+            bool useGet = requestMethod == SteamProtocolRequestMethod.Get;
             using (HttpRequestMessage httpRequest = new HttpRequestMessage(useGet ? HttpMethod.Get : HttpMethod.Post, url))
             {
                 if (useGet)
@@ -106,8 +113,6 @@ namespace SteamAuth
                     {
                         new KeyValuePair<string, string>("input_protobuf_encoded", encodedRequest)
                     };
-                    if (!String.IsNullOrWhiteSpace(accessToken))
-                        query.Add(new KeyValuePair<string, string>("access_token", accessToken));
                     httpRequest.RequestUri = new Uri(url + "?" + String.Join("&", query.ConvertAll(item => Uri.EscapeDataString(item.Key) + "=" + Uri.EscapeDataString(item.Value))));
                 }
                 else
