@@ -39,12 +39,14 @@ All credit for the original design and implementation goes to Jessecar96 and the
 - **Login approvals** — review Steam login requests with device and location details, then approve or deny them manually. Optional account-wide rules can automatically approve persistent sign-ins or deny requests, with IP allowlisting controls.
 - **Desktop notifications** — receive Windows notifications for pending trade confirmations and login requests, with navigation back to the relevant view.
 
-## Version 1.1.0.0 Highlights
+## Version 1.1.2 Highlights
 
-- Added a dedicated Login Actions experience for managing pending Steam login approvals and denials.
-- Added automatic login rules, including persistent approval, automatic denial, and optional IP allowlisting.
-- Added multi-account trade-confirmation monitoring and notification support.
-- Added optional diagnostic logging so users can view and report issues.
+- **Phone-free Steam Guard setup** - Add an authenticator without a phone number when Steam allows it, with clear email and SMS guidance when verification is required.
+- **Smoother account setup** - Improved phone verification, recovery-code downloads, and account-management controls.
+- **More reliable Steam actions** - Better handling for login approvals, trade confirmations, session refreshes, and temporary Steam errors.
+- **Safer updates** - Portable releases preserve your existing accounts and settings when you update.
+
+For a complete list of changes, see the [1.1.2 release notes](https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/tag/1.1.2).
 
 ## Build from Source on Windows
 
