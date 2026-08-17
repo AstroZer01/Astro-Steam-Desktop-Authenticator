@@ -33,7 +33,7 @@ namespace Steam_Desktop_Authenticator
             if (previousCodeWasIncorrect)
             {
                 // After 2 tries tell the user that there seems to be an issue
-                if (deviceCodesGenerated > 2)
+                if (deviceCodesGenerated >= 2)
                 {
                     await RunOnUiThreadAsync(() =>
                     {
