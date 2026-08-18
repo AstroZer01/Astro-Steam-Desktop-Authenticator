@@ -289,6 +289,10 @@
                     
                     <div class="text-center mt-6">
                         <p id="app-version-text" class="text-xs text-on-surface-variant/50 font-mono tracking-wider">Astro Steam Desktop Authenticator v...</p>
+                        <p id="app-update-available" class="hidden mt-1 text-xs text-secondary font-mono tracking-wider">
+                            New version <span id="app-update-version"></span> available.
+                            <button id="app-update-release-link" type="button" class="underline hover:text-on-surface transition-colors">Click here to see changes.</button>
+                        </p>
                     </div>
                 </div>
             </div>
@@ -1167,6 +1171,22 @@
     function setAppVersion(version) {
         let el = document.getElementById('app-version-text');
         if (el) el.innerText = "Astro Steam Desktop Authenticator v" + version;
+    }
+
+    function setUpdateAvailable(version, releaseUrl) {
+        const container = document.getElementById('app-update-available');
+        const versionText = document.getElementById('app-update-version');
+        const releaseLink = document.getElementById('app-update-release-link');
+        if (!container || !versionText || !releaseLink) return;
+
+        versionText.innerText = "v" + version;
+        releaseLink.onclick = () => window.chrome.webview.postMessage({ action: 'open_update_release', releaseUrl: releaseUrl });
+        container.classList.remove('hidden');
+    }
+
+    function clearUpdateAvailable() {
+        const container = document.getElementById('app-update-available');
+        if (container) container.classList.add('hidden');
     }
 
     function setAutoStart(enabled) {

@@ -2270,7 +2270,7 @@ namespace Steam_Desktop_Authenticator
         private Version newVersion = null;
         private Version currentVersion = null;
         private static readonly HttpClient updateClient = new HttpClient();
-        private string updateUrl = null;
+        private string latestReleaseUrl = null;
         private bool startupUpdateCheck = true;
         private bool isCheckingForUpdates = false;
 
@@ -2278,12 +2278,6 @@ namespace Steam_Desktop_Authenticator
         {
             if (isCheckingForUpdates) return;
             
-            if (startupUpdateCheck && !Manifest.GetManifest().CheckForUpdates)
-            {
-                startupUpdateCheck = false;
-                return;
-            }
-
             isCheckingForUpdates = true;
 
             try
@@ -2299,7 +2293,7 @@ namespace Steam_Desktop_Authenticator
                 dynamic resultObject = JsonConvert.DeserializeObject(result);
                 newVersion = new Version(resultObject.tag_name.Value);
                 currentVersion = new Version(Application.ProductVersion);
-                updateUrl = resultObject.assets.First.browser_download_url.Value;
+                latestReleaseUrl = resultObject.html_url.Value;
                 compareVersions();
             }
             catch (Exception)
@@ -2320,34 +2314,41 @@ namespace Steam_Desktop_Authenticator
         {
             if (newVersion > currentVersion)
             {
-                labelUpdate.Text = "Download new version"; // Show the user a new version is available if they press no
-                
-                string checkboxText = startupUpdateCheck ? "Don't check for updates on launch" : null;
-                bool isChecked = false;
-                
-                DialogResult updateDialog;
-                if (checkboxText != null)
-                {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out isChecked);
-                }
-                else
-                {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
-                }
+                labelUpdate.Text = "Download new version";
+                SetWebViewUpdateAvailable(newVersion, latestReleaseUrl);
 
-                if (startupUpdateCheck && isChecked)
+                // This preference suppresses the modal only. Version checks always run so the
+                // Settings page can still show an available update.
+                if (Manifest.GetManifest().CheckForUpdates)
                 {
-                    Manifest.GetManifest().CheckForUpdates = false;
-                    Manifest.GetManifest().Save();
-                }
+                    string checkboxText = startupUpdateCheck ? "Do not show me notifications for new versions" : null;
+                    bool isChecked = false;
 
-                if (updateDialog == DialogResult.Yes)
-                {
-                    Process.Start(new ProcessStartInfo(updateUrl) { UseShellExecute = true });
+                    DialogResult updateDialog;
+                    if (checkboxText != null)
+                    {
+                        updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out isChecked);
+                    }
+                    else
+                    {
+                        updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
+                    }
+
+                    if (startupUpdateCheck && isChecked)
+                    {
+                        Manifest.GetManifest().CheckForUpdates = false;
+                        Manifest.GetManifest().Save();
+                    }
+
+                    if (updateDialog == DialogResult.Yes)
+                    {
+                        OpenLatestReleasePage();
+                    }
                 }
             }
             else
             {
+                ClearWebViewUpdateAvailable();
                 if (!startupUpdateCheck)
                 {
                     AstroMessageBox.Show(String.Format("You are using the latest version: {0}", Application.ProductVersion));
@@ -2355,6 +2356,46 @@ namespace Steam_Desktop_Authenticator
             }
 
             newVersion = null; // Check the api again next time they check for updates
+        }
+
+        private void SetWebViewUpdateAvailable(Version version, string releaseUrl)
+        {
+            if (webView?.CoreWebView2 == null || version == null || String.IsNullOrWhiteSpace(releaseUrl))
+                return;
+
+            string versionJson = JsonConvert.SerializeObject(version.ToString());
+            string releaseUrlJson = JsonConvert.SerializeObject(releaseUrl);
+            _ = webView.CoreWebView2.ExecuteScriptAsync($"setUpdateAvailable({versionJson}, {releaseUrlJson});");
+        }
+
+        private void ClearWebViewUpdateAvailable()
+        {
+            if (webView?.CoreWebView2 != null)
+                _ = webView.CoreWebView2.ExecuteScriptAsync("clearUpdateAvailable();");
+        }
+
+        private void OpenLatestReleasePage()
+        {
+            if (!Uri.TryCreate(latestReleaseUrl, UriKind.Absolute, out Uri releaseUri) ||
+                releaseUri.Scheme != Uri.UriSchemeHttps ||
+                !String.Equals(releaseUri.Host, "github.com", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo(releaseUri.AbsoluteUri) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Update release page", ex, "The latest GitHub release page could not be opened.");
+                AstroMessageBox.Show(
+                    "Unable to open the latest release page. Please try again later.",
+                    "New Version",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
 
 
@@ -2614,6 +2655,10 @@ namespace Steam_Desktop_Authenticator
             else if (action == "load_settings")
             {
                 SendSettingsToWebView();
+            }
+            else if (action == "open_update_release")
+            {
+                OpenLatestReleasePage();
             }
             else if (action == "save_settings")
             {
