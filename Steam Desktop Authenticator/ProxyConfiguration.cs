@@ -341,11 +341,15 @@ namespace Steam_Desktop_Authenticator
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
-                    return Failure("Proxy test timed out. Check the host, port, and connection.");
+                    return Failure("Proxy test timed out before Steam's API replied. Check the host, port, and whether the proxy permits api.steampowered.com.");
                 }
                 catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.ProxyAuthenticationRequired)
                 {
                     return Failure("Proxy authentication failed. Check the username and password.");
+                }
+                catch (HttpRequestException ex) when (TryGetProxyTunnelStatusCode(ex, out int statusCode))
+                {
+                    return Failure("The proxy connected, but rejected Steam's API endpoint (HTTP " + statusCode + "). Use a proxy that permits api.steampowered.com.");
                 }
                 catch (HttpRequestException)
                 {
@@ -376,6 +380,30 @@ namespace Steam_Desktop_Authenticator
             request.Headers.Accept.ParseAdd("application/json");
             request.Headers.ConnectionClose = true;
             return request;
+        }
+
+        private static bool TryGetProxyTunnelStatusCode(HttpRequestException exception, out int statusCode)
+        {
+            statusCode = 0;
+            string message = exception?.Message;
+            if (String.IsNullOrEmpty(message) ||
+                message.IndexOf("proxy tunnel request", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return false;
+            }
+
+            const string statusMarker = "status code '";
+            int statusStart = message.IndexOf(statusMarker, StringComparison.OrdinalIgnoreCase);
+            if (statusStart < 0)
+                return false;
+
+            statusStart += statusMarker.Length;
+            int statusEnd = message.IndexOf('\'', statusStart);
+            return statusEnd > statusStart && Int32.TryParse(
+                message.Substring(statusStart, statusEnd - statusStart),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out statusCode);
         }
     }
 }
