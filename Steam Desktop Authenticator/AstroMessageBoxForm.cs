@@ -53,7 +53,7 @@ namespace Steam_Desktop_Authenticator
                 layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             }
             
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50f));
+            layout.RowStyles.Add(new RowStyle(centerContent ? SizeType.AutoSize : SizeType.Absolute, centerContent ? 0f : 50f));
             layout.Padding = new Padding(15);
             this.Controls.Add(layout);
 
@@ -86,12 +86,15 @@ namespace Steam_Desktop_Authenticator
             buttonPanel.Dock = centerContent ? DockStyle.None : DockStyle.Fill;
             buttonPanel.Anchor = centerContent ? AnchorStyles.None : AnchorStyles.Top | AnchorStyles.Left;
             buttonPanel.Margin = Padding.Empty;
+            buttonPanel.MaximumSize = new Size(MaximumSize.Width - layout.Padding.Horizontal, 0);
             buttonPanel.FlowDirection = FlowDirection.RightToLeft;
-            buttonPanel.WrapContents = false;
-            buttonPanel.AutoScroll = false;
+            buttonPanel.WrapContents = true;
+            buttonPanel.AutoScroll = true;
             layout.Controls.Add(buttonPanel, 0, currentRow);
 
             SetupButtons(buttons);
+            if (centerContent)
+                SizeCenteredDialog(layout);
         }
 
         private void SetupButtons(MessageBoxButtons buttons)
@@ -175,6 +178,23 @@ namespace Steam_Desktop_Authenticator
 
             if (MinimumSize.Width < requiredDialogWidth)
                 MinimumSize = new Size(requiredDialogWidth, MinimumSize.Height);
+        }
+
+        private void SizeCenteredDialog(TableLayoutPanel layout)
+        {
+            layout.PerformLayout();
+
+            int availableMessageWidth = Math.Max(1, layout.GetColumnWidths()[0]);
+            int messageHeight = lblMessage.GetPreferredSize(new Size(availableMessageWidth, 0)).Height;
+            int checkboxHeight = chkOption == null
+                ? 0
+                : chkOption.GetPreferredSize(new Size(availableMessageWidth, 0)).Height + chkOption.Margin.Vertical;
+            int buttonHeight = Math.Max(50, buttonPanel.Height + buttonPanel.Margin.Vertical);
+            int desiredClientHeight = layout.Padding.Vertical + messageHeight + checkboxHeight + buttonHeight;
+            int desiredHeight = SizeFromClientSize(new Size(ClientSize.Width, desiredClientHeight)).Height;
+
+            Height = Math.Max(MinimumSize.Height, Math.Min(MaximumSize.Height, desiredHeight));
+            layout.PerformLayout();
         }
     }
 }
