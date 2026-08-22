@@ -176,6 +176,14 @@ namespace Steam_Desktop_Authenticator
             }
 
             DiagnosticErrorLogger.Configure(man.DiagnosticErrorLoggingEnabled);
+            if (!ProxyService.ApplySavedConfiguration(man, out string proxyError))
+            {
+                AstroMessageBox.Show(
+                    "Steam networking has been blocked because the saved proxy settings are invalid. Open Settings and correct or disable the proxy.\n\n" + proxyError,
+                    "Proxy Settings",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
             Application.ThreadException += (sender, eventArgs) =>
                 DiagnosticErrorLogger.Log("Windows Forms UI", eventArgs.Exception, "Unhandled UI-thread exception.");
             AppDomain.CurrentDomain.UnhandledException += (sender, eventArgs) =>

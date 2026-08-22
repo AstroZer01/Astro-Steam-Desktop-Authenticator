@@ -50,12 +50,11 @@ namespace SteamAuth
     {
         public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(20);
         private static readonly TimeSpan MaximumRequestTimeout = TimeSpan.FromMilliseconds(Int32.MaxValue);
-        private static readonly HttpClient sharedHttpClient = CreateHttpClient();
         private readonly HttpClient httpClient;
         private readonly TimeSpan requestTimeout;
 
         public SteamProtobufAuthenticatorTransport()
-            : this(sharedHttpClient, DefaultRequestTimeout)
+            : this(null, DefaultRequestTimeout, true)
         {
         }
 
@@ -69,8 +68,15 @@ namespace SteamAuth
         }
 
         public SteamProtobufAuthenticatorTransport(HttpClient httpClient, TimeSpan requestTimeout)
+            : this(httpClient, requestTimeout, false)
         {
-            this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        }
+
+        private SteamProtobufAuthenticatorTransport(HttpClient httpClient, TimeSpan requestTimeout, bool useSharedClient)
+        {
+            if (!useSharedClient && httpClient == null)
+                throw new ArgumentNullException(nameof(httpClient));
+            this.httpClient = httpClient;
             if (requestTimeout <= TimeSpan.Zero || requestTimeout > MaximumRequestTimeout)
                 throw new ArgumentOutOfRangeException(nameof(requestTimeout));
             this.requestTimeout = requestTimeout;
@@ -127,13 +133,17 @@ namespace SteamAuth
                     httpRequest.Content = new FormUrlEncodedContent(formValues);
                 }
 
+                using (SteamNetworkConfiguration.HttpClientLease clientLease = httpClient == null
+                    ? SteamNetworkConfiguration.AcquireHttpClient()
+                    : null)
                 using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                 {
+                    HttpClient requestClient = httpClient ?? clientLease.Client;
                     timeoutSource.CancelAfter(requestTimeout);
                     HttpResponseMessage response;
                     try
                     {
-                        response = await httpClient.SendAsync(httpRequest, timeoutSource.Token).ConfigureAwait(false);
+                        response = await requestClient.SendAsync(httpRequest, timeoutSource.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                     {
@@ -183,18 +193,6 @@ namespace SteamAuth
                     }
                 }
             }
-        }
-
-        private static HttpClient CreateHttpClient()
-        {
-            HttpClient client = new HttpClient(new HttpClientHandler
-            {
-                UseCookies = false,
-                AllowAutoRedirect = false
-            });
-            client.Timeout = Timeout.InfiniteTimeSpan;
-            client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", SteamWeb.MOBILE_APP_USER_AGENT);
-            return client;
         }
 
         private static int GetHeaderResult(HttpResponseMessage response)

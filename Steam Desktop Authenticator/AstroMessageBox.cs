@@ -39,6 +39,17 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        public static DialogResult ShowWithCustomButtons(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string primaryButtonText, string secondaryButtonText, string tertiaryButtonText)
+        {
+            if (buttons != MessageBoxButtons.YesNoCancel)
+                throw new ArgumentOutOfRangeException(nameof(buttons), "Three custom button labels are supported only for Yes/No/Cancel dialogs.");
+
+            using (AstroMessageBoxForm form = new AstroMessageBoxForm(text, caption, buttons, icon, null, primaryButtonText, secondaryButtonText, tertiaryButtonText))
+            {
+                return ShowWithActiveOwner(form);
+            }
+        }
+
         public static DialogResult Show(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText, out bool isChecked)
         {
             using (AstroMessageBoxForm form = new AstroMessageBoxForm(text, caption, buttons, icon, checkboxText))

@@ -11,14 +11,16 @@ namespace Steam_Desktop_Authenticator
         private CheckBox chkOption;
         private readonly string primaryButtonText;
         private readonly string secondaryButtonText;
+        private readonly string tertiaryButtonText;
         
         public DialogResult Result { get; private set; } = DialogResult.None;
         public bool IsChecked => chkOption != null && chkOption.Checked;
 
-        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null, string primaryButtonText = null, string secondaryButtonText = null)
+        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null, string primaryButtonText = null, string secondaryButtonText = null, string tertiaryButtonText = null)
         {
             this.primaryButtonText = primaryButtonText;
             this.secondaryButtonText = secondaryButtonText;
+            this.tertiaryButtonText = tertiaryButtonText;
             this.Text = caption;
             this.Size = new Size(400, 200);
             this.MinimumSize = new Size(400, 150);
@@ -101,9 +103,9 @@ namespace Steam_Desktop_Authenticator
                     AddButton("Yes", DialogResult.Yes, true);
                     break;
                 case MessageBoxButtons.YesNoCancel:
-                    AddButton("Cancel", DialogResult.Cancel, false);
-                    AddButton("No", DialogResult.No, false);
-                    AddButton("Yes", DialogResult.Yes, true);
+                    AddButton(tertiaryButtonText ?? "Cancel", DialogResult.Cancel, false);
+                    AddButton(secondaryButtonText ?? "No", DialogResult.No, false);
+                    AddButton(primaryButtonText ?? "Yes", DialogResult.Yes, true);
                     break;
                 case MessageBoxButtons.RetryCancel:
                     AddButton("Cancel", DialogResult.Cancel, false);

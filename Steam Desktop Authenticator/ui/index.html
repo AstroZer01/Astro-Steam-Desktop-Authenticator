@@ -235,34 +235,44 @@
                     <button onclick="document.getElementById('proxy-settings-content').classList.toggle('hidden')" class="flex items-center justify-between w-full text-left p-2 -mx-2 hover:bg-white/5 rounded-lg transition-colors group">
                         <div class="flex items-center gap-2">
                             <h2 class="text-lg font-semibold text-on-surface">Proxy Settings</h2>
-                            <span class="text-primary text-xs font-bold uppercase tracking-wider bg-primary/10 border border-primary/20 px-2 py-0.5 rounded-full">Coming Soon</span>
                         </div>
                         <svg class="ui-icon text-on-surface-variant group-hover:text-on-surface transition-colors" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
                     </button>
                     
-                    <div id="proxy-settings-content" class="hidden space-y-4 opacity-50 mt-4 pointer-events-none pb-2">
+                    <div id="proxy-settings-content" class="hidden space-y-4 mt-4 pb-2">
                         <div class="flex items-start gap-3">
-                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="enable-proxy" type="checkbox" disabled/>
-                            <label class="text-on-surface" for="enable-proxy">Enable Proxy for this session</label>
+                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="enable-proxy" type="checkbox"/>
+                            <div>
+                                <label class="text-on-surface" for="enable-proxy">Enable proxy for all sessions</label>
+                                <p class="text-sm text-error mt-1">Avoid rotating proxies. Frequent IP or location changes may trigger Steam security checks.</p>
+                            </div>
                         </div>
                         
                         <div class="grid grid-cols-2 gap-4 pl-8">
                             <div>
                                 <label class="block text-xs text-on-surface-variant mb-1" for="proxy-host">Host</label>
-                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-host" type="text" placeholder="127.0.0.1" disabled/>
+                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-host" type="text" autocomplete="off" placeholder="127.0.0.1"/>
                             </div>
                             <div>
                                 <label class="block text-xs text-on-surface-variant mb-1" for="proxy-port">Port</label>
-                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-port" type="number" placeholder="8080" disabled/>
+                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-port" type="number" min="1" max="65535" placeholder="8080"/>
                             </div>
                             <div>
                                 <label class="block text-xs text-on-surface-variant mb-1" for="proxy-user">Username</label>
-                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-user" type="text" placeholder="Optional" disabled/>
+                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-user" type="text" autocomplete="off" placeholder="Optional"/>
                             </div>
                             <div>
                                 <label class="block text-xs text-on-surface-variant mb-1" for="proxy-pass">Password</label>
-                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-pass" type="password" placeholder="Optional" disabled/>
+                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-pass" type="password" autocomplete="new-password" placeholder="Optional"/>
                             </div>
+                        </div>
+                        <label id="proxy-clear-password-row" class="hidden flex items-center gap-2 pl-8 text-xs text-on-surface-variant">
+                            <input id="proxy-clear-password" class="rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" type="checkbox"/>
+                            Clear saved proxy password
+                        </label>
+                        <div class="pl-8 space-y-2">
+                            <button id="btn-test-proxy" type="button" class="w-full rounded-lg border border-primary/30 py-2 text-sm font-semibold text-primary hover:bg-primary/10 transition-colors">Test Proxy</button>
+                            <p id="proxy-test-status" class="hidden text-sm" role="status" aria-live="polite"></p>
                         </div>
                     </div>
                 </div>
@@ -286,6 +296,7 @@
                         </div>
                     </div>
                     <button id="btn-save-settings" class="w-full py-3 rounded-lg btn-primary shadow-lg shadow-[#00e5ff]/20">Save Settings</button>
+                    <p id="settings-save-status" class="hidden text-sm text-center" role="status" aria-live="polite"></p>
                     
                     <div class="text-center mt-6">
                         <p id="app-version-text" class="text-xs text-on-surface-variant/50 font-mono tracking-wider">Astro Steam Desktop Authenticator v...</p>
@@ -330,6 +341,20 @@
     </div>
 </div>
 
+<div id="unsaved-settings-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="unsaved-settings-title">
+    <div class="w-full max-w-md rounded-xl border border-white/10 bg-surface-container shadow-2xl p-5 space-y-4">
+        <div>
+            <h2 id="unsaved-settings-title" class="font-semibold text-on-surface">Unsaved settings</h2>
+            <p class="text-sm text-on-surface-variant mt-2">You changed settings that have not been saved. Save them before leaving?</p>
+        </div>
+        <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+            <button id="btn-cancel-settings-navigation" type="button" class="rounded-lg border border-white/10 px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-variant transition-colors">Cancel</button>
+            <button id="btn-discard-settings-navigation" type="button" class="rounded-lg border border-white/10 px-4 py-2 text-sm text-on-surface hover:bg-surface-variant transition-colors">Leave Without Saving</button>
+            <button id="btn-save-settings-navigation" type="button" class="rounded-lg btn-primary px-4 py-2 text-sm">Save Changes</button>
+        </div>
+    </div>
+</div>
+
 <script>
     document.addEventListener('contextmenu', event => {
         if (event.target.tagName !== 'INPUT' && event.target.tagName !== 'TEXTAREA') {
@@ -338,9 +363,29 @@
     });
 
     // Tab Switching Logic
+    let activeTabId = 'authenticator';
+    let pendingSettingsNavigation = null;
+    let settingsBaseline = null;
+    let settingsDirty = false;
+    let proxyHasStoredPassword = false;
+    let proxyPasswordAction = 'keep';
+    let settingsSavePending = false;
+
     function switchTab(tabId) {
+        if (activeTabId === tabId) return;
+        if (activeTabId === 'settings' && tabId !== 'settings' && settingsDirty) {
+            pendingSettingsNavigation = tabId;
+            document.getElementById('unsaved-settings-modal').classList.remove('hidden');
+            document.getElementById('unsaved-settings-modal').classList.add('flex');
+            return;
+        }
+        performTabSwitch(tabId);
+    }
+
+    function performTabSwitch(tabId) {
         document.querySelectorAll('section[id^="view-"]').forEach(s => s.classList.add('hidden'));
         document.getElementById('view-' + tabId).classList.remove('hidden');
+        activeTabId = tabId;
         window.chrome.webview.postMessage({ action: 'active_tab_changed', tabName: tabId });
 
         document.querySelectorAll('.tab-link').forEach(l => {
@@ -1114,10 +1159,20 @@
     document.getElementById('trade-confirmation-custom-interval-enabled').addEventListener('change', updateTradeConfirmationIntervalSettings);
 
     // Settings Actions
-    document.getElementById('btn-save-settings').addEventListener('click', () => {
-        showSpinner();
-        window.chrome.webview.postMessage({
+    const saveBoundSettingIds = [
+        'trade-confirmation-custom-interval-enabled', 'trade-confirmation-check-interval',
+        'auto-confirm-market', 'auto-confirm-trades', 'close-to-tray',
+        'diagnostic-error-logging-enabled', 'login-action-monitoring-enabled',
+        'login-action-mode', 'login-action-auto-allow-ip-enabled',
+        'login-action-auto-allow-current-device-ip', 'login-action-auto-allow-ip',
+        'enable-proxy', 'proxy-host', 'proxy-port', 'proxy-user', 'proxy-pass',
+        'proxy-clear-password'
+    ];
+
+    function buildSettingsPayload(saveContext = '') {
+        return {
             action: 'save_settings',
+            saveContext: saveContext,
             tradeConfirmationCustomIntervalEnabled: document.getElementById('trade-confirmation-custom-interval-enabled').checked,
             tradeConfirmationCheckInterval: Math.min(3600, Math.max(3, parseInt(document.getElementById('trade-confirmation-check-interval').value, 10) || 15)),
             autoConfirmMarket: document.getElementById('auto-confirm-market').checked,
@@ -1128,8 +1183,115 @@
             loginActionMode: document.getElementById('login-action-mode').value,
             loginActionAutoAllowIpEnabled: document.getElementById('login-action-auto-allow-ip-enabled').checked,
             loginActionAutoAllowCurrentDeviceIp: document.getElementById('login-action-auto-allow-current-device-ip').checked,
-            loginActionAutoAllowIp: document.getElementById('login-action-auto-allow-ip').value.trim()
-        });
+            loginActionAutoAllowIp: document.getElementById('login-action-auto-allow-ip').value.trim(),
+            proxyEnabled: document.getElementById('enable-proxy').checked,
+            proxyHost: document.getElementById('proxy-host').value.trim(),
+            proxyPort: parseInt(document.getElementById('proxy-port').value, 10) || 0,
+            proxyUsername: document.getElementById('proxy-user').value.trim(),
+            proxyPasswordAction: proxyPasswordAction,
+            proxyPassword: proxyPasswordAction === 'replace' ? document.getElementById('proxy-pass').value : ''
+        };
+    }
+
+    function captureSettingsState() {
+        const payload = buildSettingsPayload('');
+        delete payload.action;
+        delete payload.saveContext;
+        return JSON.stringify(payload);
+    }
+
+    function setSettingsDirty(dirty) {
+        if (settingsDirty === dirty) return;
+        settingsDirty = dirty;
+        window.chrome.webview.postMessage({ action: 'settings_dirty_changed', dirty: dirty });
+    }
+
+    function updateSettingsDirty() {
+        if (settingsBaseline === null) return;
+        setSettingsDirty(captureSettingsState() !== settingsBaseline);
+    }
+
+    function saveSettings(saveContext = '') {
+        if (settingsSavePending) return;
+        settingsSavePending = true;
+        document.getElementById('btn-save-settings').disabled = true;
+        document.getElementById('btn-save-settings-navigation').disabled = true;
+        const saveStatus = document.getElementById('settings-save-status');
+        saveStatus.classList.add('hidden');
+        saveStatus.innerText = '';
+        showSpinner('settings-save');
+        window.chrome.webview.postMessage(buildSettingsPayload(saveContext));
+    }
+
+    document.getElementById('btn-save-settings').addEventListener('click', () => saveSettings(''));
+
+    document.getElementById('btn-test-proxy').addEventListener('click', () => {
+        const button = document.getElementById('btn-test-proxy');
+        const status = document.getElementById('proxy-test-status');
+        button.disabled = true;
+        button.innerText = 'Testing…';
+        status.innerText = 'Testing proxy connection to Steam…';
+        status.className = 'text-sm text-on-surface-variant';
+        const payload = buildSettingsPayload('');
+        payload.action = 'test_proxy';
+        window.chrome.webview.postMessage(payload);
+    });
+
+    function proxyTestCompleted(result) {
+        const button = document.getElementById('btn-test-proxy');
+        const status = document.getElementById('proxy-test-status');
+        button.disabled = false;
+        button.innerText = 'Test Proxy';
+        status.innerText = result && result.message ? result.message : 'Proxy test failed.';
+        status.className = 'text-sm ' + (result && result.succeeded ? 'text-secondary' : 'text-error');
+    }
+
+    const proxyPassword = document.getElementById('proxy-pass');
+    const clearProxyPassword = document.getElementById('proxy-clear-password');
+    proxyPassword.addEventListener('input', () => {
+        proxyPasswordAction = proxyPassword.value ? 'replace' : (clearProxyPassword.checked ? 'clear' : 'keep');
+        updateSettingsDirty();
+    });
+    clearProxyPassword.addEventListener('change', () => {
+        if (clearProxyPassword.checked) {
+            proxyPassword.value = '';
+            proxyPassword.disabled = true;
+            proxyPasswordAction = 'clear';
+        } else {
+            proxyPassword.disabled = false;
+            proxyPasswordAction = proxyPassword.value ? 'replace' : 'keep';
+        }
+        updateSettingsDirty();
+    });
+
+    saveBoundSettingIds.forEach(id => {
+        const element = document.getElementById(id);
+        if (!element || id === 'proxy-pass' || id === 'proxy-clear-password') return;
+        element.addEventListener('input', updateSettingsDirty);
+        element.addEventListener('change', updateSettingsDirty);
+    });
+
+    function closeUnsavedSettingsModal() {
+        const modal = document.getElementById('unsaved-settings-modal');
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+    }
+
+    document.getElementById('btn-save-settings-navigation').addEventListener('click', () => {
+        if (pendingSettingsNavigation)
+            saveSettings('tab:' + pendingSettingsNavigation);
+    });
+    document.getElementById('btn-discard-settings-navigation').addEventListener('click', () => {
+        const target = pendingSettingsNavigation;
+        pendingSettingsNavigation = null;
+        closeUnsavedSettingsModal();
+        setSettingsDirty(false);
+        window.chrome.webview.postMessage({ action: 'discard_settings' });
+        if (target) performTabSwitch(target);
+    });
+    document.getElementById('btn-cancel-settings-navigation').addEventListener('click', () => {
+        pendingSettingsNavigation = null;
+        closeUnsavedSettingsModal();
     });
 
     function loadSettings(settings) {
@@ -1145,12 +1307,38 @@
         document.getElementById('login-action-auto-allow-ip-enabled').checked = !!settings.loginActionAutoAllowIpEnabled;
         document.getElementById('login-action-auto-allow-current-device-ip').checked = !!settings.loginActionAutoAllowCurrentDeviceIp;
         document.getElementById('login-action-auto-allow-ip').value = settings.loginActionAutoAllowIp || '';
+        document.getElementById('enable-proxy').checked = !!settings.proxyEnabled;
+        document.getElementById('proxy-host').value = settings.proxyHost || '';
+        document.getElementById('proxy-port').value = settings.proxyPort || '';
+        document.getElementById('proxy-user').value = settings.proxyUsername || '';
+        proxyHasStoredPassword = !!settings.proxyHasPassword;
+        proxyPassword.value = '';
+        proxyPassword.disabled = false;
+        proxyPassword.placeholder = proxyHasStoredPassword ? 'Saved password — leave blank to keep' : 'Optional';
+        clearProxyPassword.checked = false;
+        document.getElementById('proxy-clear-password-row').classList.toggle('hidden', !proxyHasStoredPassword);
+        proxyPasswordAction = 'keep';
+        const testButton = document.getElementById('btn-test-proxy');
+        testButton.disabled = false;
+        testButton.innerText = 'Test Proxy';
+        const testStatus = document.getElementById('proxy-test-status');
+        testStatus.classList.add('hidden');
+        testStatus.innerText = '';
         updateTradeConfirmationIntervalSettings();
         updateLoginAutoAllowIpSettings();
+        settingsBaseline = captureSettingsState();
+        setSettingsDirty(false);
     }
 
-    function settingsSaved() {
-        hideSpinner();
+    function settingsSaved(saveContext = '') {
+        hideSpinner('settings-save');
+        settingsSavePending = false;
+        document.getElementById('btn-save-settings').disabled = false;
+        document.getElementById('btn-save-settings-navigation').disabled = false;
+        document.getElementById('settings-save-status').classList.add('hidden');
+        settingsBaseline = captureSettingsState();
+        setSettingsDirty(false);
+        closeUnsavedSettingsModal();
         let btn = document.getElementById('btn-save-settings');
         if (btn) {
             let original = btn.innerText;
@@ -1161,6 +1349,26 @@
                 btn.classList.remove('bg-secondary', 'text-on-secondary');
             }, 1500);
         }
+        if (saveContext && saveContext.startsWith('tab:')) {
+            const target = saveContext.substring(4);
+            pendingSettingsNavigation = null;
+            performTabSwitch(target);
+        }
+    }
+
+    function settingsSaveFailed(message) {
+        hideSpinner('settings-save');
+        settingsSavePending = false;
+        document.getElementById('btn-save-settings').disabled = false;
+        document.getElementById('btn-save-settings-navigation').disabled = false;
+        const testButton = document.getElementById('btn-test-proxy');
+        testButton.disabled = false;
+        testButton.innerText = 'Test Proxy';
+        pendingSettingsNavigation = null;
+        closeUnsavedSettingsModal();
+        const status = document.getElementById('settings-save-status');
+        status.innerText = message || 'Settings were not saved.';
+        status.className = 'text-sm text-error';
     }
 
     // New functions for App Version and Auto-Start

@@ -76,6 +76,12 @@ namespace Steam_Desktop_Authenticator
         private bool startSilent = false;
         private bool backgroundServicesEligible;
         private bool backgroundServicesStarted;
+        private bool settingsDirty;
+        private bool explicitExitRequested;
+        private bool allowExitAfterSettingsSave;
+        private bool exitAfterSettingsSaveRequested;
+        private bool settingsSaveInProgress;
+        private CancellationTokenSource proxyTestCancellationSource;
 
         const int VK_RCONTROL = 0xA3;
         const int VK_ESCAPE = 0x1B;
@@ -469,13 +475,46 @@ namespace Steam_Desktop_Authenticator
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
-            if (e.CloseReason == CloseReason.UserClosing && manifest != null && manifest.MinimizeToTray)
+            if (e.CloseReason == CloseReason.UserClosing && !explicitExitRequested && manifest != null && manifest.MinimizeToTray)
             {
                 e.Cancel = true;
                 this.Hide();
             }
             else
             {
+                if (!allowExitAfterSettingsSave && settingsDirty &&
+                    e.CloseReason != CloseReason.WindowsShutDown &&
+                    e.CloseReason != CloseReason.TaskManagerClosing)
+                {
+                    DialogResult result = AstroMessageBox.ShowWithCustomButtons(
+                        "You have unsaved settings changes. Save them before exiting?",
+                        "Unsaved Settings",
+                        MessageBoxButtons.YesNoCancel,
+                        MessageBoxIcon.Warning,
+                        "Save Changes",
+                        "Leave Without Saving",
+                        "Cancel");
+                    if (result == DialogResult.Cancel)
+                    {
+                        e.Cancel = true;
+                        explicitExitRequested = false;
+                        exitAfterSettingsSaveRequested = false;
+                        return;
+                    }
+                    if (result == DialogResult.Yes)
+                    {
+                        e.Cancel = true;
+                        explicitExitRequested = false;
+                        exitAfterSettingsSaveRequested = true;
+                        RestoreWindowFromActivation();
+                        if (!settingsSaveInProgress && webView != null && webView.CoreWebView2 != null)
+                            _ = webView.CoreWebView2.ExecuteScriptAsync("saveSettings('exit');");
+                        return;
+                    }
+                    settingsDirty = false;
+                }
+
+                proxyTestCancellationSource?.Cancel();
                 loginActionsTimer.Stop();
                 CloseLoginNotificationPopups();
                 Application.Exit();
@@ -704,6 +743,7 @@ namespace Steam_Desktop_Authenticator
 
         private void menuQuit_Click(object sender, EventArgs e)
         {
+            explicitExitRequested = true;
             Application.Exit();
         }
 
@@ -1041,6 +1081,7 @@ namespace Steam_Desktop_Authenticator
 
         private void trayQuit_Click(object sender, EventArgs e)
         {
+            explicitExitRequested = true;
             Application.Exit();
         }
 
@@ -1822,8 +1863,9 @@ namespace Steam_Desktop_Authenticator
         {
             try
             {
-                using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+                using (var client = ProxyService.CreateActiveHttpClient())
                 {
+                    client.Timeout = TimeSpan.FromSeconds(5);
                     string candidate = (await client.GetStringAsync("https://api.ipify.org")).Trim();
                     return IsValidIpv4Address(candidate) ? candidate : null;
                 }
@@ -1833,6 +1875,10 @@ namespace Steam_Desktop_Authenticator
                 return null;
             }
             catch (TaskCanceledException)
+            {
+                return null;
+            }
+            catch (InvalidOperationException)
             {
                 return null;
             }
@@ -2531,11 +2577,228 @@ namespace Steam_Desktop_Authenticator
             settings["loginActionAutoAllowIpEnabled"] = manifest.LoginActionAutoAllowIpEnabled;
             settings["loginActionAutoAllowCurrentDeviceIp"] = manifest.LoginActionAutoAllowCurrentDeviceIp;
             settings["loginActionAutoAllowIp"] = manifest.LoginActionAutoAllowIp;
+            settings["proxyEnabled"] = manifest.ProxyEnabled;
+            settings["proxyHost"] = manifest.ProxyHost;
+            settings["proxyPort"] = manifest.ProxyPort;
+            settings["proxyUsername"] = manifest.ProxyUsername;
+            settings["proxyHasPassword"] = !String.IsNullOrEmpty(manifest.ProxyPassword);
 
             webView.CoreWebView2.ExecuteScriptAsync($"loadSettings({settings.ToString(Newtonsoft.Json.Formatting.None)})");
         }
 
-        private void CoreWebView2_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        private async Task PublishProxyTestResultAsync(ProxyTestResult result)
+        {
+            if (webView == null || webView.CoreWebView2 == null || result == null)
+                return;
+            JObject payload = new JObject
+            {
+                ["succeeded"] = result.Succeeded,
+                ["message"] = result.Message ?? String.Empty,
+                ["exitIp"] = result.ExitIp
+            };
+            await webView.CoreWebView2.ExecuteScriptAsync($"proxyTestCompleted({payload.ToString(Newtonsoft.Json.Formatting.None)});");
+        }
+
+        private async Task PublishSettingsSaveFailureAsync(string message)
+        {
+            exitAfterSettingsSaveRequested = false;
+            if (webView == null || webView.CoreWebView2 == null)
+                return;
+            string jsMessage = JsonConvert.SerializeObject(message ?? "Settings were not saved.");
+            await webView.CoreWebView2.ExecuteScriptAsync($"settingsSaveFailed({jsMessage});");
+        }
+
+        private async Task TestProxyFromPayloadAsync(JObject payload)
+        {
+            proxyTestCancellationSource?.Cancel();
+            proxyTestCancellationSource?.Dispose();
+            proxyTestCancellationSource = new CancellationTokenSource();
+            CancellationToken token = proxyTestCancellationSource.Token;
+
+            if (!ProxyConfiguration.TryFromPayload(payload, manifest, true, out ProxyConfiguration configuration, out string error))
+            {
+                await PublishProxyTestResultAsync(new ProxyTestResult { Succeeded = false, Message = error });
+                return;
+            }
+
+            try
+            {
+                ProxyTestResult result = await ProxyService.TestAsync(configuration, token);
+                if (!token.IsCancellationRequested)
+                    await PublishProxyTestResultAsync(result);
+            }
+            catch (OperationCanceledException)
+            {
+                // Form shutdown or a newer test superseded this request.
+            }
+        }
+
+        private async Task SaveSettingsAsync(JObject payload)
+        {
+            if (settingsSaveInProgress || manifest == null)
+                return;
+
+            settingsSaveInProgress = true;
+            string saveContext = (string)payload["saveContext"] ?? String.Empty;
+            try
+            {
+                string newLoginActionMode = (string)payload["loginActionMode"] ?? LoginActionModes.Manual;
+                if (newLoginActionMode != LoginActionModes.Manual &&
+                    newLoginActionMode != LoginActionModes.ApprovePersistent &&
+                    newLoginActionMode != LoginActionModes.Deny)
+                {
+                    newLoginActionMode = LoginActionModes.Manual;
+                }
+
+                bool newLoginActionAutoAllowIpEnabled = (bool?)payload["loginActionAutoAllowIpEnabled"] ?? false;
+                bool newLoginActionAutoAllowCurrentDeviceIp = (bool?)payload["loginActionAutoAllowCurrentDeviceIp"] ?? false;
+                string newLoginActionAutoAllowIp = ((string)payload["loginActionAutoAllowIp"] ?? String.Empty).Trim();
+                if (newLoginActionMode != LoginActionModes.Deny)
+                {
+                    newLoginActionAutoAllowIpEnabled = false;
+                    newLoginActionAutoAllowCurrentDeviceIp = false;
+                }
+                else if (newLoginActionAutoAllowIpEnabled && !String.IsNullOrWhiteSpace(newLoginActionAutoAllowIp) && !IsValidIpv4Address(newLoginActionAutoAllowIp))
+                {
+                    await PublishSettingsSaveFailureAsync("Enter a valid additional public IPv4 address, or leave it blank to use only the current-device option.");
+                    return;
+                }
+                else if (!newLoginActionAutoAllowIpEnabled)
+                {
+                    newLoginActionAutoAllowCurrentDeviceIp = false;
+                }
+
+                if (!ProxyConfiguration.TryFromPayload(payload, manifest, false, out ProxyConfiguration proxyConfiguration, out string proxyError))
+                {
+                    await PublishSettingsSaveFailureAsync(proxyError);
+                    return;
+                }
+
+                if (proxyConfiguration.Enabled)
+                {
+                    proxyTestCancellationSource?.Cancel();
+                    proxyTestCancellationSource?.Dispose();
+                    proxyTestCancellationSource = new CancellationTokenSource();
+                    ProxyTestResult proxyResult;
+                    try
+                    {
+                        proxyResult = await ProxyService.TestAsync(proxyConfiguration, proxyTestCancellationSource.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        await PublishSettingsSaveFailureAsync("The proxy test was canceled. Settings were not saved.");
+                        return;
+                    }
+                    if (!proxyResult.Succeeded)
+                    {
+                        await PublishSettingsSaveFailureAsync(proxyResult.Message + " Settings were not saved.");
+                        return;
+                    }
+                    proxyTestCancellationSource.Token.ThrowIfCancellationRequested();
+                }
+
+                bool automaticDenyExceptionChanged = newLoginActionMode == LoginActionModes.Deny &&
+                    (newLoginActionAutoAllowIpEnabled != manifest.LoginActionAutoAllowIpEnabled ||
+                     newLoginActionAutoAllowCurrentDeviceIp != manifest.LoginActionAutoAllowCurrentDeviceIp ||
+                     !String.Equals(newLoginActionAutoAllowIp, manifest.LoginActionAutoAllowIp, StringComparison.Ordinal));
+                if ((newLoginActionMode != manifest.LoginActionMode && newLoginActionMode != LoginActionModes.Manual) || automaticDenyExceptionChanged)
+                {
+                    string actionDescription = newLoginActionMode == LoginActionModes.ApprovePersistent
+                        ? "automatically approve every pending login request with a persistent sign-in"
+                        : "automatically deny every pending login request";
+                    if (newLoginActionMode == LoginActionModes.Deny && newLoginActionAutoAllowIpEnabled)
+                    {
+                        var allowedSources = new List<string>();
+                        if (newLoginActionAutoAllowCurrentDeviceIp)
+                            allowedSources.Add("this device's current public IP address");
+                        if (!String.IsNullOrWhiteSpace(newLoginActionAutoAllowIp))
+                            allowedSources.Add(newLoginActionAutoAllowIp);
+                        if (allowedSources.Count > 0)
+                            actionDescription += ", except requests from " + String.Join(" or ", allowedSources) + ", which will be approved with a persistent sign-in";
+                    }
+                    DialogResult confirmation = AstroMessageBox.Show(
+                        "This setting will " + actionDescription + " for every managed account, including requests that are already pending. Login monitoring will remain enabled while this rule is active. Continue?",
+                        "Enable Automatic Login Action",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning);
+                    if (confirmation != DialogResult.Yes)
+                    {
+                        await PublishSettingsSaveFailureAsync("Settings were not saved.");
+                        return;
+                    }
+                }
+
+                bool tradeConfirmationCustomIntervalEnabled = (bool?)payload["tradeConfirmationCustomIntervalEnabled"] ?? false;
+                int tradeConfirmationCheckInterval = Math.Clamp((int?)payload["tradeConfirmationCheckInterval"] ?? 15, 3, 3600);
+                bool autoConfirmMarket = (bool?)payload["autoConfirmMarket"] ?? false;
+                bool autoConfirmTrades = (bool?)payload["autoConfirmTrades"] ?? false;
+                bool minimizeToTray = (bool?)payload["minimizeToTray"] ?? false;
+                bool diagnosticLogging = (bool?)payload["diagnosticErrorLoggingEnabled"] ?? false;
+                bool loginMonitoring = ((bool?)payload["loginActionMonitoringEnabled"] ?? false) || newLoginActionMode != LoginActionModes.Manual;
+
+                if (proxyConfiguration.Enabled)
+                    proxyTestCancellationSource.Token.ThrowIfCancellationRequested();
+
+                StorageResult saveResult = manifest.SaveSettingsWithResult(staged =>
+                {
+                    staged.TradeConfirmationCustomIntervalEnabled = tradeConfirmationCustomIntervalEnabled;
+                    staged.TradeConfirmationCheckInterval = tradeConfirmationCheckInterval;
+                    staged.AutoConfirmMarketTransactions = autoConfirmMarket;
+                    staged.AutoConfirmTrades = autoConfirmTrades;
+                    staged.MinimizeToTray = minimizeToTray;
+                    staged.DiagnosticErrorLoggingEnabled = diagnosticLogging;
+                    staged.LoginActionMonitoringEnabled = loginMonitoring;
+                    staged.LoginActionMode = newLoginActionMode;
+                    staged.LoginActionAutoAllowIpEnabled = newLoginActionAutoAllowIpEnabled;
+                    staged.LoginActionAutoAllowCurrentDeviceIp = newLoginActionAutoAllowCurrentDeviceIp;
+                    staged.LoginActionAutoAllowIp = newLoginActionAutoAllowIp;
+                    staged.ProxyEnabled = proxyConfiguration.Enabled;
+                    staged.ProxyHost = proxyConfiguration.Host;
+                    staged.ProxyPort = proxyConfiguration.Port;
+                    staged.ProxyUsername = proxyConfiguration.Username;
+                    staged.ProxyPassword = proxyConfiguration.Password;
+                });
+                if (!saveResult.Succeeded)
+                {
+                    DiagnosticErrorLogger.Log("Settings storage", saveResult.Exception, "Application settings could not be saved atomically.");
+                    await PublishSettingsSaveFailureAsync(saveResult.UserMessage ?? "The application settings could not be saved.");
+                    return;
+                }
+
+                ProxyService.Apply(proxyConfiguration);
+                DiagnosticErrorLogger.Configure(manifest.DiagnosticErrorLoggingEnabled);
+                ConfigureTradeConfirmationMonitor();
+                ConfigureLoginActionsMonitor();
+                settingsDirty = false;
+                SendSettingsToWebView();
+                string jsContext = JsonConvert.SerializeObject(saveContext);
+                await webView.CoreWebView2.ExecuteScriptAsync($"settingsSaved({jsContext});");
+
+                if (String.Equals(saveContext, "exit", StringComparison.Ordinal) || exitAfterSettingsSaveRequested)
+                {
+                    exitAfterSettingsSaveRequested = false;
+                    allowExitAfterSettingsSave = true;
+                    explicitExitRequested = true;
+                    BeginInvoke((MethodInvoker)Close);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                if (!IsDisposed && !Disposing)
+                    await PublishSettingsSaveFailureAsync("The proxy test was canceled. Settings were not saved.");
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Settings save", ex, "The settings save pipeline failed.");
+                await PublishSettingsSaveFailureAsync("The settings could not be saved. Check the entered values and try again.");
+            }
+            finally
+            {
+                settingsSaveInProgress = false;
+            }
+        }
+
+        private async void CoreWebView2_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             string message = e.WebMessageAsJson;
             if (string.IsNullOrEmpty(message)) return;
@@ -2617,82 +2880,20 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "save_settings")
             {
-                string newLoginActionMode = (string)payload["loginActionMode"] ?? LoginActionModes.Manual;
-                if (newLoginActionMode != LoginActionModes.Manual &&
-                    newLoginActionMode != LoginActionModes.ApprovePersistent &&
-                    newLoginActionMode != LoginActionModes.Deny)
-                {
-                    newLoginActionMode = LoginActionModes.Manual;
-                }
-
-                bool newLoginActionAutoAllowIpEnabled = (bool?)payload["loginActionAutoAllowIpEnabled"] ?? false;
-                bool newLoginActionAutoAllowCurrentDeviceIp = (bool?)payload["loginActionAutoAllowCurrentDeviceIp"] ?? false;
-                string newLoginActionAutoAllowIp = ((string)payload["loginActionAutoAllowIp"] ?? String.Empty).Trim();
-                if (newLoginActionMode != LoginActionModes.Deny)
-                {
-                    newLoginActionAutoAllowIpEnabled = false;
-                    newLoginActionAutoAllowCurrentDeviceIp = false;
-                }
-                else if (newLoginActionAutoAllowIpEnabled && !String.IsNullOrWhiteSpace(newLoginActionAutoAllowIp) && !IsValidIpv4Address(newLoginActionAutoAllowIp))
-                {
-                    AstroMessageBox.Show("Enter a valid additional public IPv4 address, or leave it blank to use only the current-device option.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    SendSettingsToWebView();
-                    return;
-                }
-                else if (!newLoginActionAutoAllowIpEnabled)
-                {
-                    newLoginActionAutoAllowCurrentDeviceIp = false;
-                }
-
-                bool automaticDenyExceptionChanged = newLoginActionMode == LoginActionModes.Deny &&
-                    (newLoginActionAutoAllowIpEnabled != manifest.LoginActionAutoAllowIpEnabled ||
-                     newLoginActionAutoAllowCurrentDeviceIp != manifest.LoginActionAutoAllowCurrentDeviceIp ||
-                     !String.Equals(newLoginActionAutoAllowIp, manifest.LoginActionAutoAllowIp, StringComparison.Ordinal));
-                if ((newLoginActionMode != manifest.LoginActionMode && newLoginActionMode != LoginActionModes.Manual) || automaticDenyExceptionChanged)
-                {
-                    string actionDescription = newLoginActionMode == LoginActionModes.ApprovePersistent
-                        ? "automatically approve every pending login request with a persistent sign-in"
-                        : "automatically deny every pending login request";
-                    if (newLoginActionMode == LoginActionModes.Deny && newLoginActionAutoAllowIpEnabled)
-                    {
-                        var allowedSources = new List<string>();
-                        if (newLoginActionAutoAllowCurrentDeviceIp)
-                            allowedSources.Add("this device's current public IP address");
-                        if (!String.IsNullOrWhiteSpace(newLoginActionAutoAllowIp))
-                            allowedSources.Add(newLoginActionAutoAllowIp);
-                        if (allowedSources.Count > 0)
-                            actionDescription += ", except requests from " + String.Join(" or ", allowedSources) + ", which will be approved with a persistent sign-in";
-                    }
-                    DialogResult confirmation = AstroMessageBox.Show(
-                        "This setting will " + actionDescription + " for every managed account, including requests that are already pending. Login monitoring will remain enabled while this rule is active. Continue?",
-                        "Enable Automatic Login Action",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Warning);
-                    if (confirmation != DialogResult.Yes)
-                    {
-                        SendSettingsToWebView();
-                        return;
-                    }
-                }
-
-                manifest.TradeConfirmationCustomIntervalEnabled = (bool?)payload["tradeConfirmationCustomIntervalEnabled"] ?? false;
-                manifest.TradeConfirmationCheckInterval = Math.Clamp((int?)payload["tradeConfirmationCheckInterval"] ?? 15, 3, 3600);
-                manifest.AutoConfirmMarketTransactions = (bool?)payload["autoConfirmMarket"] ?? false;
-                manifest.AutoConfirmTrades = (bool?)payload["autoConfirmTrades"] ?? false;
-                manifest.MinimizeToTray = (bool?)payload["minimizeToTray"] ?? false;
-                manifest.DiagnosticErrorLoggingEnabled = (bool?)payload["diagnosticErrorLoggingEnabled"] ?? false;
-                // Automatic rules require the dedicated monitor; manual mode can be monitored or disabled independently.
-                manifest.LoginActionMonitoringEnabled = ((bool?)payload["loginActionMonitoringEnabled"] ?? false) || newLoginActionMode != LoginActionModes.Manual;
-                manifest.LoginActionMode = newLoginActionMode;
-                manifest.LoginActionAutoAllowIpEnabled = newLoginActionAutoAllowIpEnabled;
-                manifest.LoginActionAutoAllowCurrentDeviceIp = newLoginActionAutoAllowCurrentDeviceIp;
-                manifest.LoginActionAutoAllowIp = newLoginActionAutoAllowIp;
-                manifest.Save();
-                DiagnosticErrorLogger.Configure(manifest.DiagnosticErrorLoggingEnabled);
-                ConfigureTradeConfirmationMonitor();
-                ConfigureLoginActionsMonitor();
+                await SaveSettingsAsync(payload);
+            }
+            else if (action == "test_proxy")
+            {
+                await TestProxyFromPayloadAsync(payload);
+            }
+            else if (action == "settings_dirty_changed")
+            {
+                settingsDirty = (bool?)payload["dirty"] ?? false;
+            }
+            else if (action == "discard_settings")
+            {
+                settingsDirty = false;
                 SendSettingsToWebView();
-                webView.CoreWebView2.ExecuteScriptAsync("settingsSaved()");
             }
             else if (action == "toggle_autostart")
             {
@@ -2733,7 +2934,7 @@ namespace Steam_Desktop_Authenticator
                 }
                 else
                 {
-                    webView.CoreWebView2.ExecuteScriptAsync("hideSpinner();");
+                    _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner();");
                 }
             }
             else if (action == "refresh_login_account")
@@ -2745,7 +2946,7 @@ namespace Steam_Desktop_Authenticator
                     PromptRefreshLogin(account);
                     loadAccountsList();
                 }
-                webView.CoreWebView2.ExecuteScriptAsync("hideSpinner();");
+                _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner();");
             }
             else if (action == "accept_trade" || action == "reject_trade")
             {
@@ -2753,7 +2954,7 @@ namespace Steam_Desktop_Authenticator
                 if (!String.IsNullOrWhiteSpace(confirmationKey))
                     _ = RespondToTradeConfirmationAsync(confirmationKey, action == "accept_trade");
                 else
-                    webView.CoreWebView2.ExecuteScriptAsync("hideSpinner()");
+                    _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner()");
             }
         }
 
