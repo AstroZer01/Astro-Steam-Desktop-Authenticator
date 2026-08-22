@@ -536,7 +536,8 @@ namespace Steam_Desktop_Authenticator
                 CancelProxyOperation();
                 loginActionsTimer.Stop();
                 CloseLoginNotificationPopups();
-                Application.Exit();
+                // Allow the original FormClosing event to complete. Calling Application.Exit()
+                // here re-enters shutdown and leaves the first close request unfulfilled.
             }
         }
 
