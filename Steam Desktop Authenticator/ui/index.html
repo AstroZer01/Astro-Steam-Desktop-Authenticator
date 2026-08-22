@@ -250,10 +250,10 @@
                         
                         <div class="grid grid-cols-2 gap-4 pl-8">
                             <div>
-                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-scheme">Proxy type</label>
+                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-scheme">Proxy connection type</label>
                                 <select class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-scheme">
-                                    <option value="http">HTTP</option>
-                                    <option value="https">HTTPS</option>
+                                    <option value="http">HTTP (most providers)</option>
+                                    <option value="https">HTTPS (encrypted proxy endpoint)</option>
                                 </select>
                             </div>
                             <div>
@@ -273,6 +273,7 @@
                                 <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-pass" type="password" autocomplete="new-password" placeholder="Optional"/>
                             </div>
                         </div>
+                        <p class="pl-8 text-xs text-on-surface-variant">Choose HTTP for standard HTTP(S)/CONNECT proxies. Choose HTTPS only when your provider says the proxy endpoint itself uses HTTPS.</p>
                         <label id="proxy-clear-password-row" class="hidden flex items-center gap-2 pl-8 text-xs text-on-surface-variant">
                             <input id="proxy-clear-password" class="rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" type="checkbox"/>
                             Clear saved proxy password

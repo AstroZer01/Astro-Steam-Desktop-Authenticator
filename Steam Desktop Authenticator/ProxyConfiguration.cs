@@ -202,6 +202,8 @@ namespace Steam_Desktop_Authenticator
 
     public static class ProxyService
     {
+        private const string SteamServerInfoUrl = "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/";
+        private const string ExitIpUrl = "https://api.ipify.org";
         private static readonly object configurationLock = new object();
         private static ProxyConfiguration activeConfiguration;
         private static bool steamTrafficBlocked;
@@ -278,8 +280,10 @@ namespace Steam_Desktop_Authenticator
                 timeoutSource.CancelAfter(TimeSpan.FromSeconds(10));
                 try
                 {
-                    using (HttpResponseMessage steamResponse = await client.GetAsync(
-                        "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/?format=json",
+                    using (HttpRequestMessage steamRequest = CreateProxyTestRequest(SteamServerInfoUrl))
+                    using (HttpResponseMessage steamResponse = await client.SendAsync(
+                        steamRequest,
+                        HttpCompletionOption.ResponseHeadersRead,
                         timeoutSource.Token))
                     {
                         if (steamResponse.StatusCode == HttpStatusCode.ProxyAuthenticationRequired)
@@ -303,9 +307,19 @@ namespace Steam_Desktop_Authenticator
                     string exitIp = null;
                     try
                     {
-                        string candidate = (await client.GetStringAsync("https://api.ipify.org", timeoutSource.Token)).Trim();
-                        if (IPAddress.TryParse(candidate, out _))
-                            exitIp = candidate;
+                        using (HttpRequestMessage exitIpRequest = CreateProxyTestRequest(ExitIpUrl))
+                        using (HttpResponseMessage exitIpResponse = await client.SendAsync(
+                            exitIpRequest,
+                            HttpCompletionOption.ResponseHeadersRead,
+                            timeoutSource.Token))
+                        {
+                            if (exitIpResponse.IsSuccessStatusCode)
+                            {
+                                string candidate = (await exitIpResponse.Content.ReadAsStringAsync()).Trim();
+                                if (IPAddress.TryParse(candidate, out _))
+                                    exitIp = candidate;
+                            }
+                        }
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
@@ -347,6 +361,21 @@ namespace Steam_Desktop_Authenticator
         private static ProxyTestResult Failure(string message)
         {
             return new ProxyTestResult { Succeeded = false, Message = message };
+        }
+
+        private static HttpRequestMessage CreateProxyTestRequest(string requestUri)
+        {
+            HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, requestUri)
+            {
+                // Some proxy gateways do not reliably pass HTTP/2 traffic through a CONNECT
+                // tunnel. Steam's endpoint supports HTTP/1.1, which is the most compatible
+                // protocol for checking a user-supplied proxy endpoint.
+                Version = HttpVersion.Version11,
+                VersionPolicy = HttpVersionPolicy.RequestVersionExact
+            };
+            request.Headers.Accept.ParseAdd("application/json");
+            request.Headers.ConnectionClose = true;
+            return request;
         }
     }
 }
