@@ -493,7 +493,8 @@ namespace Steam_Desktop_Authenticator
                         MessageBoxIcon.Warning,
                         "Save Changes",
                         "Leave Without Saving",
-                        "Cancel");
+                        "Cancel",
+                        true);
                     if (result == DialogResult.Cancel)
                     {
                         e.Cancel = true;

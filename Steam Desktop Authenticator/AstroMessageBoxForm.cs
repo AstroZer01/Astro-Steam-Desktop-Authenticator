@@ -12,20 +12,22 @@ namespace Steam_Desktop_Authenticator
         private readonly string primaryButtonText;
         private readonly string secondaryButtonText;
         private readonly string tertiaryButtonText;
+        private readonly bool centerContent;
         
         public DialogResult Result { get; private set; } = DialogResult.None;
         public bool IsChecked => chkOption != null && chkOption.Checked;
 
-        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null, string primaryButtonText = null, string secondaryButtonText = null, string tertiaryButtonText = null)
+        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null, string primaryButtonText = null, string secondaryButtonText = null, string tertiaryButtonText = null, bool centerContent = false)
         {
             this.primaryButtonText = primaryButtonText;
             this.secondaryButtonText = secondaryButtonText;
             this.tertiaryButtonText = tertiaryButtonText;
+            this.centerContent = centerContent;
             this.Text = caption;
             this.Size = new Size(520, 200);
             this.MinimumSize = new Size(520, 150);
             this.MaximumSize = new Size(700, 800);
-            this.AutoSize = true;
+            this.AutoSize = !centerContent;
             this.AutoSizeMode = AutoSizeMode.GrowOnly;
             this.StartPosition = FormStartPosition.CenterParent;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -38,12 +40,13 @@ namespace Steam_Desktop_Authenticator
             AstroTheme.ApplyDarkTitleBar(this);
 
             TableLayoutPanel layout = new TableLayoutPanel();
-            layout.AutoSize = true;
+            layout.AutoSize = !centerContent;
             layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             layout.Dock = DockStyle.Fill;
             layout.RowCount = string.IsNullOrEmpty(checkboxText) ? 2 : 3;
             layout.ColumnCount = 1;
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            layout.RowStyles.Add(new RowStyle(centerContent ? SizeType.Percent : SizeType.AutoSize, centerContent ? 100f : 0f));
             
             if (!string.IsNullOrEmpty(checkboxText))
             {
@@ -57,10 +60,10 @@ namespace Steam_Desktop_Authenticator
             lblMessage = new Label();
             lblMessage.Text = text;
             lblMessage.Dock = DockStyle.Fill;
-            lblMessage.TextAlign = ContentAlignment.MiddleLeft;
+            lblMessage.TextAlign = centerContent ? ContentAlignment.MiddleCenter : ContentAlignment.MiddleLeft;
             lblMessage.Font = new Font("Segoe UI", 10f, FontStyle.Regular);
-            lblMessage.AutoSize = true;
-            lblMessage.MaximumSize = new Size(470, 0); // Allow text wrapping
+            lblMessage.AutoSize = !centerContent;
+            lblMessage.MaximumSize = centerContent ? Size.Empty : new Size(470, 0); // Allow text wrapping
             layout.Controls.Add(lblMessage, 0, 0);
 
             int currentRow = 1;
@@ -78,7 +81,11 @@ namespace Steam_Desktop_Authenticator
             }
 
             buttonPanel = new FlowLayoutPanel();
-            buttonPanel.Dock = DockStyle.Fill;
+            buttonPanel.AutoSize = centerContent;
+            buttonPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            buttonPanel.Dock = centerContent ? DockStyle.None : DockStyle.Fill;
+            buttonPanel.Anchor = centerContent ? AnchorStyles.None : AnchorStyles.Top | AnchorStyles.Left;
+            buttonPanel.Margin = Padding.Empty;
             buttonPanel.FlowDirection = FlowDirection.RightToLeft;
             buttonPanel.WrapContents = false;
             buttonPanel.AutoScroll = false;
