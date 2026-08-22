@@ -291,7 +291,7 @@ namespace Steam_Desktop_Authenticator
                         if (!steamResponse.IsSuccessStatusCode)
                             return Failure("The proxy connected, but Steam returned HTTP " + (int)steamResponse.StatusCode + ".");
 
-                        string body = await steamResponse.Content.ReadAsStringAsync();
+                        string body = await steamResponse.Content.ReadAsStringAsync(timeoutSource.Token);
                         try
                         {
                             JObject steamPayload = JObject.Parse(body);
@@ -315,7 +315,7 @@ namespace Steam_Desktop_Authenticator
                         {
                             if (exitIpResponse.IsSuccessStatusCode)
                             {
-                                string candidate = (await exitIpResponse.Content.ReadAsStringAsync()).Trim();
+                                string candidate = (await exitIpResponse.Content.ReadAsStringAsync(timeoutSource.Token)).Trim();
                                 if (IPAddress.TryParse(candidate, out _))
                                     exitIp = candidate;
                             }
