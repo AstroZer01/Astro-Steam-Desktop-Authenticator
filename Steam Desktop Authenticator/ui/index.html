@@ -370,13 +370,13 @@
     let proxyHasStoredPassword = false;
     let proxyPasswordAction = 'keep';
     let settingsSavePending = false;
+    let unsavedSettingsPreviousFocus = null;
 
     function switchTab(tabId) {
         if (activeTabId === tabId) return;
         if (activeTabId === 'settings' && tabId !== 'settings' && settingsDirty) {
             pendingSettingsNavigation = tabId;
-            document.getElementById('unsaved-settings-modal').classList.remove('hidden');
-            document.getElementById('unsaved-settings-modal').classList.add('flex');
+            openUnsavedSettingsModal();
             return;
         }
         performTabSwitch(tabId);
@@ -1275,6 +1275,19 @@
         const modal = document.getElementById('unsaved-settings-modal');
         modal.classList.add('hidden');
         modal.classList.remove('flex');
+        const previousFocus = unsavedSettingsPreviousFocus;
+        unsavedSettingsPreviousFocus = null;
+        if (previousFocus && document.contains(previousFocus)) {
+            previousFocus.focus();
+        }
+    }
+
+    function openUnsavedSettingsModal() {
+        const modal = document.getElementById('unsaved-settings-modal');
+        unsavedSettingsPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+        requestAnimationFrame(() => document.getElementById('btn-cancel-settings-navigation').focus());
     }
 
     document.getElementById('btn-save-settings-navigation').addEventListener('click', () => {
@@ -1292,6 +1305,27 @@
     document.getElementById('btn-cancel-settings-navigation').addEventListener('click', () => {
         pendingSettingsNavigation = null;
         closeUnsavedSettingsModal();
+    });
+
+    document.getElementById('unsaved-settings-modal').addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            document.getElementById('btn-cancel-settings-navigation').click();
+            return;
+        }
+        if (event.key !== 'Tab') return;
+
+        const focusable = Array.from(event.currentTarget.querySelectorAll('button:not([disabled])'));
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
     });
 
     function loadSettings(settings) {
