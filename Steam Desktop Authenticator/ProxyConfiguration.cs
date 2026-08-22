@@ -149,7 +149,7 @@ namespace Steam_Desktop_Authenticator
                 return null;
 
             // HTTP and HTTPS proxies support HTTPS Steam endpoints through CONNECT tunneling.
-            WebProxy proxy = new WebProxy(new UriBuilder(Scheme, Host, Port).Uri)
+            WebProxy proxy = new WebProxy(new UriBuilder(Scheme, FormatUriHost(Host), Port).Uri)
             {
                 BypassProxyOnLocal = false,
                 UseDefaultCredentials = false
@@ -176,6 +176,13 @@ namespace Steam_Desktop_Authenticator
         {
             return String.Equals(scheme, Uri.UriSchemeHttp, StringComparison.Ordinal) ||
                 String.Equals(scheme, Uri.UriSchemeHttps, StringComparison.Ordinal);
+        }
+
+        private static string FormatUriHost(string host)
+        {
+            if (IPAddress.TryParse(host, out IPAddress address) && address.AddressFamily == AddressFamily.InterNetworkV6)
+                return "[" + address + "]";
+            return host;
         }
 
         private static bool IsValidHost(string host)
