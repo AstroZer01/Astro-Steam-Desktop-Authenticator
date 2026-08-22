@@ -48,18 +48,9 @@ namespace SteamAuth
     public sealed class HttpClientSteamWebTransport : ISteamWebTransport
     {
         private const int MaximumRedirects = 5;
-        private static readonly HttpClient sharedClient = new HttpClient(new HttpClientHandler
-        {
-            UseCookies = false,
-            AllowAutoRedirect = false
-        })
-        {
-            Timeout = Timeout.InfiniteTimeSpan
-        };
         private readonly HttpClient httpClient;
 
         public HttpClientSteamWebTransport()
-            : this(sharedClient)
         {
         }
 
@@ -97,8 +88,12 @@ namespace SteamAuth
                 content?.Dispose();
             }
 
+            using (SteamNetworkConfiguration.HttpClientLease clientLease = httpClient == null
+                ? SteamNetworkConfiguration.AcquireHttpClient()
+                : null)
             using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
+                HttpClient requestClient = httpClient ?? clientLease.Client;
                 timeoutSource.CancelAfter(timeout);
                 Uri requestUri = uri;
                 HttpMethod requestMethod = method;
@@ -116,7 +111,7 @@ namespace SteamAuth
                     {
                         try
                         {
-                            response = await httpClient.SendAsync(request, timeoutSource.Token).ConfigureAwait(false);
+                            response = await requestClient.SendAsync(request, timeoutSource.Token).ConfigureAwait(false);
                         }
                         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                         {

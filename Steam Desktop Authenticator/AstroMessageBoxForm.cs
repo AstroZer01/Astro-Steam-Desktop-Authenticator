@@ -11,20 +11,24 @@ namespace Steam_Desktop_Authenticator
         private CheckBox chkOption;
         private readonly string primaryButtonText;
         private readonly string secondaryButtonText;
+        private readonly string tertiaryButtonText;
+        private readonly bool centerContent;
         
         public DialogResult Result { get; private set; } = DialogResult.None;
         public bool IsChecked => chkOption != null && chkOption.Checked;
 
-        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null, string primaryButtonText = null, string secondaryButtonText = null)
+        public AstroMessageBoxForm(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, string checkboxText = null, string primaryButtonText = null, string secondaryButtonText = null, string tertiaryButtonText = null, bool centerContent = false)
         {
             this.primaryButtonText = primaryButtonText;
             this.secondaryButtonText = secondaryButtonText;
+            this.tertiaryButtonText = tertiaryButtonText;
+            this.centerContent = centerContent;
             this.Text = caption;
-            this.Size = new Size(400, 200);
-            this.MinimumSize = new Size(400, 150);
-            this.MaximumSize = new Size(600, 800);
-            this.AutoSize = true;
-            this.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            this.Size = new Size(520, 200);
+            this.MinimumSize = new Size(520, 150);
+            this.MaximumSize = new Size(700, 800);
+            this.AutoSize = !centerContent;
+            this.AutoSizeMode = AutoSizeMode.GrowOnly;
             this.StartPosition = FormStartPosition.CenterParent;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -36,29 +40,30 @@ namespace Steam_Desktop_Authenticator
             AstroTheme.ApplyDarkTitleBar(this);
 
             TableLayoutPanel layout = new TableLayoutPanel();
-            layout.AutoSize = true;
+            layout.AutoSize = !centerContent;
             layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             layout.Dock = DockStyle.Fill;
             layout.RowCount = string.IsNullOrEmpty(checkboxText) ? 2 : 3;
             layout.ColumnCount = 1;
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            layout.RowStyles.Add(new RowStyle(centerContent ? SizeType.Percent : SizeType.AutoSize, centerContent ? 100f : 0f));
             
             if (!string.IsNullOrEmpty(checkboxText))
             {
                 layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             }
             
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50f));
+            layout.RowStyles.Add(new RowStyle(centerContent ? SizeType.AutoSize : SizeType.Absolute, centerContent ? 0f : 50f));
             layout.Padding = new Padding(15);
             this.Controls.Add(layout);
 
             lblMessage = new Label();
             lblMessage.Text = text;
             lblMessage.Dock = DockStyle.Fill;
-            lblMessage.TextAlign = ContentAlignment.MiddleLeft;
+            lblMessage.TextAlign = centerContent ? ContentAlignment.MiddleCenter : ContentAlignment.MiddleLeft;
             lblMessage.Font = new Font("Segoe UI", 10f, FontStyle.Regular);
-            lblMessage.AutoSize = true;
-            lblMessage.MaximumSize = new Size(350, 0); // Allow text wrapping
+            lblMessage.AutoSize = !centerContent;
+            lblMessage.MaximumSize = centerContent ? Size.Empty : new Size(470, 0); // Allow text wrapping
             layout.Controls.Add(lblMessage, 0, 0);
 
             int currentRow = 1;
@@ -76,13 +81,20 @@ namespace Steam_Desktop_Authenticator
             }
 
             buttonPanel = new FlowLayoutPanel();
-            buttonPanel.Dock = DockStyle.Fill;
+            buttonPanel.AutoSize = centerContent;
+            buttonPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            buttonPanel.Dock = centerContent ? DockStyle.None : DockStyle.Fill;
+            buttonPanel.Anchor = centerContent ? AnchorStyles.None : AnchorStyles.Top | AnchorStyles.Left;
+            buttonPanel.Margin = Padding.Empty;
+            buttonPanel.MaximumSize = new Size(MaximumSize.Width - layout.Padding.Horizontal, 0);
             buttonPanel.FlowDirection = FlowDirection.RightToLeft;
-            buttonPanel.WrapContents = false;
+            buttonPanel.WrapContents = true;
             buttonPanel.AutoScroll = true;
             layout.Controls.Add(buttonPanel, 0, currentRow);
 
             SetupButtons(buttons);
+            if (centerContent)
+                SizeCenteredDialog(layout);
         }
 
         private void SetupButtons(MessageBoxButtons buttons)
@@ -93,17 +105,17 @@ namespace Steam_Desktop_Authenticator
                     AddButton("OK", DialogResult.OK, true);
                     break;
                 case MessageBoxButtons.OKCancel:
-                    AddButton(secondaryButtonText ?? "Cancel", DialogResult.Cancel, false);
-                    AddButton(primaryButtonText ?? "OK", DialogResult.OK, true);
+                    AddButton(CustomLabelOrDefault(secondaryButtonText, "Cancel"), DialogResult.Cancel, false);
+                    AddButton(CustomLabelOrDefault(primaryButtonText, "OK"), DialogResult.OK, true);
                     break;
                 case MessageBoxButtons.YesNo:
                     AddButton("No", DialogResult.No, false);
                     AddButton("Yes", DialogResult.Yes, true);
                     break;
                 case MessageBoxButtons.YesNoCancel:
-                    AddButton("Cancel", DialogResult.Cancel, false);
-                    AddButton("No", DialogResult.No, false);
-                    AddButton("Yes", DialogResult.Yes, true);
+                    AddButton(CustomLabelOrDefault(tertiaryButtonText, "Cancel"), DialogResult.Cancel, false);
+                    AddButton(CustomLabelOrDefault(secondaryButtonText, "No"), DialogResult.No, false);
+                    AddButton(CustomLabelOrDefault(primaryButtonText, "Yes"), DialogResult.Yes, true);
                     break;
                 case MessageBoxButtons.RetryCancel:
                     AddButton("Cancel", DialogResult.Cancel, false);
@@ -117,6 +129,11 @@ namespace Steam_Desktop_Authenticator
                 default:
                     throw new ArgumentOutOfRangeException(nameof(buttons), buttons, "The dialog button set is not supported.");
             }
+        }
+
+        private static string CustomLabelOrDefault(string label, string fallback)
+        {
+            return String.IsNullOrWhiteSpace(label) ? fallback : label;
         }
 
         private void AddButton(string text, DialogResult result, bool isPrimary)
@@ -155,11 +172,29 @@ namespace Steam_Desktop_Authenticator
             foreach (Control control in buttonPanel.Controls)
                 requiredPanelWidth += control.Width + control.Margin.Horizontal;
 
-            int requiredDialogWidth = Math.Min(MaximumSize.Width, Math.Max(Width, requiredPanelWidth + 50));
+            int requiredDialogWidth = Math.Min(MaximumSize.Width, Math.Max(Width, requiredPanelWidth + 70));
             if (Width < requiredDialogWidth)
                 Width = requiredDialogWidth;
 
-            buttonPanel.AutoScroll = requiredPanelWidth + 30 > ClientSize.Width;
+            if (MinimumSize.Width < requiredDialogWidth)
+                MinimumSize = new Size(requiredDialogWidth, MinimumSize.Height);
+        }
+
+        private void SizeCenteredDialog(TableLayoutPanel layout)
+        {
+            layout.PerformLayout();
+
+            int availableMessageWidth = Math.Max(1, layout.GetColumnWidths()[0]);
+            int messageHeight = lblMessage.GetPreferredSize(new Size(availableMessageWidth, 0)).Height;
+            int checkboxHeight = chkOption == null
+                ? 0
+                : chkOption.GetPreferredSize(new Size(availableMessageWidth, 0)).Height + chkOption.Margin.Vertical;
+            int buttonHeight = Math.Max(50, buttonPanel.Height + buttonPanel.Margin.Vertical);
+            int desiredClientHeight = layout.Padding.Vertical + messageHeight + checkboxHeight + buttonHeight;
+            int desiredHeight = SizeFromClientSize(new Size(ClientSize.Width, desiredClientHeight)).Height;
+
+            Height = Math.Max(MinimumSize.Height, Math.Min(MaximumSize.Height, desiredHeight));
+            layout.PerformLayout();
         }
     }
 }

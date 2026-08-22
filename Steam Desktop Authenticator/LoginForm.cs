@@ -208,7 +208,17 @@ namespace Steam_Desktop_Authenticator
             CancellationToken cancellationToken = loginCancellationSource.Token;
 
             // Start a new SteamClient instance and bound the connection wait.
-            SteamClient steamClient = new SteamClient();
+            SteamClient steamClient;
+            try
+            {
+                steamClient = new SteamClient(ProxyService.CreateSteamKitConfiguration());
+            }
+            catch (InvalidOperationException ex)
+            {
+                AstroMessageBox.Show(ex.Message, "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ResetLoginButton(cancellationToken);
+                return;
+            }
             activeSteamClient = steamClient;
             try
             {

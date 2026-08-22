@@ -71,6 +71,24 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("login_action_auto_allow_ip")]
         public string LoginActionAutoAllowIp { get; set; } = String.Empty;
 
+        [JsonProperty("proxy_enabled")]
+        public bool ProxyEnabled { get; set; } = false;
+
+        [JsonProperty("proxy_scheme")]
+        public string ProxyScheme { get; set; } = "http";
+
+        [JsonProperty("proxy_host")]
+        public string ProxyHost { get; set; } = String.Empty;
+
+        [JsonProperty("proxy_port")]
+        public int ProxyPort { get; set; } = 0;
+
+        [JsonProperty("proxy_username")]
+        public string ProxyUsername { get; set; } = String.Empty;
+
+        [JsonProperty("proxy_password")]
+        public string ProxyPassword { get; set; } = String.Empty;
+
         private static Manifest _manifest { get; set; }
         private static readonly object storageLock = new object();
         private const string StorageJournalFilename = ".asda-storage-transaction.json";
@@ -172,6 +190,12 @@ namespace Steam_Desktop_Authenticator
             newManifest.LoginActionAutoAllowIpEnabled = false;
             newManifest.LoginActionAutoAllowCurrentDeviceIp = false;
             newManifest.LoginActionAutoAllowIp = String.Empty;
+            newManifest.ProxyEnabled = false;
+            newManifest.ProxyScheme = "http";
+            newManifest.ProxyHost = String.Empty;
+            newManifest.ProxyPort = 0;
+            newManifest.ProxyUsername = String.Empty;
+            newManifest.ProxyPassword = String.Empty;
             newManifest.Entries = new List<ManifestEntry>();
             newManifest.FirstRun = true;
 
@@ -645,6 +669,34 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        public StorageResult SaveSettingsWithResult(Action<Manifest> updateSettings)
+        {
+            if (updateSettings == null)
+                throw new ArgumentNullException(nameof(updateSettings));
+
+            lock (storageLock)
+            {
+                Manifest staged;
+                try
+                {
+                    staged = CloneForStorage();
+                    updateSettings(staged);
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(
+                        StorageFailureKind.Validation,
+                        "The updated settings are invalid and were not saved.",
+                        ex);
+                }
+
+                StorageResult result = staged.SaveWithResult();
+                if (result.Succeeded)
+                    staged.CopySettingsInto(this);
+                return result;
+            }
+        }
+
         private Manifest CloneForStorage()
         {
             Manifest clone = JsonConvert.DeserializeObject<Manifest>(JsonConvert.SerializeObject(this));
@@ -676,6 +728,12 @@ namespace Steam_Desktop_Authenticator
             destination.LoginActionAutoAllowIpEnabled = LoginActionAutoAllowIpEnabled;
             destination.LoginActionAutoAllowCurrentDeviceIp = LoginActionAutoAllowCurrentDeviceIp;
             destination.LoginActionAutoAllowIp = LoginActionAutoAllowIp;
+            destination.ProxyEnabled = ProxyEnabled;
+            destination.ProxyScheme = ProxyScheme;
+            destination.ProxyHost = ProxyHost;
+            destination.ProxyPort = ProxyPort;
+            destination.ProxyUsername = ProxyUsername;
+            destination.ProxyPassword = ProxyPassword;
         }
 
         private StorageResult CommitStorageTransaction(

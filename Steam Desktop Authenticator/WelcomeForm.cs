@@ -116,6 +116,14 @@ namespace Steam_Desktop_Authenticator
 
         private void showMainForm()
         {
+            if (!ProxyService.ApplySavedConfiguration(man, out string proxyError))
+            {
+                AstroMessageBox.Show(
+                    "Steam networking has been blocked because the saved proxy settings are invalid. Open Settings and correct or disable the proxy.\n\n" + proxyError,
+                    "Proxy Settings",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
             this.Hide();
             new MainForm().Show();
         }
