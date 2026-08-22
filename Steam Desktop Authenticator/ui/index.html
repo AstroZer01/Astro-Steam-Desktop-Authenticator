@@ -250,7 +250,14 @@
                         
                         <div class="grid grid-cols-2 gap-4 pl-8">
                             <div>
-                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-host">HTTP proxy host</label>
+                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-scheme">Proxy type</label>
+                                <select class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-scheme">
+                                    <option value="http">HTTP</option>
+                                    <option value="https">HTTPS</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-host">Host</label>
                                 <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-host" type="text" autocomplete="off" placeholder="127.0.0.1"/>
                             </div>
                             <div>
@@ -1165,7 +1172,7 @@
         'diagnostic-error-logging-enabled', 'login-action-monitoring-enabled',
         'login-action-mode', 'login-action-auto-allow-ip-enabled',
         'login-action-auto-allow-current-device-ip', 'login-action-auto-allow-ip',
-        'enable-proxy', 'proxy-host', 'proxy-port', 'proxy-user', 'proxy-pass',
+        'enable-proxy', 'proxy-scheme', 'proxy-host', 'proxy-port', 'proxy-user', 'proxy-pass',
         'proxy-clear-password'
     ];
 
@@ -1185,6 +1192,7 @@
             loginActionAutoAllowCurrentDeviceIp: document.getElementById('login-action-auto-allow-current-device-ip').checked,
             loginActionAutoAllowIp: document.getElementById('login-action-auto-allow-ip').value.trim(),
             proxyEnabled: document.getElementById('enable-proxy').checked,
+            proxyScheme: document.getElementById('proxy-scheme').value,
             proxyHost: document.getElementById('proxy-host').value.trim(),
             proxyPort: parseInt(document.getElementById('proxy-port').value, 10) || 0,
             proxyUsername: document.getElementById('proxy-user').value.trim(),
@@ -1216,6 +1224,7 @@
         settingsSavePending = true;
         document.getElementById('btn-save-settings').disabled = true;
         document.getElementById('btn-save-settings-navigation').disabled = true;
+        document.getElementById('btn-test-proxy').disabled = true;
         const saveStatus = document.getElementById('settings-save-status');
         saveStatus.classList.add('hidden');
         saveStatus.innerText = '';
@@ -1342,6 +1351,7 @@
         document.getElementById('login-action-auto-allow-current-device-ip').checked = !!settings.loginActionAutoAllowCurrentDeviceIp;
         document.getElementById('login-action-auto-allow-ip').value = settings.loginActionAutoAllowIp || '';
         document.getElementById('enable-proxy').checked = !!settings.proxyEnabled;
+        document.getElementById('proxy-scheme').value = settings.proxyScheme === 'https' ? 'https' : 'http';
         document.getElementById('proxy-host').value = settings.proxyHost || '';
         document.getElementById('proxy-port').value = settings.proxyPort || '';
         document.getElementById('proxy-user').value = settings.proxyUsername || '';

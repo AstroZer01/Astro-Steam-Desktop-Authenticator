@@ -22,11 +22,11 @@ namespace Steam_Desktop_Authenticator
             this.secondaryButtonText = secondaryButtonText;
             this.tertiaryButtonText = tertiaryButtonText;
             this.Text = caption;
-            this.Size = new Size(400, 200);
-            this.MinimumSize = new Size(400, 150);
-            this.MaximumSize = new Size(600, 800);
+            this.Size = new Size(520, 200);
+            this.MinimumSize = new Size(520, 150);
+            this.MaximumSize = new Size(700, 800);
             this.AutoSize = true;
-            this.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            this.AutoSizeMode = AutoSizeMode.GrowOnly;
             this.StartPosition = FormStartPosition.CenterParent;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -60,7 +60,7 @@ namespace Steam_Desktop_Authenticator
             lblMessage.TextAlign = ContentAlignment.MiddleLeft;
             lblMessage.Font = new Font("Segoe UI", 10f, FontStyle.Regular);
             lblMessage.AutoSize = true;
-            lblMessage.MaximumSize = new Size(350, 0); // Allow text wrapping
+            lblMessage.MaximumSize = new Size(470, 0); // Allow text wrapping
             layout.Controls.Add(lblMessage, 0, 0);
 
             int currentRow = 1;
@@ -81,7 +81,7 @@ namespace Steam_Desktop_Authenticator
             buttonPanel.Dock = DockStyle.Fill;
             buttonPanel.FlowDirection = FlowDirection.RightToLeft;
             buttonPanel.WrapContents = false;
-            buttonPanel.AutoScroll = true;
+            buttonPanel.AutoScroll = false;
             layout.Controls.Add(buttonPanel, 0, currentRow);
 
             SetupButtons(buttons);
@@ -95,17 +95,17 @@ namespace Steam_Desktop_Authenticator
                     AddButton("OK", DialogResult.OK, true);
                     break;
                 case MessageBoxButtons.OKCancel:
-                    AddButton(secondaryButtonText ?? "Cancel", DialogResult.Cancel, false);
-                    AddButton(primaryButtonText ?? "OK", DialogResult.OK, true);
+                    AddButton(CustomLabelOrDefault(secondaryButtonText, "Cancel"), DialogResult.Cancel, false);
+                    AddButton(CustomLabelOrDefault(primaryButtonText, "OK"), DialogResult.OK, true);
                     break;
                 case MessageBoxButtons.YesNo:
                     AddButton("No", DialogResult.No, false);
                     AddButton("Yes", DialogResult.Yes, true);
                     break;
                 case MessageBoxButtons.YesNoCancel:
-                    AddButton(tertiaryButtonText ?? "Cancel", DialogResult.Cancel, false);
-                    AddButton(secondaryButtonText ?? "No", DialogResult.No, false);
-                    AddButton(primaryButtonText ?? "Yes", DialogResult.Yes, true);
+                    AddButton(CustomLabelOrDefault(tertiaryButtonText, "Cancel"), DialogResult.Cancel, false);
+                    AddButton(CustomLabelOrDefault(secondaryButtonText, "No"), DialogResult.No, false);
+                    AddButton(CustomLabelOrDefault(primaryButtonText, "Yes"), DialogResult.Yes, true);
                     break;
                 case MessageBoxButtons.RetryCancel:
                     AddButton("Cancel", DialogResult.Cancel, false);
@@ -119,6 +119,11 @@ namespace Steam_Desktop_Authenticator
                 default:
                     throw new ArgumentOutOfRangeException(nameof(buttons), buttons, "The dialog button set is not supported.");
             }
+        }
+
+        private static string CustomLabelOrDefault(string label, string fallback)
+        {
+            return String.IsNullOrWhiteSpace(label) ? fallback : label;
         }
 
         private void AddButton(string text, DialogResult result, bool isPrimary)
@@ -157,11 +162,12 @@ namespace Steam_Desktop_Authenticator
             foreach (Control control in buttonPanel.Controls)
                 requiredPanelWidth += control.Width + control.Margin.Horizontal;
 
-            int requiredDialogWidth = Math.Min(MaximumSize.Width, Math.Max(Width, requiredPanelWidth + 50));
+            int requiredDialogWidth = Math.Min(MaximumSize.Width, Math.Max(Width, requiredPanelWidth + 70));
             if (Width < requiredDialogWidth)
                 Width = requiredDialogWidth;
 
-            buttonPanel.AutoScroll = requiredPanelWidth + 30 > ClientSize.Width;
+            if (MinimumSize.Width < requiredDialogWidth)
+                MinimumSize = new Size(requiredDialogWidth, MinimumSize.Height);
         }
     }
 }

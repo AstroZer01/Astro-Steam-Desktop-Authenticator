@@ -507,8 +507,26 @@ namespace Steam_Desktop_Authenticator
                         explicitExitRequested = false;
                         exitAfterSettingsSaveRequested = true;
                         RestoreWindowFromActivation();
-                        if (!settingsSaveInProgress && webView != null && webView.CoreWebView2 != null)
+                        if (settingsSaveInProgress)
+                        {
+                            AstroMessageBox.Show(
+                                "Settings are already being saved. The app will exit after that save succeeds.",
+                                "Saving Settings",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Information);
+                        }
+                        else if (webView != null && webView.CoreWebView2 != null)
+                        {
                             _ = webView.CoreWebView2.ExecuteScriptAsync("saveSettings('exit');");
+                        }
+                        else
+                        {
+                            AstroMessageBox.Show(
+                                "Settings cannot be saved until the Settings page is available. The app will stay open.",
+                                "Saving Settings",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Warning);
+                        }
                         return;
                     }
                     settingsDirty = false;
@@ -2578,6 +2596,7 @@ namespace Steam_Desktop_Authenticator
             settings["loginActionAutoAllowCurrentDeviceIp"] = manifest.LoginActionAutoAllowCurrentDeviceIp;
             settings["loginActionAutoAllowIp"] = manifest.LoginActionAutoAllowIp;
             settings["proxyEnabled"] = manifest.ProxyEnabled;
+            settings["proxyScheme"] = manifest.ProxyScheme;
             settings["proxyHost"] = manifest.ProxyHost;
             settings["proxyPort"] = manifest.ProxyPort;
             settings["proxyUsername"] = manifest.ProxyUsername;
@@ -2794,6 +2813,7 @@ namespace Steam_Desktop_Authenticator
                     staged.LoginActionAutoAllowCurrentDeviceIp = newLoginActionAutoAllowCurrentDeviceIp;
                     staged.LoginActionAutoAllowIp = newLoginActionAutoAllowIp;
                     staged.ProxyEnabled = proxyConfiguration.Enabled;
+                    staged.ProxyScheme = proxyConfiguration.Scheme;
                     staged.ProxyHost = proxyConfiguration.Host;
                     staged.ProxyPort = proxyConfiguration.Port;
                     staged.ProxyUsername = proxyConfiguration.Username;
@@ -2813,7 +2833,8 @@ namespace Steam_Desktop_Authenticator
                 settingsDirty = false;
                 SendSettingsToWebView();
                 string jsContext = JsonConvert.SerializeObject(saveContext);
-                await webView.CoreWebView2.ExecuteScriptAsync($"settingsSaved({jsContext});");
+                if (webView != null && webView.CoreWebView2 != null)
+                    await webView.CoreWebView2.ExecuteScriptAsync($"settingsSaved({jsContext});");
 
                 if (String.Equals(saveContext, "exit", StringComparison.Ordinal) || exitAfterSettingsSaveRequested)
                 {

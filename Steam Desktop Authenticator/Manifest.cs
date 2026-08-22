@@ -74,6 +74,9 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("proxy_enabled")]
         public bool ProxyEnabled { get; set; } = false;
 
+        [JsonProperty("proxy_scheme")]
+        public string ProxyScheme { get; set; } = "http";
+
         [JsonProperty("proxy_host")]
         public string ProxyHost { get; set; } = String.Empty;
 
@@ -188,6 +191,7 @@ namespace Steam_Desktop_Authenticator
             newManifest.LoginActionAutoAllowCurrentDeviceIp = false;
             newManifest.LoginActionAutoAllowIp = String.Empty;
             newManifest.ProxyEnabled = false;
+            newManifest.ProxyScheme = "http";
             newManifest.ProxyHost = String.Empty;
             newManifest.ProxyPort = 0;
             newManifest.ProxyUsername = String.Empty;
@@ -725,6 +729,7 @@ namespace Steam_Desktop_Authenticator
             destination.LoginActionAutoAllowCurrentDeviceIp = LoginActionAutoAllowCurrentDeviceIp;
             destination.LoginActionAutoAllowIp = LoginActionAutoAllowIp;
             destination.ProxyEnabled = ProxyEnabled;
+            destination.ProxyScheme = ProxyScheme;
             destination.ProxyHost = ProxyHost;
             destination.ProxyPort = ProxyPort;
             destination.ProxyUsername = ProxyUsername;

@@ -17,9 +17,10 @@ namespace Steam_Desktop_Authenticator
         private const string PasswordReplace = "replace";
         private const string PasswordClear = "clear";
 
-        private ProxyConfiguration(bool enabled, string host, int port, string username, string password)
+        private ProxyConfiguration(bool enabled, string scheme, string host, int port, string username, string password)
         {
             Enabled = enabled;
+            Scheme = scheme;
             Host = host;
             Port = port;
             Username = username;
@@ -27,6 +28,7 @@ namespace Steam_Desktop_Authenticator
         }
 
         public bool Enabled { get; }
+        public string Scheme { get; }
         public string Host { get; }
         public int Port { get; }
         public string Username { get; }
@@ -43,11 +45,17 @@ namespace Steam_Desktop_Authenticator
             }
 
             bool enabled = (bool?)payload["proxyEnabled"] ?? false;
+            string scheme = NormalizeScheme((string)payload["proxyScheme"]);
             string host = NormalizeHost((string)payload["proxyHost"]);
             int port = 0;
             JToken portToken = payload["proxyPort"];
-            if (portToken != null && portToken.Type != JTokenType.Null)
-                Int32.TryParse(portToken.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out port);
+            if (portToken != null && portToken.Type != JTokenType.Null &&
+                !String.IsNullOrWhiteSpace(portToken.ToString()) &&
+                !Int32.TryParse(portToken.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out port))
+            {
+                error = "Enter a proxy port between 1 and 65535.";
+                return false;
+            }
             string username = ((string)payload["proxyUsername"] ?? String.Empty).Trim();
             string passwordAction = ((string)payload["proxyPasswordAction"] ?? PasswordKeep).Trim().ToLowerInvariant();
             string password;
@@ -69,6 +77,11 @@ namespace Steam_Desktop_Authenticator
 
             if (requireEndpoint || enabled)
             {
+                if (!IsSupportedScheme(scheme))
+                {
+                    error = "Select HTTP or HTTPS for the proxy type.";
+                    return false;
+                }
                 if (String.IsNullOrWhiteSpace(host))
                 {
                     error = "Enter a proxy host.";
@@ -81,7 +94,7 @@ namespace Steam_Desktop_Authenticator
                 }
                 if (!IsValidHost(host))
                 {
-                    error = "Enter a valid HTTP proxy hostname or IP address without a URL scheme or path.";
+                    error = "Enter a valid proxy hostname or IP address without a URL scheme or path.";
                     return false;
                 }
             }
@@ -92,7 +105,7 @@ namespace Steam_Desktop_Authenticator
                 return false;
             }
 
-            configuration = new ProxyConfiguration(enabled, host, port, username, password);
+            configuration = new ProxyConfiguration(enabled, scheme, host, port, username, password);
             return true;
         }
 
@@ -109,6 +122,7 @@ namespace Steam_Desktop_Authenticator
             {
                 configuration = new ProxyConfiguration(
                     false,
+                    NormalizeScheme(manifest.ProxyScheme),
                     NormalizeHost(manifest.ProxyHost),
                     manifest.ProxyPort,
                     (manifest.ProxyUsername ?? String.Empty).Trim(),
@@ -120,6 +134,7 @@ namespace Steam_Desktop_Authenticator
             JObject payload = new JObject
             {
                 ["proxyEnabled"] = manifest.ProxyEnabled,
+                ["proxyScheme"] = manifest.ProxyScheme,
                 ["proxyHost"] = manifest.ProxyHost,
                 ["proxyPort"] = manifest.ProxyPort,
                 ["proxyUsername"] = manifest.ProxyUsername,
@@ -133,8 +148,8 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrWhiteSpace(Host) || Port < 1)
                 return null;
 
-            // HTTP proxies support HTTPS Steam endpoints through CONNECT tunneling.
-            WebProxy proxy = new WebProxy(new UriBuilder(Uri.UriSchemeHttp, Host, Port).Uri)
+            // HTTP and HTTPS proxies support HTTPS Steam endpoints through CONNECT tunneling.
+            WebProxy proxy = new WebProxy(new UriBuilder(Scheme, Host, Port).Uri)
             {
                 BypassProxyOnLocal = false,
                 UseDefaultCredentials = false
@@ -150,6 +165,17 @@ namespace Steam_Desktop_Authenticator
             if (host.Length > 1 && host[0] == '[' && host[host.Length - 1] == ']')
                 host = host.Substring(1, host.Length - 2);
             return host;
+        }
+
+        private static string NormalizeScheme(string value)
+        {
+            return String.IsNullOrWhiteSpace(value) ? Uri.UriSchemeHttp : value.Trim().ToLowerInvariant();
+        }
+
+        private static bool IsSupportedScheme(string scheme)
+        {
+            return String.Equals(scheme, Uri.UriSchemeHttp, StringComparison.Ordinal) ||
+                String.Equals(scheme, Uri.UriSchemeHttps, StringComparison.Ordinal);
         }
 
         private static bool IsValidHost(string host)
@@ -246,7 +272,7 @@ namespace Steam_Desktop_Authenticator
                 try
                 {
                     using (HttpResponseMessage steamResponse = await client.GetAsync(
-                        "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/",
+                        "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/?format=json",
                         timeoutSource.Token))
                     {
                         if (steamResponse.StatusCode == HttpStatusCode.ProxyAuthenticationRequired)
@@ -302,7 +328,7 @@ namespace Steam_Desktop_Authenticator
                 }
                 catch (HttpRequestException)
                 {
-                    return Failure("Could not connect to Steam through this proxy. Check the proxy details and try again.");
+                    return Failure("Could not connect to Steam through this proxy. Check the proxy type, host, port, and credentials.");
                 }
                 catch (SocketException)
                 {
