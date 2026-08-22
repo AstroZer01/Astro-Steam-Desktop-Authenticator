@@ -37,6 +37,7 @@ All credit for the original design and implementation goes to Jessecar96 and the
 - **Phone-free authenticator setup** — add an authenticator without entering a phone number when Steam allows it. If Steam requires phone verification for the account, the app clearly guides you through the email and SMS steps instead.
 - **Trade confirmations** — review and accept or decline pending confirmations across managed accounts.
 - **Login approvals** — review Steam login requests with device and location details, then approve or deny them manually. Optional account-wide rules can automatically approve persistent sign-ins or deny requests, with IP allowlisting controls.
+- **Proxy Support** — Use proxy when communicating with steam.
 - **Desktop notifications** — receive Windows notifications for pending trade confirmations and login requests, with navigation back to the relevant view.
 
 ## Version 1.1.2 Highlights
@@ -168,7 +169,6 @@ The hook runs only when staged UI templates, the Tailwind configuration, or the 
 
 #### In Progress / Remaining
 - [ ] API endpoint for trading automation
-- [ ] Proxy support backend implementation.
 
 ## Disclaimer
 We provide no warranty for using this tool. You use this program at your own risk, and accept the responsibility to make backups of your `maFiles` (which contain your 2FA secrets) and prevent unauthorized access to your computer.
