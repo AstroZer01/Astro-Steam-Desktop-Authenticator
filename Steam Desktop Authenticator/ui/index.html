@@ -250,7 +250,7 @@
                         
                         <div class="grid grid-cols-2 gap-4 pl-8">
                             <div>
-                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-host">Host</label>
+                                <label class="block text-xs text-on-surface-variant mb-1" for="proxy-host">HTTP proxy host</label>
                                 <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-host" type="text" autocomplete="off" placeholder="127.0.0.1"/>
                             </div>
                             <div>
@@ -1335,6 +1335,9 @@
         settingsSavePending = false;
         document.getElementById('btn-save-settings').disabled = false;
         document.getElementById('btn-save-settings-navigation').disabled = false;
+        const testButton = document.getElementById('btn-test-proxy');
+        testButton.disabled = false;
+        testButton.innerText = 'Test Proxy';
         document.getElementById('settings-save-status').classList.add('hidden');
         settingsBaseline = captureSettingsState();
         setSettingsDirty(false);

@@ -81,7 +81,7 @@ namespace Steam_Desktop_Authenticator
                 }
                 if (!IsValidHost(host))
                 {
-                    error = "Enter a valid proxy hostname or IP address without a URL scheme or path.";
+                    error = "Enter a valid HTTP proxy hostname or IP address without a URL scheme or path.";
                     return false;
                 }
             }
@@ -133,6 +133,7 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrWhiteSpace(Host) || Port < 1)
                 return null;
 
+            // HTTP proxies support HTTPS Steam endpoints through CONNECT tunneling.
             WebProxy proxy = new WebProxy(new UriBuilder(Uri.UriSchemeHttp, Host, Port).Uri)
             {
                 BypassProxyOnLocal = false,

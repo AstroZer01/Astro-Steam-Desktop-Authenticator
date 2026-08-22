@@ -514,7 +514,7 @@ namespace Steam_Desktop_Authenticator
                     settingsDirty = false;
                 }
 
-                proxyTestCancellationSource?.Cancel();
+                CancelProxyOperation();
                 loginActionsTimer.Stop();
                 CloseLoginNotificationPopups();
                 Application.Exit();
@@ -2608,21 +2608,55 @@ namespace Steam_Desktop_Authenticator
             await webView.CoreWebView2.ExecuteScriptAsync($"settingsSaveFailed({jsMessage});");
         }
 
+        private CancellationTokenSource BeginProxyOperation()
+        {
+            CancellationTokenSource replacement = new CancellationTokenSource();
+            CancellationTokenSource previous = Interlocked.Exchange(ref proxyTestCancellationSource, replacement);
+            try
+            {
+                previous?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // The operation completed between the swap and cancellation request.
+            }
+            return replacement;
+        }
+
+        private void CancelProxyOperation()
+        {
+            try
+            {
+                Volatile.Read(ref proxyTestCancellationSource)?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // The operation completed before it could be canceled.
+            }
+        }
+
+        private void CompleteProxyOperation(CancellationTokenSource source)
+        {
+            if (source == null)
+                return;
+
+            Interlocked.CompareExchange(ref proxyTestCancellationSource, null, source);
+            source.Dispose();
+        }
+
         private async Task TestProxyFromPayloadAsync(JObject payload)
         {
-            proxyTestCancellationSource?.Cancel();
-            proxyTestCancellationSource?.Dispose();
-            proxyTestCancellationSource = new CancellationTokenSource();
-            CancellationToken token = proxyTestCancellationSource.Token;
-
-            if (!ProxyConfiguration.TryFromPayload(payload, manifest, true, out ProxyConfiguration configuration, out string error))
-            {
-                await PublishProxyTestResultAsync(new ProxyTestResult { Succeeded = false, Message = error });
-                return;
-            }
+            CancellationTokenSource operationSource = BeginProxyOperation();
+            CancellationToken token = operationSource.Token;
 
             try
             {
+                if (!ProxyConfiguration.TryFromPayload(payload, manifest, true, out ProxyConfiguration configuration, out string error))
+                {
+                    await PublishProxyTestResultAsync(new ProxyTestResult { Succeeded = false, Message = error });
+                    return;
+                }
+
                 ProxyTestResult result = await ProxyService.TestAsync(configuration, token);
                 if (!token.IsCancellationRequested)
                     await PublishProxyTestResultAsync(result);
@@ -2630,6 +2664,10 @@ namespace Steam_Desktop_Authenticator
             catch (OperationCanceledException)
             {
                 // Form shutdown or a newer test superseded this request.
+            }
+            finally
+            {
+                CompleteProxyOperation(operationSource);
             }
         }
 
@@ -2640,6 +2678,7 @@ namespace Steam_Desktop_Authenticator
 
             settingsSaveInProgress = true;
             string saveContext = (string)payload["saveContext"] ?? String.Empty;
+            CancellationTokenSource proxySaveSource = null;
             try
             {
                 string newLoginActionMode = (string)payload["loginActionMode"] ?? LoginActionModes.Manual;
@@ -2676,13 +2715,11 @@ namespace Steam_Desktop_Authenticator
 
                 if (proxyConfiguration.Enabled)
                 {
-                    proxyTestCancellationSource?.Cancel();
-                    proxyTestCancellationSource?.Dispose();
-                    proxyTestCancellationSource = new CancellationTokenSource();
+                    proxySaveSource = BeginProxyOperation();
                     ProxyTestResult proxyResult;
                     try
                     {
-                        proxyResult = await ProxyService.TestAsync(proxyConfiguration, proxyTestCancellationSource.Token);
+                        proxyResult = await ProxyService.TestAsync(proxyConfiguration, proxySaveSource.Token);
                     }
                     catch (OperationCanceledException)
                     {
@@ -2694,7 +2731,11 @@ namespace Steam_Desktop_Authenticator
                         await PublishSettingsSaveFailureAsync(proxyResult.Message + " Settings were not saved.");
                         return;
                     }
-                    proxyTestCancellationSource.Token.ThrowIfCancellationRequested();
+                    proxySaveSource.Token.ThrowIfCancellationRequested();
+                }
+                else
+                {
+                    CancelProxyOperation();
                 }
 
                 bool automaticDenyExceptionChanged = newLoginActionMode == LoginActionModes.Deny &&
@@ -2737,7 +2778,7 @@ namespace Steam_Desktop_Authenticator
                 bool loginMonitoring = ((bool?)payload["loginActionMonitoringEnabled"] ?? false) || newLoginActionMode != LoginActionModes.Manual;
 
                 if (proxyConfiguration.Enabled)
-                    proxyTestCancellationSource.Token.ThrowIfCancellationRequested();
+                    proxySaveSource.Token.ThrowIfCancellationRequested();
 
                 StorageResult saveResult = manifest.SaveSettingsWithResult(staged =>
                 {
@@ -2794,6 +2835,7 @@ namespace Steam_Desktop_Authenticator
             }
             finally
             {
+                CompleteProxyOperation(proxySaveSource);
                 settingsSaveInProgress = false;
             }
         }
