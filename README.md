@@ -40,14 +40,14 @@ All credit for the original design and implementation goes to Jessecar96 and the
 - **Proxy Support** — Use proxy when communicating with steam.
 - **Desktop notifications** — receive Windows notifications for pending trade confirmations and login requests, with navigation back to the relevant view.
 
-## Version 1.1.2 Highlights
+## Version 1.2.0 Highlights
 
 - **Phone-free Steam Guard setup** - Add an authenticator without a phone number when Steam allows it, with clear email and SMS guidance when verification is required.
 - **Smoother account setup** - Improved phone verification, recovery-code downloads, and account-management controls.
 - **More reliable Steam actions** - Better handling for login approvals, trade confirmations, session refreshes, and temporary Steam errors.
 - **Safer updates** - Portable releases preserve your existing accounts and settings when you update.
 
-For a complete list of changes, see the [1.1.2 release notes](https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/tag/1.1.2).
+For a complete list of changes, see the [1.2.0 release notes](https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/tag/1.2.0).
 
 ## Build from Source on Windows
 
