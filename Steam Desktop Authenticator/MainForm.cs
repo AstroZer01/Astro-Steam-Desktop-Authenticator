@@ -2053,69 +2053,73 @@ namespace Steam_Desktop_Authenticator
 
         private async Task RespondToLoginActionAsync(string accountName, ulong clientId, string action)
         {
-            if (manifest.LoginActionMode != LoginActionModes.Manual)
-            {
-                AstroMessageBox.Show("Manual actions are disabled while an automatic login action is enabled.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                await PublishCachedLoginActionsAsync();
-                return;
-            }
-
-            SteamGuardAccount account = allAccounts?.FirstOrDefault(item => item.AccountName == accountName);
-            if (account?.Session == null || !pendingLoginRequests.TryGetValue(BuildLoginRequestKey(account.Session.SteamID, clientId), out PendingLoginRequest request))
-            {
-                AstroMessageBox.Show("This login request is no longer available. Refresh the list and try again.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                await PublishCachedLoginActionsAsync();
-                return;
-            }
-
-            LoginApprovalDecision decision = action == "approve" ? LoginApprovalDecision.ApprovePersistent : LoginApprovalDecision.Deny;
-            string location = String.Join(", ", new[] { request.City, request.State, request.Country }.Where(value => !String.IsNullOrWhiteSpace(value)));
-            if (String.IsNullOrWhiteSpace(location)) location = "Unknown location";
-            string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
-            string prompt = (decision == LoginApprovalDecision.ApprovePersistent ? "Approve" : "Deny") + " this Steam login request?\n\n" +
-                "Account: " + request.AccountName + "\n" +
-                "Device: " + device + "\n" +
-                "Location: " + location;
-            if (AstroMessageBox.Show(prompt, "Confirm Login Action", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
-            {
-                await webView.CoreWebView2.ExecuteScriptAsync("hideSpinner();");
-                return;
-            }
-
-            await loginActionsSemaphore.WaitAsync();
             try
             {
-                LoginApprovalActionResult result = await RunSteamAccountOperationAsync(account,
-                    () => loginApprovalService.RespondAsync(account, request, decision));
-                if (!result.Succeeded && result.ErrorKind != LoginApprovalErrorKind.ExpiredOrDuplicate)
+                if (manifest.LoginActionMode != LoginActionModes.Manual)
                 {
-                    AstroMessageBox.Show(result.ErrorMessage, "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    AstroMessageBox.Show("Manual actions are disabled while an automatic login action is enabled.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    await PublishCachedLoginActionsAsync();
+                    return;
                 }
-                else
+
+                SteamGuardAccount account = allAccounts?.FirstOrDefault(item => item.AccountName == accountName);
+                if (account?.Session == null || !pendingLoginRequests.TryGetValue(BuildLoginRequestKey(account.Session.SteamID, clientId), out PendingLoginRequest request))
                 {
-                    string requestKey = BuildLoginRequestKey(request.SteamId, request.ClientId);
-                    pendingLoginRequests.Remove(requestKey);
-                    notifiedLoginRequests.Remove(requestKey);
-                    MarkRecentlyResolved(recentlyResolvedLoginRequests, requestKey);
-                    if (result.Succeeded)
+                    AstroMessageBox.Show("This login request is no longer available. Refresh the list and try again.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    await PublishCachedLoginActionsAsync();
+                    return;
+                }
+
+                LoginApprovalDecision decision = action == "approve" ? LoginApprovalDecision.ApprovePersistent : LoginApprovalDecision.Deny;
+                string location = String.Join(", ", new[] { request.City, request.State, request.Country }.Where(value => !String.IsNullOrWhiteSpace(value)));
+                if (String.IsNullOrWhiteSpace(location)) location = "Unknown location";
+                string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
+                string prompt = (decision == LoginApprovalDecision.ApprovePersistent ? "Approve" : "Deny") + " this Steam login request?\n\n" +
+                    "Account: " + request.AccountName + "\n" +
+                    "Device: " + device + "\n" +
+                    "Location: " + location;
+                if (AstroMessageBox.Show(prompt, "Confirm Login Action", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                    return;
+
+                await loginActionsSemaphore.WaitAsync();
+                try
+                {
+                    LoginApprovalActionResult result = await RunSteamAccountOperationAsync(account,
+                        () => loginApprovalService.RespondAsync(account, request, decision));
+                    if (!result.Succeeded && result.ErrorKind != LoginApprovalErrorKind.ExpiredOrDuplicate)
                     {
-                        RecordRecentLoginAttempt(request, decision == LoginApprovalDecision.ApprovePersistent ? "Approved manually" : "Denied manually");
-                        AstroMessageBox.Show(decision == LoginApprovalDecision.ApprovePersistent ? "Steam login approved." : "Steam login denied.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        AstroMessageBox.Show(result.ErrorMessage, "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                     else
                     {
-                        RecordRecentLoginAttempt(request, "Expired or already handled");
-                        AstroMessageBox.Show("This login request is no longer pending.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        string requestKey = BuildLoginRequestKey(request.SteamId, request.ClientId);
+                        pendingLoginRequests.Remove(requestKey);
+                        notifiedLoginRequests.Remove(requestKey);
+                        MarkRecentlyResolved(recentlyResolvedLoginRequests, requestKey);
+                        if (result.Succeeded)
+                        {
+                            RecordRecentLoginAttempt(request, decision == LoginApprovalDecision.ApprovePersistent ? "Approved manually" : "Denied manually");
+                            AstroMessageBox.Show(decision == LoginApprovalDecision.ApprovePersistent ? "Steam login approved." : "Steam login denied.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
+                        else
+                        {
+                            RecordRecentLoginAttempt(request, "Expired or already handled");
+                            AstroMessageBox.Show("This login request is no longer pending.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
                     }
                 }
+                finally
+                {
+                    loginActionsSemaphore.Release();
+                }
+
+                await PublishCachedLoginActionsAsync();
+                _ = RefreshLoginActionsAsync();
             }
             finally
             {
-                loginActionsSemaphore.Release();
+                await HideWebSpinnerAsync("login-action");
             }
-
-            await PublishCachedLoginActionsAsync();
-            _ = RefreshLoginActionsAsync();
         }
 
         // Other methods
@@ -2999,7 +3003,7 @@ namespace Steam_Desktop_Authenticator
                 }
                 else
                 {
-                    _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner();");
+                    await HideWebSpinnerAsync("login-action");
                 }
             }
             else if (action == "refresh_login_account")
@@ -3011,7 +3015,6 @@ namespace Steam_Desktop_Authenticator
                     PromptRefreshLogin(account);
                     loadAccountsList();
                 }
-                _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner();");
             }
             else if (action == "accept_trade" || action == "reject_trade")
             {
@@ -3019,7 +3022,7 @@ namespace Steam_Desktop_Authenticator
                 if (!String.IsNullOrWhiteSpace(confirmationKey))
                     _ = RespondToTradeConfirmationAsync(confirmationKey, action == "accept_trade");
                 else
-                    _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner()");
+                    await HideWebSpinnerAsync("trade-action");
             }
         }
 
@@ -3032,7 +3035,7 @@ namespace Steam_Desktop_Authenticator
         {
             if (!loadedTradeConfirmations.TryGetValue(confirmationKey, out LoadedTradeConfirmation entry))
             {
-                await webView.CoreWebView2.ExecuteScriptAsync("hideSpinner()");
+                await HideWebSpinnerAsync("trade-action");
                 return;
             }
 
@@ -3061,14 +3064,27 @@ namespace Steam_Desktop_Authenticator
             }
             finally
             {
-                if (actionSucceeded)
+                try
                 {
-                    MarkRecentlyResolved(recentlyResolvedTradeConfirmations, confirmationKey);
-                    loadedTradeConfirmations.Remove(confirmationKey);
-                    await PublishCachedTradesAsync();
+                    if (actionSucceeded)
+                    {
+                        MarkRecentlyResolved(recentlyResolvedTradeConfirmations, confirmationKey);
+                        loadedTradeConfirmations.Remove(confirmationKey);
+                        await PublishCachedTradesAsync();
+                    }
                 }
-                _ = LoadTradesAsync();
+                finally
+                {
+                    await HideWebSpinnerAsync("trade-action");
+                    _ = LoadTradesAsync();
+                }
             }
+        }
+
+        private async Task HideWebSpinnerAsync(string operation)
+        {
+            if (webView?.CoreWebView2 != null)
+                await webView.CoreWebView2.ExecuteScriptAsync("hideSpinner(" + JsonConvert.SerializeObject(operation) + ");");
         }
 
         private async Task LoadTradesAsync(string selectedAccountName = null)
