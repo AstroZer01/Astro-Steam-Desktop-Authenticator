@@ -831,7 +831,7 @@
     }
 
     function sendTradeAction(id, act) {
-        showSpinner();
+        showSpinner('trade-action');
         window.chrome.webview.postMessage({ action: act, id: id });
     }
 
@@ -1133,7 +1133,7 @@
 
     function sendLoginAction(request, decision, card) {
         card.querySelectorAll('button').forEach(button => button.disabled = true);
-        showSpinner();
+        showSpinner('login-action');
         window.chrome.webview.postMessage({
             action: 'respond_login_action',
             accountName: request.accountName,
