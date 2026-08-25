@@ -398,18 +398,19 @@
 
         document.querySelectorAll('.tab-link').forEach(l => {
             const isDesktop = l.parentElement.id === 'desktop-nav';
+            const tradeBadgePosition = l.dataset.tab === 'trades' ? " relative" : "";
             if (l.dataset.tab === tabId) {
                 if (isDesktop) {
-                    l.className = "tab-link flex items-center gap-3 px-4 py-3 rounded-lg bg-primary/10 text-primary border-l-4 border-primary transition-all duration-300 cursor-pointer";
+                    l.className = "tab-link flex items-center gap-3 px-4 py-3 rounded-lg bg-primary/10 text-primary border-l-4 border-primary transition-all duration-300 cursor-pointer" + tradeBadgePosition;
                 } else {
-                    l.className = "tab-link flex flex-col items-center justify-center bg-secondary-container/20 text-secondary rounded-xl px-3 py-1 transition-all duration-200 cursor-pointer min-w-[72px]";
+                    l.className = "tab-link flex flex-col items-center justify-center bg-secondary-container/20 text-secondary rounded-xl px-3 py-1 transition-all duration-200 cursor-pointer min-w-[72px]" + tradeBadgePosition;
                 }
             } else {
                 if (isDesktop) {
                     let extra = l.dataset.tab === 'settings' ? " mt-8 border-t border-white/5 pt-4" : "";
-                    l.className = "tab-link flex items-center gap-3 px-4 py-3 rounded-lg text-on-surface-variant hover:bg-white/5 transition-all duration-300 cursor-pointer border-l-4 border-transparent" + extra;
+                    l.className = "tab-link flex items-center gap-3 px-4 py-3 rounded-lg text-on-surface-variant hover:bg-white/5 transition-all duration-300 cursor-pointer border-l-4 border-transparent" + extra + tradeBadgePosition;
                 } else {
-                    l.className = "tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]";
+                    l.className = "tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]" + tradeBadgePosition;
                 }
             }
         });
