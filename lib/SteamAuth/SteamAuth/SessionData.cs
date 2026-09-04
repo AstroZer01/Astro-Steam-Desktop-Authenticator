@@ -46,10 +46,10 @@ namespace SteamAuth
         public async Task RefreshAccessToken(bool allowRenewal = false, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(this.RefreshToken))
-                throw new Exception("Refresh token is empty");
+                throw new SteamSessionException(SteamSessionFailureKind.InvalidSession, "Refresh token is empty.");
 
             if (IsTokenExpired(this.RefreshToken))
-                throw new Exception("Refresh token is expired");
+                throw new SteamSessionException(SteamSessionFailureKind.InvalidSession, "Refresh token is expired.");
 
             try
             {
@@ -67,12 +67,16 @@ namespace SteamAuth
                     cancellationToken: cancellationToken);
                 if (response == null || response.Result != 1 || response.Body == null || String.IsNullOrWhiteSpace(response.Body.AccessToken))
                 {
-                    string detail = response != null && (response.Result == 84 || response.Result == 87)
+                    int result = response?.Result ?? 0;
+                    string detail = SteamSessionFailureClassifier.IsRateLimitedResult(result)
                         ? "Steam is rate limiting access-token refresh requests. Wait a while before trying again."
                         : response != null && !String.IsNullOrWhiteSpace(response.ErrorMessage)
                         ? response.ErrorMessage
-                        : "Steam returned result " + (response == null ? 0 : response.Result) + ".";
-                    throw new Exception(detail);
+                        : "Steam returned result " + result + ".";
+                    throw new SteamSessionException(
+                        SteamSessionFailureClassifier.ClassifyResult(result, expiredResultInvalidatesSession: true),
+                        detail,
+                        result);
                 }
 
                 AccessToken = response.Body.AccessToken;
@@ -83,10 +87,15 @@ namespace SteamAuth
             {
                 throw;
             }
+            catch (SteamSessionException ex)
+            {
+                SteamAuthDiagnostics.Log(ex, "Access-token refresh failed.");
+                throw;
+            }
             catch (Exception ex)
             {
                 SteamAuthDiagnostics.Log(ex, "Access-token refresh failed.");
-                throw new Exception("Failed to refresh token: " + ex.Message);
+                throw new Exception("Failed to refresh token: " + ex.Message, ex);
             }
         }
 

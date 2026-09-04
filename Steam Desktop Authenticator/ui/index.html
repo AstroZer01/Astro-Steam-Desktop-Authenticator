@@ -73,8 +73,8 @@
                 </div>
             </div>
             
-            <div class="glass-panel rounded-xl p-4 flex flex-col gap-4 flex-1 min-h-[300px]">
-                <div id="account-list-container" class="bg-surface-container-lowest border border-white/10 rounded-lg flex-1 overflow-y-auto overflow-x-hidden"></div>
+            <div class="glass-panel rounded-xl p-4 flex flex-col gap-4">
+                <div id="account-list-container" class="account-list-scroll bg-surface-container-lowest border border-white/10 rounded-lg overflow-y-auto overflow-x-hidden"></div>
                 <div class="flex items-center gap-3 pt-2">
                     <span class="text-on-surface-variant text-sm">Filter:</span>
                     <input id="filter-input" class="flex-1 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-1.5 px-3 focus:ring-1 focus:ring-[#00daf3] focus:outline-none h-8" type="text">
@@ -406,7 +406,7 @@
 
         if (tabId === 'trades') {
             beginTradeLoad();
-            window.chrome.webview.postMessage({ action: 'load_trades_cache', accountName: document.getElementById('trade-account-select').value || 'all' });
+            window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: document.getElementById('trade-account-select').value || 'all' });
         } else if (tabId === 'login-actions') {
             window.chrome.webview.postMessage({ action: 'load_login_actions' });
         } else if (tabId === 'settings') {
@@ -467,15 +467,15 @@
 
     function updateQrLoginButton() {
         const button = document.getElementById('btn-login-qr');
-        const hasAccounts = allAccs.length > 0;
-        button.disabled = qrScanWaiting || !hasAccounts;
+        const hasAccounts = allAccs.some(account => !account.sessionExpired);
+        button.disabled = qrScanWaiting || !hasAccounts || currentAccExpired;
 
         if (qrScanWaiting) {
             button.className = 'bg-primary/10 border border-primary text-primary text-sm py-3 px-4 rounded-lg shadow-sm cursor-crosshair';
             button.textContent = 'Waiting for Right Ctrl (' + qrScanRemainingSeconds + 's)';
-        } else if (!hasAccounts) {
+        } else if (!hasAccounts || currentAccExpired) {
             button.className = 'bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm py-3 px-4 rounded-lg shadow-sm transition-colors';
-            button.textContent = 'Login via QR';
+            button.textContent = currentAccExpired ? 'Renew session to use QR login' : 'Login via QR';
         } else {
             button.className = 'bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-sm';
             button.textContent = 'Login via QR';
@@ -495,23 +495,40 @@
     }
 
     document.getElementById('btn-login-qr').addEventListener('click', () => {
-        if (!qrScanWaiting) window.chrome.webview.postMessage({ action: 'login_qr' });
+        const button = document.getElementById('btn-login-qr');
+        if (!qrScanWaiting && !currentAccExpired && !button.disabled)
+            window.chrome.webview.postMessage({ action: 'login_qr' });
     });
 
     let currentAcc = "";
+    let currentAccSteamId = "";
+    let currentAccExpired = false;
     function updateToken(token) { 
         let el = document.getElementById('login-token-text');
         if (el.innerText !== token) el.innerText = token;
     }
-    function updateCurrentAccount(accName) {
+    function updateCurrentAccount(accName, sessionExpired = false, steamId = "") {
+        const selectionChanged = currentAccSteamId !== (steamId || "") || currentAccExpired !== !!sessionExpired;
         currentAcc = accName;
+        currentAccSteamId = steamId || "";
+        currentAccExpired = !!sessionExpired;
         document.getElementById('account-title').innerText = "Account: " + accName;
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         const tradeSelect = document.getElementById('trade-account-select');
         const loginSelect = document.getElementById('login-account-select');
-        const hasOption = select => Array.from(select.options).some(option => option.value === accName);
-        if (tradeSelect && tradeSelect.value !== 'all' && hasOption(tradeSelect)) tradeSelect.value = accName;
-        if (loginSelect && loginSelect.value !== 'all' && hasOption(loginSelect)) loginSelect.value = accName;
+        if (currentAccExpired) {
+            if (tradeSelect) tradeSelect.value = 'all';
+            if (loginSelect) loginSelect.value = 'all';
+        } else {
+            const hasOption = select => Array.from(select.options).some(option => option.value === currentAccSteamId);
+            if (tradeSelect && hasOption(tradeSelect)) tradeSelect.value = currentAccSteamId;
+            if (loginSelect && hasOption(loginSelect)) loginSelect.value = currentAccSteamId;
+        }
+        renderLoginActions();
+        if (selectionChanged && currentAccExpired) {
+            window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: 'all' });
+            window.chrome.webview.postMessage({ action: 'load_login_actions' });
+        }
     }
     function updateProgressBar(secondsRemaining) {
         let pct = (secondsRemaining / 30.0) * 100;
@@ -538,7 +555,7 @@
         allAccs = accounts;
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         
-        const names = accounts.map(account => account.name);
+        const usableAccounts = accounts.filter(account => !account.sessionExpired && account.steamId);
         let hasAccounts = accounts.length > 0;
         let btnCopy = document.getElementById('btn-copy');
         
@@ -555,37 +572,38 @@
         
         let sel = document.getElementById('trade-account-select');
         if (sel) {
-            const previous = sel.value || 'all';
+            const previous = sel.value || (currentAccExpired ? 'all' : currentAccSteamId) || 'all';
             sel.innerHTML = '';
             const allOption = document.createElement('option');
             allOption.value = 'all';
             allOption.innerText = 'All accounts';
             sel.appendChild(allOption);
-            names.forEach(n => {
+            usableAccounts.forEach(account => {
                 let opt = document.createElement('option');
-                opt.value = n;
-                opt.innerText = n;
+                opt.value = account.steamId;
+                opt.innerText = account.name;
                 sel.appendChild(opt);
             });
-            sel.value = names.includes(previous) || previous === 'all' ? previous : 'all';
+            sel.value = usableAccounts.some(account => account.steamId === previous) && !currentAccExpired ? previous : 'all';
         }
 
         let loginSelect = document.getElementById('login-account-select');
         if (loginSelect) {
-            const previous = loginSelect.value || 'all';
+            const previous = loginSelect.value || (currentAccExpired ? 'all' : currentAccSteamId) || 'all';
             loginSelect.innerHTML = '';
             const allOption = document.createElement('option');
             allOption.value = 'all';
             allOption.innerText = 'All accounts';
             loginSelect.appendChild(allOption);
-            names.forEach(n => {
+            usableAccounts.forEach(account => {
                 const opt = document.createElement('option');
-                opt.value = n;
-                opt.innerText = n;
+                opt.value = account.steamId;
+                opt.innerText = account.name;
                 loginSelect.appendChild(opt);
             });
-            loginSelect.value = names.includes(previous) || previous === 'all' ? previous : 'all';
+            loginSelect.value = usableAccounts.some(account => account.steamId === previous) && !currentAccExpired ? previous : 'all';
         }
+        renderLoginActions();
     }
     function renderAccountList(filterText = "") {
         const container = document.getElementById('account-list-container');
@@ -593,20 +611,34 @@
         allAccs.forEach(acc => {
             if (filterText && !acc.name.toLowerCase().includes(filterText)) return;
             const row = document.createElement('div');
-            if (acc.name === currentAcc) {
+            if (acc.steamId === currentAccSteamId || (!acc.steamId && acc.name === currentAcc)) {
                 row.className = "bg-primary-container/20 text-white px-3 py-2 border-l-2 border-primary font-bold";
             } else {
                 row.className = "text-white px-3 py-2 hover:bg-surface-variant transition-colors";
             }
-            row.classList.add('flex', 'items-center', 'gap-2');
+            row.classList.add('account-list-row', 'flex', 'items-center', 'gap-2');
             const accountButton = document.createElement('button');
             accountButton.type = 'button';
             accountButton.className = "min-w-0 flex-1 border-0 bg-transparent p-0 text-left text-inherit cursor-pointer";
             const name = document.createElement('span');
-            name.className = "block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ellipsis";
-            name.textContent = acc.name;
+            name.className = "block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ellipsis" + (acc.sessionExpired ? " text-[#ffb4ab]" : "");
+            name.textContent = acc.sessionExpired ? acc.name + " (expired session)" : acc.name;
             accountButton.appendChild(name);
             accountButton.onclick = () => { window.chrome.webview.postMessage({ action: 'switch_account', accountName: acc.name, steamId: acc.steamId }); };
+
+            if (acc.sessionExpired) {
+                const renewButton = document.createElement('button');
+                renewButton.type = 'button';
+                renewButton.className = "shrink-0 rounded p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors";
+                renewButton.title = "Renew session";
+                renewButton.setAttribute('aria-label', "Renew session");
+                renewButton.innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5.5"/><path d="M20 4v7h-7"/></svg>';
+                renewButton.onclick = event => {
+                    event.stopPropagation();
+                    window.chrome.webview.postMessage({ action: 'refresh_login_account', steamId: acc.steamId });
+                };
+                row.appendChild(renewButton);
+            }
 
             const removeButton = document.createElement('button');
             removeButton.className = "shrink-0 rounded p-1 text-on-surface-variant hover:bg-error-container/30 hover:text-error transition-colors";
@@ -710,7 +742,7 @@
     document.getElementById('btn-refresh-trades').addEventListener('click', () => {
         beginTradeLoad();
         showRefreshSpinner('trades');
-        window.chrome.webview.postMessage({ action: 'refresh_trades', accountName: document.getElementById('trade-account-select').value || 'all' });
+        window.chrome.webview.postMessage({ action: 'refresh_trades', steamId: document.getElementById('trade-account-select').value || 'all' });
     });
     document.getElementById('trade-account-select').addEventListener('change', (e) => {
         const selectedAccount = e.target.value;
@@ -720,10 +752,11 @@
             renderLoginActions();
         }
         if (selectedAccount !== 'all') {
-            window.chrome.webview.postMessage({ action: 'switch_account', accountName: selectedAccount });
+            const account = allAccs.find(item => item.steamId === selectedAccount);
+            if (account) window.chrome.webview.postMessage({ action: 'switch_account', accountName: account.name, steamId: account.steamId });
         }
         beginTradeLoad();
-        window.chrome.webview.postMessage({ action: 'load_trades_cache', accountName: selectedAccount });
+        window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: selectedAccount });
     });
 
     function beginTradeLoad() {
@@ -875,10 +908,11 @@
         if (tradeSelect) {
             tradeSelect.value = selectedAccount;
             beginTradeLoad();
-            window.chrome.webview.postMessage({ action: 'load_trades_cache', accountName: selectedAccount });
+            window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: selectedAccount });
         }
         if (selectedAccount !== 'all') {
-            window.chrome.webview.postMessage({ action: 'switch_account', accountName: selectedAccount });
+            const account = allAccs.find(item => item.steamId === selectedAccount);
+            if (account) window.chrome.webview.postMessage({ action: 'switch_account', accountName: account.name, steamId: account.steamId });
         }
         renderLoginActions();
     });
@@ -1022,7 +1056,7 @@
         const unavailable = document.getElementById('login-actions-unavailable');
         const count = document.getElementById('login-actions-count');
         const accountFilter = document.getElementById('login-account-select').value || 'all';
-        const requests = loginRequests.filter(request => accountFilter === 'all' || request.accountName === accountFilter);
+        const requests = loginRequests.filter(request => accountFilter === 'all' || request.steamId === accountFilter);
 
         container.innerHTML = '';
         count.textContent = requests.length === 1 ? '1 pending login request' : requests.length + ' pending login requests';
@@ -1049,7 +1083,7 @@
         }
 
         unavailable.innerHTML = '';
-        const filteredUnavailable = loginUnavailableAccounts.filter(account => accountFilter === 'all' || account.accountName === accountFilter);
+        const filteredUnavailable = loginUnavailableAccounts.filter(account => accountFilter === 'all' || account.steamId === accountFilter);
         if (filteredUnavailable.length > 0) {
             unavailable.classList.remove('hidden');
             filteredUnavailable.forEach(account => {
@@ -1068,7 +1102,7 @@
                 const button = document.createElement('button');
                 button.className = 'shrink-0 px-3 py-2 rounded-lg border border-error/40 text-error hover:bg-error-container/30 text-sm transition-colors';
                 button.textContent = 'Login again';
-                button.onclick = () => window.chrome.webview.postMessage({ action: 'refresh_login_account', accountName: account.accountName });
+                button.onclick = () => window.chrome.webview.postMessage({ action: 'refresh_login_account', steamId: account.steamId });
                 row.appendChild(text);
                 row.appendChild(button);
                 unavailable.appendChild(row);
@@ -1179,7 +1213,7 @@
         showSpinner('login-action');
         window.chrome.webview.postMessage({
             action: 'respond_login_action',
-            accountName: request.accountName,
+            steamId: request.steamId,
             clientId: request.clientId,
             decision: decision
         });

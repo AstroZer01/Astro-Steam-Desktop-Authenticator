@@ -3,6 +3,7 @@ using Newtonsoft.Json.Linq;
 using SteamAuth;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -104,6 +105,14 @@ namespace Steam_Desktop_Authenticator
             DateParseHandling = DateParseHandling.None
         };
 
+        public sealed class UnmanagedMaFileCandidate
+        {
+            public string FileName { get; set; }
+            public ulong SteamID { get; set; }
+            public SteamGuardAccount Account { get; set; }
+            internal string ContentHash { get; set; }
+        }
+
         public static string GetExecutableDir()
         {
             // Account data lives beside the Launcher when the app is started through it.
@@ -188,6 +197,13 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 loadedManifest.RecomputeExistingEntries();
+
+                // Migrate the GUID form used by previous releases while loading
+                // the manifest. Arbitrary legacy names are handled by the full
+                // startup normalization pass after the UI unlocks encryption.
+                StorageResult guidNormalizationResult = loadedManifest.NormalizeAccountFilenames(true);
+                if (!guidNormalizationResult.Succeeded)
+                    DiagnosticErrorLogger.Log("Authenticator storage", guidNormalizationResult.Exception, "A GUID-named authenticator file could not be normalized during startup.");
 
                 lock (storageLock)
                 {
@@ -422,6 +438,302 @@ namespace Steam_Desktop_Authenticator
             return accounts.ToArray();
         }
 
+        public static string GetCanonicalMaFileFilename(ulong steamId)
+        {
+            if (steamId == 0)
+                throw new ArgumentOutOfRangeException(nameof(steamId));
+            return steamId.ToString(CultureInfo.InvariantCulture) + ".maFile";
+        }
+
+        public bool IsSessionMarkedForRenewal(ulong steamId)
+        {
+            return steamId != 0 && Entries != null && Entries.Any(entry => entry.SteamID == steamId && entry.SessionNeedsRenewal);
+        }
+
+        public StorageResult SetSessionNeedsRenewal(ulong steamId, bool needsRenewal)
+        {
+            if (steamId == 0)
+                return StorageResult.Failure(StorageFailureKind.Validation, "The account identity is invalid.");
+
+            lock (storageLock)
+            {
+                ManifestEntry entry = Entries?.FirstOrDefault(candidate => candidate.SteamID == steamId);
+                if (entry == null)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The account is not managed by this authenticator.");
+                if (entry.SessionNeedsRenewal == needsRenewal)
+                    return StorageResult.Success();
+
+                try
+                {
+                    Manifest stagedManifest = CloneForStorage();
+                    ManifestEntry stagedEntry = stagedManifest.Entries.First(candidate => candidate.SteamID == steamId);
+                    stagedEntry.SessionNeedsRenewal = needsRenewal;
+                    StorageResult result = stagedManifest.SaveWithResult();
+                    if (result.Succeeded)
+                        CopyStorageStateFrom(stagedManifest);
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Manifest, "The account session state could not be saved.", ex);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Copies managed non-canonical files to their canonical names in a
+        /// manifest transaction. The ciphertext is copied byte-for-byte so this
+        /// operation does not require the encryption passkey.
+        /// </summary>
+        public StorageResult NormalizeAccountFilenames()
+        {
+            return NormalizeAccountFilenames(false);
+        }
+
+        private StorageResult NormalizeAccountFilenames(bool guidOnly)
+        {
+            lock (storageLock)
+            {
+                try
+                {
+                    string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+                    ValidateStorageDirectory(maDir);
+                    ValidateManifestEntries(this, maDir);
+
+                    Manifest stagedManifest = CloneForStorage();
+                    Dictionary<string, string> stagedFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    List<string> obsoleteFiles = new List<string>();
+                    HashSet<string> referencedFilenames = new HashSet<string>(
+                        Entries.Select(entry => entry.Filename), StringComparer.OrdinalIgnoreCase);
+                    bool hasChanges = false;
+
+                    for (int i = 0; i < Entries.Count; i++)
+                    {
+                        ManifestEntry entry = Entries[i];
+                        string canonicalFilename = GetCanonicalMaFileFilename(entry.SteamID);
+                        if (String.Equals(entry.Filename, canonicalFilename, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        if (guidOnly && !IsGuidMaFileFilename(entry.Filename, entry.SteamID))
+                            continue;
+
+                        string sourcePath = GetManifestFilePath(maDir, entry);
+                        string canonicalPath = Path.Combine(maDir, canonicalFilename);
+
+                        // A pre-existing canonical file may be an independently
+                        // imported account. Never overwrite it while migrating a
+                        // GUID file; leaving the GUID reference is recoverable.
+                        if (referencedFilenames.Contains(canonicalFilename) || File.Exists(canonicalPath))
+                        {
+                            DiagnosticErrorLogger.Log(
+                                "Authenticator storage",
+                                new IOException("The canonical maFile filename is already in use."),
+                                "A non-canonical authenticator file was kept because its canonical filename is occupied.");
+                            continue;
+                        }
+
+                        string contents = ReadTextWithLimit(sourcePath, MaximumAccountFileSizeBytes);
+                        stagedFiles.Add(canonicalFilename, contents);
+                        stagedManifest.Entries[i].Filename = canonicalFilename;
+                        obsoleteFiles.Add(entry.Filename);
+                        hasChanges = true;
+                    }
+
+                    if (!hasChanges)
+                        return StorageResult.Success();
+
+                    StorageResult result = CommitStorageTransaction(stagedManifest, stagedFiles, obsoleteFiles);
+                    if (result.Succeeded)
+                        CopyStorageStateFrom(stagedManifest);
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Authenticator storage", ex, "Non-canonical authenticator filenames could not be normalized.");
+                    return StorageResult.Failure(
+                        StorageFailureKind.Io,
+                        "The authenticator filenames could not be normalized. The existing account data was kept unchanged.",
+                        ex);
+                }
+            }
+        }
+
+        private static bool IsGuidMaFileFilename(string filename, ulong steamId)
+        {
+            string prefix = steamId.ToString(CultureInfo.InvariantCulture) + ".";
+            if (String.IsNullOrWhiteSpace(filename) ||
+                !filename.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                !filename.EndsWith(".maFile", StringComparison.OrdinalIgnoreCase) ||
+                filename.Length <= prefix.Length + ".maFile".Length)
+                return false;
+
+            string guidText = filename.Substring(prefix.Length, filename.Length - prefix.Length - ".maFile".Length);
+            return guidText.Length == 32 && Guid.TryParseExact(guidText, "N", out _);
+        }
+
+        /// <summary>
+        /// Finds untracked, plaintext, structurally valid maFiles. This method is
+        /// intentionally a snapshot operation; callers decide whether and when to
+        /// prompt, so it is not used by runtime watchers.
+        /// </summary>
+        public IReadOnlyList<UnmanagedMaFileCandidate> FindUnmanagedMaFiles()
+        {
+            lock (storageLock)
+            {
+                List<UnmanagedMaFileCandidate> candidates = new List<UnmanagedMaFileCandidate>();
+                string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+                if (!Directory.Exists(maDir))
+                    return candidates;
+
+                ValidateStorageDirectory(maDir);
+                HashSet<string> managedFilenames = new HashSet<string>(
+                    Entries.Select(entry => entry.Filename), StringComparer.OrdinalIgnoreCase);
+                HashSet<ulong> managedSteamIds = new HashSet<ulong>(Entries.Select(entry => entry.SteamID));
+                HashSet<ulong> duplicateSteamIds = new HashSet<ulong>();
+                Dictionary<ulong, UnmanagedMaFileCandidate> bySteamId = new Dictionary<ulong, UnmanagedMaFileCandidate>();
+
+                foreach (string path in Directory.EnumerateFiles(maDir, "*.maFile", SearchOption.TopDirectoryOnly))
+                {
+                    FileInfo file = new FileInfo(path);
+                    if (managedFilenames.Contains(file.Name) ||
+                        (file.Attributes & FileAttributes.ReparsePoint) != 0)
+                        continue;
+
+                    try
+                    {
+                        string contents = ReadTextWithLimit(path, MaximumAccountFileSizeBytes);
+                        SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
+                        ulong steamId = account?.Session?.SteamID ?? 0;
+                        if (steamId == 0 || managedSteamIds.Contains(steamId))
+                            continue;
+
+                        // A duplicate identity is not safe to import automatically:
+                        // keep all source files available for manual selection.
+                        if (duplicateSteamIds.Contains(steamId))
+                            continue;
+                        if (bySteamId.ContainsKey(steamId))
+                        {
+                            bySteamId.Remove(steamId);
+                            duplicateSteamIds.Add(steamId);
+                            continue;
+                        }
+
+                        bySteamId[steamId] = new UnmanagedMaFileCandidate
+                        {
+                            FileName = file.Name,
+                            SteamID = steamId,
+                            Account = account,
+                            ContentHash = GetContentHash(contents)
+                        };
+                    }
+                    catch (Exception ex)
+                    {
+                        // Invalid, encrypted, linked, and oversized files remain
+                        // available through the explicit manual-import flow.
+                        DiagnosticErrorLogger.Log("Authenticator startup import", ex, "A maFile was not eligible for automatic import.");
+                    }
+                }
+
+                return bySteamId.Values
+                    .OrderBy(candidate => candidate.FileName, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+        }
+
+        /// <summary>
+        /// Revalidates and imports a startup candidate set as one storage
+        /// transaction. Source files are obsolete files and are removed only after
+        /// the new manifest has committed.
+        /// </summary>
+        public StorageResult ImportUnmanagedMaFiles(IReadOnlyList<UnmanagedMaFileCandidate> candidates, string passKey = null)
+        {
+            lock (storageLock)
+            {
+                if (candidates == null || candidates.Count == 0)
+                    return StorageResult.Success();
+                if (candidates.Count > MaximumManifestEntries)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "Too many authenticator files were selected for import.");
+                if (this.Encrypted && !VerifyPasskey(passKey))
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid. The files were not imported.");
+
+                try
+                {
+                    string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+                    ValidateStorageDirectory(maDir);
+                    ValidateManifestEntries(this, maDir);
+                    HashSet<ulong> managedSteamIds = new HashSet<ulong>(Entries.Select(entry => entry.SteamID));
+                    HashSet<string> sourceNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    List<SteamGuardAccount> validatedAccounts = new List<SteamGuardAccount>();
+
+                    foreach (UnmanagedMaFileCandidate candidate in candidates)
+                    {
+                        if (candidate == null || String.IsNullOrWhiteSpace(candidate.FileName) ||
+                            !sourceNames.Add(candidate.FileName) || managedSteamIds.Contains(candidate.SteamID))
+                            return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files is no longer available for import.");
+
+                        ValidateManifestFilename(candidate.FileName);
+                        string path = Path.Combine(maDir, candidate.FileName);
+                        string contents = ReadTextWithLimit(path, MaximumAccountFileSizeBytes);
+                        if (!String.Equals(GetContentHash(contents), candidate.ContentHash, StringComparison.Ordinal))
+                            return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files changed before it could be imported.");
+
+                        SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
+                        if (account?.Session == null || account.Session.SteamID == 0 || account.Session.SteamID != candidate.SteamID)
+                            return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files is no longer valid.");
+                        if (!managedSteamIds.Add(account.Session.SteamID))
+                            return StorageResult.Failure(StorageFailureKind.Validation, "Two selected authenticator files use the same Steam identity.");
+                        validatedAccounts.Add(account);
+                    }
+
+                    Manifest stagedManifest = CloneForStorage();
+                    Dictionary<string, string> stagedFiles = new Dictionary<string, string>();
+                    List<string> obsoleteFiles = candidates.Select(candidate => candidate.FileName).ToList();
+                    foreach (SteamGuardAccount account in validatedAccounts)
+                    {
+                        string salt = null;
+                        string iv = null;
+                        string contents = JsonConvert.SerializeObject(account, storageJsonSettings);
+                        if (this.Encrypted)
+                        {
+                            salt = FileEncryptor.GetRandomSalt();
+                            iv = FileEncryptor.GetInitializationVector();
+                            contents = FileEncryptor.EncryptData(passKey, salt, iv, contents);
+                            if (contents == null)
+                                return StorageResult.Failure(StorageFailureKind.Encryption, "An authenticator file could not be encrypted. No files were imported.");
+                        }
+
+                        string filename = account.Session.SteamID.ToString(CultureInfo.InvariantCulture) + "." + Guid.NewGuid().ToString("N") + ".maFile";
+                        stagedFiles.Add(filename, contents);
+                        stagedManifest.Entries.Add(new ManifestEntry
+                        {
+                            SteamID = account.Session.SteamID,
+                            IV = iv,
+                            Salt = salt,
+                            Filename = filename,
+                            SessionNeedsRenewal = account.Session.IsRefreshTokenExpired()
+                        });
+                    }
+
+                    StorageResult result = CommitStorageTransaction(stagedManifest, stagedFiles, obsoleteFiles);
+                    if (result.Succeeded)
+                    {
+                        CopyStorageStateFrom(stagedManifest);
+                        StorageResult normalizationResult = NormalizeAccountFilenames();
+                        if (!normalizationResult.Succeeded)
+                            DiagnosticErrorLogger.Log("Authenticator startup import", normalizationResult.Exception, "Imported accounts were saved but their canonical filenames could not be completed.");
+                    }
+                    return result;
+                }
+                catch (JsonException ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Serialization, "The selected authenticator files are not valid JSON. No files were imported.", ex);
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Io, "The selected authenticator files could not be imported. No files were changed.", ex);
+                }
+            }
+        }
+
         public StorageResult ChangeEncryptionKey(string oldKey, string newKey)
         {
             lock (storageLock)
@@ -496,7 +808,12 @@ namespace Steam_Desktop_Authenticator
                 stagedManifest.Encrypted = toEncrypt;
                 StorageResult result = CommitStorageTransaction(stagedManifest, stagedFiles, obsoleteFiles);
                 if (result.Succeeded)
+                {
                     CopyStorageStateFrom(stagedManifest);
+                    StorageResult normalizationResult = NormalizeAccountFilenames();
+                    if (!normalizationResult.Succeeded)
+                        DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "Encryption changed successfully, but canonical authenticator filenames could not be completed.");
+                }
                 return result;
                 }
                 catch (JsonException ex)
@@ -656,7 +973,8 @@ namespace Steam_Desktop_Authenticator
                     SteamID = account.Session.SteamID,
                     IV = iV,
                     Salt = salt,
-                    Filename = filename
+                    Filename = filename,
+                    SessionNeedsRenewal = account.Session.IsRefreshTokenExpired()
                 };
                 if (previousEntry == null)
                 {
@@ -674,7 +992,12 @@ namespace Steam_Desktop_Authenticator
                     new Dictionary<string, string> { { filename, jsonAccount } },
                     previousEntry == null ? Enumerable.Empty<string>() : new[] { previousEntry.Filename });
                 if (result.Succeeded)
+                {
                     CopyStorageStateFrom(stagedManifest);
+                    StorageResult normalizationResult = NormalizeAccountFilenames();
+                    if (!normalizationResult.Succeeded)
+                        DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "The account was saved, but its canonical filename could not be completed.");
+                }
                 return result;
                 }
                 catch (JsonException ex)
@@ -843,7 +1166,8 @@ namespace Steam_Desktop_Authenticator
 
                     foreach (string filename in retainedObsoleteFilenames)
                     {
-                        if (!obsoleteFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase))
+                        if (!createdFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase) &&
+                            !obsoleteFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase))
                             obsoleteFilenames.Add(filename);
                     }
 
@@ -1467,6 +1791,9 @@ namespace Steam_Desktop_Authenticator
 
             [JsonProperty("steamid")]
             public ulong SteamID { get; set; }
+
+            [JsonProperty("session_needs_renewal")]
+            public bool SessionNeedsRenewal { get; set; }
         }
     }
 }

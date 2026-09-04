@@ -20,12 +20,16 @@ namespace Steam_Desktop_Authenticator
         public SteamGuardAccount account;
         public LoginType LoginReason;
         public SessionData Session;
+        public bool RefreshSucceeded { get; private set; }
 
-        public LoginForm(LoginType loginReason = LoginType.Initial, SteamGuardAccount account = null)
+        private readonly string suppliedPassKey;
+
+        public LoginForm(LoginType loginReason = LoginType.Initial, SteamGuardAccount account = null, string passKey = null)
         {
             InitializeComponent();
             this.LoginReason = loginReason;
             this.account = account;
+            this.suppliedPassKey = passKey;
 
             try
             {
@@ -235,7 +239,12 @@ namespace Steam_Desktop_Authenticator
                 if (payload["user"]?.Type != JTokenType.String || payload["pass"]?.Type != JTokenType.String)
                     return;
 
-                string username = payload.Value<string>("user");
+                // The WebView is untrusted input. During refresh the account name
+                // is part of the selected managed account and cannot be changed by
+                // editing or tampering with the request payload.
+                string username = LoginReason == LoginType.Refresh
+                    ? account?.AccountName
+                    : payload.Value<string>("user");
                 string password = payload.Value<string>("pass");
                 if (username == null || password == null || username.Length > 256 || password.Length > 4096)
                     return;
@@ -457,10 +466,28 @@ namespace Steam_Desktop_Authenticator
             // If we're only logging in for a session refresh then save it and exit
             if (LoginReason == LoginType.Refresh)
             {
+                if (account?.Session == null || sessionData.SteamID == 0 || sessionData.SteamID != account.Session.SteamID)
+                {
+                    AstroMessageBox.Show("The Steam account that authenticated does not match the account being renewed. The existing session was kept.", "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    ResetLoginButton(cancellationToken);
+                    return;
+                }
+
                 Manifest man = Manifest.GetManifest();
+                SessionData previousSession = account.Session;
+                bool previousFullyEnrolled = account.FullyEnrolled;
                 account.FullyEnrolled = true;
                 account.Session = sessionData;
-                HandleManifest(man, true);
+                if (!HandleManifest(man, true, suppliedPassKey))
+                {
+                    // SaveAccount serializes and commits the candidate before the
+                    // in-memory account becomes authoritative. Restore the old
+                    // object whenever that persistence step does not succeed.
+                    account.Session = previousSession;
+                    account.FullyEnrolled = previousFullyEnrolled;
+                    return;
+                }
+                RefreshSucceeded = true;
                 this.Close();
                 return;
             }
@@ -797,16 +824,16 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private void HandleManifest(Manifest man, bool IsRefreshing = false)
+        private bool HandleManifest(Manifest man, bool IsRefreshing = false, string suppliedPassKey = null)
         {
-            string passKey = null;
+            string passKey = man.Encrypted ? suppliedPassKey : null;
             if (man.Entries.Count == 0)
             {
                 passKey = man.PromptSetupPassKey("Please enter an encryption passkey. Leave blank or hit cancel to not encrypt (VERY INSECURE).");
             }
             else if (man.Entries.Count > 0 && man.Encrypted)
             {
-                bool passKeyValid = false;
+                bool passKeyValid = !String.IsNullOrEmpty(passKey) && man.VerifyPasskey(passKey);
                 while (!passKeyValid)
                 {
                     using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey."))
@@ -823,14 +850,14 @@ namespace Steam_Desktop_Authenticator
                         }
                         else
                         {
-                            this.Close();
-                            return;
+                            return false;
                         }
                     }
                 }
             }
 
-            StorageResult saveResult = man.SaveAccount(account, passKey != null, passKey);
+            bool encrypt = man.Encrypted || (man.Entries.Count == 0 && passKey != null);
+            StorageResult saveResult = man.SaveAccount(account, encrypt, passKey);
             if (!saveResult.Succeeded)
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", saveResult.Exception, IsRefreshing
@@ -839,7 +866,7 @@ namespace Steam_Desktop_Authenticator
                 AstroMessageBox.Show(saveResult.UserMessage ?? (IsRefreshing
                     ? "The refreshed session could not be saved."
                     : "The finalized authenticator record could not be saved."), "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
+                return false;
             }
             if (IsRefreshing)
             {
@@ -849,7 +876,7 @@ namespace Steam_Desktop_Authenticator
             {
                 ShowRecoveryCode(account, "Mobile authenticator successfully linked. Keep this recovery code safe.");
             }
-            this.Close();
+            return true;
         }
 
         private void ShowRecoveryCode(SteamGuardAccount recoveryAccount, string statusMessage, bool requireBackupBeforeContinue = false)
