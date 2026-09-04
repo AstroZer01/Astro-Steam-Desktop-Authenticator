@@ -4,10 +4,13 @@ using System.Windows.Forms;
 using SteamAuth;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Globalization;
+using System.IO;
 using System.Text.RegularExpressions;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Text;
 using Newtonsoft.Json;
 using System.Threading;
 using System.Drawing;
@@ -46,10 +49,12 @@ namespace Steam_Desktop_Authenticator
         private readonly SemaphoreSlim tradeLoadSemaphore = new SemaphoreSlim(1, 1);
         private readonly ConcurrentDictionary<ulong, SemaphoreSlim> steamAccountOperationLocks = new ConcurrentDictionary<ulong, SemaphoreSlim>();
         private readonly Dictionary<string, LoadedTradeConfirmation> loadedTradeConfirmations = new Dictionary<string, LoadedTradeConfirmation>();
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> tradeActionsInProgress = new ConcurrentDictionary<string, TaskCompletionSource<bool>>();
         private readonly HashSet<ulong> loadedTradeConfirmationAccounts = new HashSet<ulong>();
         private readonly Dictionary<string, string> unavailableLoginAccounts = new Dictionary<string, string>();
         private readonly Dictionary<string, DateTime> recentlyResolvedLoginRequests = new Dictionary<string, DateTime>();
         private readonly Dictionary<string, DateTime> recentlyResolvedTradeConfirmations = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, DateTime> completedTradeActions = new Dictionary<string, DateTime>();
         private readonly List<LoginNotificationPopup> activeLoginNotificationPopups = new List<LoginNotificationPopup>();
         private LoginApprovalService loginApprovalService;
         private Action trayNotificationClickAction;
@@ -69,6 +74,7 @@ namespace Steam_Desktop_Authenticator
         private long tradeViewRevision;
         private long loginViewRevision;
         private static readonly TimeSpan RecentlyResolvedRequestRetention = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan RecentlyResolvedTradeConfirmationsRetention = TimeSpan.FromMinutes(2);
 
         private long steamTime = 0;
         private long currentSteamChunk = 0;
@@ -82,6 +88,7 @@ namespace Steam_Desktop_Authenticator
         private bool exitAfterSettingsSaveRequested;
         private bool settingsSaveInProgress;
         private CancellationTokenSource proxyTestCancellationSource;
+        private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
         const int VK_RCONTROL = 0xA3;
         const int VK_ESCAPE = 0x1B;
@@ -95,6 +102,7 @@ namespace Steam_Desktop_Authenticator
         private ToolStripMenuItem trayLoginActions;
         private ToolStripMenuItem trayAccountHeading;
         private QrScanOverlayForm qrScanOverlay;
+        private System.Windows.Forms.Timer loadingTimer;
         private bool qrScanInProgress;
 
         private sealed class RecentLoginAttempt
@@ -117,11 +125,11 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private async Task<T> RunSteamAccountOperationAsync<T>(SteamGuardAccount account, Func<Task<T>> operation)
+        private async Task<T> RunSteamAccountOperationAsync<T>(SteamGuardAccount account, Func<Task<T>> operation, CancellationToken cancellationToken = default)
         {
             ulong steamId = account?.Session?.SteamID ?? 0;
             SemaphoreSlim accountLock = steamAccountOperationLocks.GetOrAdd(steamId, _ => new SemaphoreSlim(1, 1));
-            await accountLock.WaitAsync();
+            await accountLock.WaitAsync(cancellationToken);
             try
             {
                 return await operation();
@@ -132,15 +140,15 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private Task<Confirmation[]> FetchTradeConfirmationsForPageAsync(SteamGuardAccount account)
+        private Task<Confirmation[]> FetchTradeConfirmationsForPageAsync(SteamGuardAccount account, CancellationToken cancellationToken = default)
         {
-            return FetchTradeConfirmationsAsync(account, TimeSpan.FromSeconds(1), 2);
+            return FetchTradeConfirmationsAsync(account, TimeSpan.FromSeconds(1), 2, cancellationToken);
         }
 
-        private Task<Confirmation[]> FetchTradeConfirmationsForMonitorAsync(SteamGuardAccount account)
+        private Task<Confirmation[]> FetchTradeConfirmationsForMonitorAsync(SteamGuardAccount account, CancellationToken cancellationToken = default)
         {
             int seconds = Math.Min(GetTradeConfirmationMonitorIntervalSeconds(), 15);
-            return FetchTradeConfirmationsAsync(account, TimeSpan.FromSeconds(seconds), 3);
+            return FetchTradeConfirmationsAsync(account, TimeSpan.FromSeconds(seconds), 3, cancellationToken);
         }
 
         private int GetTradeConfirmationMonitorIntervalSeconds()
@@ -158,7 +166,7 @@ namespace Steam_Desktop_Authenticator
                  (confirmation.ConfType == Confirmation.EMobileConfirmationType.Trade && manifest?.AutoConfirmTrades == true));
         }
 
-        private async Task<Confirmation[]> FetchTradeConfirmationsAsync(SteamGuardAccount account, TimeSpan retryDelay, int retryCount)
+        private async Task<Confirmation[]> FetchTradeConfirmationsAsync(SteamGuardAccount account, TimeSpan retryDelay, int retryCount, CancellationToken cancellationToken = default)
         {
             if (TryGetTradeRateLimitMessage(out string rateLimitMessage))
                 throw new TradeRateLimitedException(rateLimitMessage);
@@ -169,7 +177,7 @@ namespace Steam_Desktop_Authenticator
             // The mobile-confirmation signature is time-sensitive.  Make sure the
             // asynchronous time alignment has completed before creating the first
             // request, rather than relying on the one-second UI timer to win a race.
-            await TimeAligner.GetSteamTimeAsync();
+            await TimeAligner.GetSteamTimeAsync(cancellationToken);
 
             for (int attempt = 0; attempt <= retryCount; attempt++)
             {
@@ -179,12 +187,12 @@ namespace Steam_Desktop_Authenticator
                     {
                         if (refreshAccessTokenBeforeRetry || account.Session.IsAccessTokenExpired())
                         {
-                            await account.Session.RefreshAccessToken();
+                            await account.Session.RefreshAccessToken(false, cancellationToken);
                             if (!PersistLoginSession(account))
                                 throw new InvalidOperationException("Steam refreshed the session, but Astro SDA could not save it securely.");
                         }
-                        return await account.FetchConfirmationsAsync();
-                    });
+                        return await account.FetchConfirmationsAsync(cancellationToken);
+                    }, cancellationToken);
                 }
                 catch (Exception ex) when (IsRateLimitedResponse(ex))
                 {
@@ -194,7 +202,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     lastError = ex;
                     refreshAccessTokenBeforeRetry = IsTradeAuthenticationFailure(ex);
-                    await Task.Delay(retryDelay);
+                    await Task.Delay(retryDelay, cancellationToken);
                 }
             }
 
@@ -231,7 +239,7 @@ namespace Steam_Desktop_Authenticator
                 retryAfter = response.Headers?["Retry-After"];
             }
 
-            if (Int32.TryParse(retryAfter, out int retryAfterSeconds) && retryAfterSeconds > 0)
+            if (Int32.TryParse(retryAfter, NumberStyles.None, CultureInfo.InvariantCulture, out int retryAfterSeconds) && retryAfterSeconds > 0)
                 delay = TimeSpan.FromSeconds(retryAfterSeconds);
             else if (DateTimeOffset.TryParse(retryAfter, out DateTimeOffset retryAfterUtc))
                 delay = retryAfterUtc.UtcDateTime - DateTime.UtcNow;
@@ -330,13 +338,25 @@ namespace Steam_Desktop_Authenticator
             }
             catch (ManifestParseException)
             {
-                AstroMessageBox.Show("Unable to read your settings. Try restating Astro Steam Desktop Assistant.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AstroMessageBox.Show("Unable to read your settings. Try restarting Astro Steam Desktop Assistant.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 this.Close();
+                return;
             }
 
             // Make sure we don't show that welcome dialog again
             this.manifest.FirstRun = false;
-            this.manifest.Save();
+            StorageResult startupSaveResult = this.manifest.SaveWithResult();
+            if (!startupSaveResult.Succeeded)
+            {
+                DiagnosticErrorLogger.Log("Application startup", startupSaveResult.Exception, "The startup manifest could not be saved.");
+                AstroMessageBox.Show(
+                    startupSaveResult.UserMessage ?? "Unable to save application settings. Check that the data folder is writable.",
+                    "Astro Steam Desktop Assistant",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                this.Close();
+                return;
+            }
 
             if (manifest.Encrypted)
             {
@@ -345,7 +365,8 @@ namespace Steam_Desktop_Authenticator
                     passKey = manifest.PromptForPassKey();
                     if (passKey == null)
                     {
-                        Application.Exit();
+                        Close();
+                        return;
                     }
                 }
 
@@ -448,14 +469,7 @@ namespace Steam_Desktop_Authenticator
         {
             if (m.Msg == Program.RestoreExistingInstanceMessage)
             {
-                try
-                {
-                    BeginInvoke((MethodInvoker)RestoreWindowFromActivation);
-                }
-                catch (InvalidOperationException)
-                {
-                    // The form is shutting down and cannot accept an activation request.
-                }
+                TryBeginInvoke(RestoreWindowFromActivation);
                 return;
             }
 
@@ -516,9 +530,9 @@ namespace Steam_Desktop_Authenticator
                                 MessageBoxButtons.OK,
                                 MessageBoxIcon.Information);
                         }
-                        else if (webView != null && webView.CoreWebView2 != null)
+                        else if (GetCoreWebView2IfAvailable() != null)
                         {
-                            _ = webView.CoreWebView2.ExecuteScriptAsync("saveSettings('exit');");
+                            _ = ExecuteScriptSafelyAsync("saveSettings('exit');", "Settings save on exit");
                         }
                         else
                         {
@@ -533,6 +547,7 @@ namespace Steam_Desktop_Authenticator
                     settingsDirty = false;
                 }
 
+                lifetimeCancellationSource.Cancel();
                 CancelProxyOperation();
                 loginActionsTimer.Stop();
                 CloseLoginNotificationPopups();
@@ -553,17 +568,6 @@ namespace Steam_Desktop_Authenticator
             this.loadAccountsList();
         }
 
-        static async Task WaitForLeftAltKeyPress()
-        {
-            while (true)
-            {
-                if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
-                    break;
-
-                await Task.Delay(100);
-            }
-        }
-
         private void SetQrScanWaitingState(bool isWaiting, int remainingSeconds = 0)
         {
             if (isWaiting)
@@ -580,11 +584,8 @@ namespace Steam_Desktop_Authenticator
                 qrScanOverlay.Hide();
             }
 
-            if (webView?.CoreWebView2 != null)
-            {
-                string waitingValue = isWaiting ? "true" : "false";
-                _ = webView.CoreWebView2.ExecuteScriptAsync($"setQrScanWaiting({waitingValue}, {remainingSeconds})");
-            }
+            string waitingValue = isWaiting ? "true" : "false";
+            _ = ExecuteScriptSafelyAsync($"setQrScanWaiting({waitingValue}, {remainingSeconds})", "QR login UI");
         }
 
         private async void btnLoginViaQr_Click(object sender, EventArgs e)
@@ -592,11 +593,14 @@ namespace Steam_Desktop_Authenticator
             if (qrScanInProgress)
                 return;
 
-            if (currentAccount == null)
+            SteamGuardAccount accountAtScanStart = currentAccount;
+            if (accountAtScanStart?.Session == null)
             {
                 SetQrScanWaitingState(false);
                 return;
             }
+
+            ulong steamIdAtScanStart = accountAtScanStart.Session.SteamID;
 
             qrScanInProgress = true;
             try
@@ -627,7 +631,7 @@ namespace Steam_Desktop_Authenticator
                         SetQrScanWaitingState(true, i / 10);
                     }
 
-                    await Task.Delay(100);
+                    await Task.Delay(100, lifetimeCancellationSource.Token);
                 }
 
                 this.btnLoginViaQr.Text = originalText;
@@ -661,27 +665,23 @@ namespace Steam_Desktop_Authenticator
                         return;
                     }
                 
-                    string idOfQR = null;
-                    if (!string.IsNullOrEmpty(result.Text))
-                    {
-                        string[] parts = result.Text.Split('/');
-                        if (parts.Length > 5)
-                        {
-                            idOfQR = parts[5];
-                        }
-                    }
-
-                    if (string.IsNullOrEmpty(idOfQR))
+                    if (!TryGetQrClientId(result.Text, out ulong clientId))
                     {
                         AstroMessageBox.Show("Can't get ID of QR code. Steam might have changed their QR format.", "Wrong QR code.", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
 
+                    if (currentAccount?.Session?.SteamID != steamIdAtScanStart)
+                    {
+                        AstroMessageBox.Show("The selected account changed while scanning. Start the QR scan again for the intended account.", "QR Login", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
                     try
                     {
-                        string response = await currentAccount.SignInViaQR(idOfQR);
+                        string response = await accountAtScanStart.SignInViaQR(clientId.ToString(), lifetimeCancellationSource.Token);
                         if (response != "1")
-                        {
+                            {
                             DiagnosticErrorLogger.Log("QR login approval", new InvalidOperationException("Steam rejected a QR login approval with EResult " + response + "."), "The QR login approval was not accepted.");
                             AstroMessageBox.Show(GetQrLoginFailureMessage(response), "QR Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         }
@@ -695,10 +695,41 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
             }
+            catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+            {
+                // The form is closing; the cancellation is expected.
+            }
             finally
             {
                 qrScanInProgress = false;
             }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            lifetimeCancellationSource.Cancel();
+
+            if (qrScanOverlay != null)
+            {
+                qrScanOverlay.Dispose();
+                qrScanOverlay = null;
+            }
+
+            if (webView != null)
+            {
+                webView.Dispose();
+                webView = null;
+            }
+
+            if (loadingTimer != null)
+            {
+                loadingTimer.Stop();
+                loadingTimer.Dispose();
+                loadingTimer = null;
+            }
+
+            lifetimeCancellationSource.Dispose();
+            base.OnFormClosed(e);
         }
 
         private void btnTradeConfirmations_Click(object sender, EventArgs e)
@@ -812,25 +843,34 @@ namespace Steam_Desktop_Authenticator
 
         private async void menuDeactivateAuthenticator_Click(object sender, EventArgs e)
         {
-            if (currentAccount == null) return;
+            SteamGuardAccount accountAtStart = currentAccount;
+            if (accountAtStart?.Session == null)
+            {
+                AstroMessageBox.Show("Select a signed-in account before removing Steam Guard.", "Deactivate Authenticator", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
             // Check for a valid refresh token first
-            if (currentAccount.Session.IsRefreshTokenExpired())
+            if (accountAtStart.Session.IsRefreshTokenExpired())
             {
                 AstroMessageBox.Show("Your session has expired. Use the login again button under the selected account menu.", "Deactivate Authenticator", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
             // Check for a valid access token, refresh it if needed
-            if (currentAccount.Session.IsAccessTokenExpired())
+            if (accountAtStart.Session.IsAccessTokenExpired())
             {
                 try
                 {
-                    await RunSteamAccountOperationAsync(currentAccount, async () =>
+                    await RunSteamAccountOperationAsync(accountAtStart, async () =>
                     {
-                        await currentAccount.Session.RefreshAccessToken();
+                        await accountAtStart.Session.RefreshAccessToken(false, lifetimeCancellationSource.Token);
                         return true;
-                    });
+                    }, lifetimeCancellationSource.Token);
+                }
+                catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+                {
+                    return;
                 }
                 catch (Exception ex)
                 {
@@ -840,7 +880,7 @@ namespace Steam_Desktop_Authenticator
                 }
             }
 
-            DialogResult res = AstroMessageBox.Show("Would you like to remove Steam Guard completely?\nYes - Remove Steam Guard completely.\nNo - Switch back to Email authentication.", "Deactivate Authenticator: " + currentAccount.AccountName, MessageBoxButtons.YesNoCancel);
+            DialogResult res = AstroMessageBox.Show("Would you like to remove Steam Guard completely?\nYes - Remove Steam Guard completely.\nNo - Switch back to Email authentication.", "Deactivate Authenticator: " + accountAtStart.AccountName, MessageBoxButtons.YesNoCancel);
             int scheme = 0;
             if (res == DialogResult.Yes)
             {
@@ -860,7 +900,11 @@ namespace Steam_Desktop_Authenticator
                 string confCode;
                 try
                 {
-                    confCode = await currentAccount.GenerateSteamGuardCodeAsync();
+                    confCode = await accountAtStart.GenerateSteamGuardCodeAsync(lifetimeCancellationSource.Token);
+                }
+                catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+                {
+                    return;
                 }
                 catch (Exception ex)
                 {
@@ -869,7 +913,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
                 string enteredCode;
-                using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", currentAccount.AccountName, confCode)))
+                using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", accountAtStart.AccountName, confCode)))
                 {
                     confirmationDialog.ShowInputDialog(this);
                     if (confirmationDialog.Canceled)
@@ -884,18 +928,26 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                bool success = await RunSteamAccountOperationAsync(currentAccount, () => currentAccount.DeactivateAuthenticator(scheme));
+                bool success;
+                try
+                {
+                    success = await RunSteamAccountOperationAsync(accountAtStart, () => accountAtStart.DeactivateAuthenticator(scheme, lifetimeCancellationSource.Token), lifetimeCancellationSource.Token);
+                }
+                catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+                {
+                    return;
+                }
                 if (success)
                 {
                     AstroMessageBox.Show(String.Format("Steam Guard {0}. maFile will be deleted after hitting okay. If you need to make a backup, now's the time.", (scheme == 2 ? "removed completely" : "switched to emails")));
-                    this.manifest.RemoveAccount(currentAccount);
+                    this.manifest.RemoveAccount(accountAtStart);
                     this.loadAccountsList();
                 }
                 else
                 {
-                    AstroMessageBox.Show(String.IsNullOrWhiteSpace(currentAccount.LastAuthenticatorOperationError)
+                    AstroMessageBox.Show(String.IsNullOrWhiteSpace(accountAtStart.LastAuthenticatorOperationError)
                         ? "Steam Guard failed to deactivate."
-                        : currentAccount.LastAuthenticatorOperationError);
+                        : accountAtStart.LastAuthenticatorOperationError);
                 }
             }
             else
@@ -906,7 +958,7 @@ namespace Steam_Desktop_Authenticator
 
         private static string GetQrLoginFailureMessage(string result)
         {
-            if (!Int32.TryParse(result, out int steamResult))
+            if (!Int32.TryParse(result, NumberStyles.Integer, CultureInfo.InvariantCulture, out int steamResult))
                 return "Steam returned an invalid QR login response. Refresh the Steam login page and scan a new QR code.";
 
             switch (steamResult)
@@ -984,9 +1036,13 @@ namespace Steam_Desktop_Authenticator
                     {
                         await RunSteamAccountOperationAsync(account, async () =>
                         {
-                            await account.Session.RefreshAccessToken();
+                            await account.Session.RefreshAccessToken(false, lifetimeCancellationSource.Token);
                             return true;
-                        });
+                        }, lifetimeCancellationSource.Token);
+                    }
+                    catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+                    {
+                        return;
                     }
                     catch (Exception ex)
                     {
@@ -996,7 +1052,15 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
-                string confirmationCode = await account.GenerateSteamGuardCodeAsync();
+                string confirmationCode;
+                try
+                {
+                    confirmationCode = await account.GenerateSteamGuardCodeAsync(lifetimeCancellationSource.Token);
+                }
+                catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+                {
+                    return;
+                }
                 string enteredConfirmationCode;
                 using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", account.AccountName, confirmationCode)))
                 {
@@ -1013,7 +1077,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                bool deactivated = await RunSteamAccountOperationAsync(account, () => account.DeactivateAuthenticator(2));
+                bool deactivated = await RunSteamAccountOperationAsync(account, () => account.DeactivateAuthenticator(2, lifetimeCancellationSource.Token), lifetimeCancellationSource.Token);
                 if (!deactivated)
                 {
                     string failureMessage = String.IsNullOrWhiteSpace(account.LastAuthenticatorOperationError)
@@ -1067,6 +1131,10 @@ namespace Steam_Desktop_Authenticator
             {
                 await RemoveManagedAccountAsync(steamId, accountName, removalMode);
             }
+            catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+            {
+                // The form is closing; cancellation is expected.
+            }
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Managed account removal", ex, "The account removal command failed.");
@@ -1074,17 +1142,7 @@ namespace Steam_Desktop_Authenticator
             }
             finally
             {
-                if (webView != null && webView.CoreWebView2 != null)
-                {
-                    try
-                    {
-                        await webView.CoreWebView2.ExecuteScriptAsync("hideSpinner('remove-account');");
-                    }
-                    catch (Exception ex)
-                    {
-                        DiagnosticErrorLogger.Log("Managed account removal", ex, "The account-removal loading indicator could not be cleared.");
-                    }
-                }
+                await ExecuteScriptSafelyAsync("hideSpinner('remove-account');", "Managed account removal");
             }
         }
 
@@ -1207,9 +1265,22 @@ namespace Steam_Desktop_Authenticator
 
         private async void timerSteamGuard_Tick(object sender, EventArgs e)
         {
-            lblStatus.Text = "Aligning time with Steam...";
-            steamTime = await TimeAligner.GetSteamTimeAsync();
-            lblStatus.Text = "";
+            try
+            {
+                lblStatus.Text = "Aligning time with Steam...";
+                steamTime = await TimeAligner.GetSteamTimeAsync(lifetimeCancellationSource.Token);
+                lblStatus.Text = "";
+            }
+            catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                lblStatus.Text = "";
+                DiagnosticErrorLogger.Log("Authenticator token", ex, "The Steam time synchronization request failed.");
+                return;
+            }
 
             currentSteamChunk = steamTime / 30L;
             int secondsUntilChange = (int)(steamTime - (currentSteamChunk * 30L));
@@ -1221,10 +1292,7 @@ namespace Steam_Desktop_Authenticator
                 if (pbTimeout != null) pbTimeout.Value = val;
                 if (astroProgressBar != null) astroProgressBar.Value = val;
 
-                if (webView != null && webView.CoreWebView2 != null)
-                {
-                    _ = webView.CoreWebView2.ExecuteScriptAsync($"updateProgressBar({val})");
-                }
+                _ = ExecuteScriptSafelyAsync($"updateProgressBar({val})", "Authenticator progress UI");
             }
         }
 
@@ -1263,7 +1331,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                Confirmation[] confirmations = await FetchTradeConfirmationsForMonitorAsync(account) ?? Array.Empty<Confirmation>();
+                Confirmation[] confirmations = await FetchTradeConfirmationsForMonitorAsync(account, lifetimeCancellationSource.Token) ?? Array.Empty<Confirmation>();
                 lblStatus.Text = "";
                 var pendingConfirmations = new List<Confirmation>();
                 var autoAcceptConfirmations = new List<Confirmation>();
@@ -1294,8 +1362,12 @@ namespace Steam_Desktop_Authenticator
 
                 if (autoAcceptConfirmations.Count > 0)
                 {
-                    await RunSteamAccountOperationAsync(account, () => account.AcceptMultipleConfirmations(autoAcceptConfirmations.ToArray()));
+                    await RunSteamAccountOperationAsync(account, () => account.AcceptMultipleConfirmations(autoAcceptConfirmations.ToArray(), lifetimeCancellationSource.Token), lifetimeCancellationSource.Token);
                 }
+            }
+            catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+            {
+                advanceQueue = false;
             }
             catch (TradeRateLimitedException ex)
             {
@@ -1341,6 +1413,10 @@ namespace Steam_Desktop_Authenticator
             {
                 await MonitorLoginActionsAsync();
             }
+            catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+            {
+                // The form is closing; cancellation is expected.
+            }
             catch (Exception ex)
             {
                 Debug.WriteLine("Login action monitor failed: " + ex.Message);
@@ -1351,6 +1427,9 @@ namespace Steam_Desktop_Authenticator
         private async Task MonitorLoginActionsAsync()
         {
             if (manifest == null || loginApprovalService == null || !manifest.LoginActionMonitoringEnabled || allAccounts == null)
+                return;
+            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
+            if (cancellationToken.IsCancellationRequested)
                 return;
             if (TryGetLoginRateLimitMessage(out _))
                 return;
@@ -1373,7 +1452,7 @@ namespace Steam_Desktop_Authenticator
                         .ToDictionary(group => group.Key, group => group.First());
                     Interlocked.Increment(ref loginMonitorRequestCount);
                     LoginApprovalFetchResult result = await RunSteamAccountOperationAsync(account,
-                        () => loginApprovalService.FetchPendingRequestsAsync(account, knownRequests));
+                        () => loginApprovalService.FetchPendingRequestsAsync(account, knownRequests, cancellationToken), cancellationToken);
                     if (result.ErrorKind == LoginApprovalErrorKind.SessionExpired)
                     {
                         ScheduleLoginAccountScan(account, TimeSpan.FromMinutes(5), true);
@@ -1437,7 +1516,7 @@ namespace Steam_Desktop_Authenticator
                             {
                                 if (!currentDeviceIpChecked)
                                 {
-                                    currentDeviceIp = await GetCurrentPublicIpv4Async();
+                                    currentDeviceIp = await GetCurrentPublicIpv4Async(cancellationToken);
                                     currentDeviceIpChecked = true;
                                 }
                                 allowCurrentDeviceIp = AreSameIpv4Address(request.IPAddress, currentDeviceIp);
@@ -1452,7 +1531,7 @@ namespace Steam_Desktop_Authenticator
                             continue;
 
                         LoginApprovalActionResult actionResult = await RunSteamAccountOperationAsync(account,
-                            () => loginApprovalService.RespondAsync(account, request, decision));
+                            () => loginApprovalService.RespondAsync(account, request, decision, cancellationToken), cancellationToken);
                         if (actionResult.ErrorKind == LoginApprovalErrorKind.RateLimited)
                         {
                             ApplyLoginRateLimit();
@@ -1517,9 +1596,11 @@ namespace Steam_Desktop_Authenticator
         {
             if (InvokeRequired)
             {
-                BeginInvoke((MethodInvoker)(() => NotifyLoginAction(title, message, icon)));
+                TryBeginInvoke(() => NotifyLoginAction(title, message, icon));
                 return;
             }
+            if (IsDisposed || Disposing)
+                return;
 
             trayNotificationClickAction = OpenLoginActionsFromTray;
             trayIcon.Visible = true;
@@ -1535,9 +1616,11 @@ namespace Steam_Desktop_Authenticator
         {
             if (InvokeRequired)
             {
-                BeginInvoke((MethodInvoker)(() => ShowDesktopLoginNotification(title, message, icon)));
+                TryBeginInvoke(() => ShowDesktopLoginNotification(title, message, icon));
                 return;
             }
+            if (IsDisposed || Disposing)
+                return;
 
             var popup = new LoginNotificationPopup(title, message, icon);
             popup.NotificationClicked += (sender, args) => OpenLoginActionsFromTray();
@@ -1550,9 +1633,11 @@ namespace Steam_Desktop_Authenticator
         {
             if (InvokeRequired)
             {
-                BeginInvoke((MethodInvoker)(() => NotifyTradeConfirmation(account, confirmation)));
+                TryBeginInvoke(() => NotifyTradeConfirmation(account, confirmation));
                 return;
             }
+            if (IsDisposed || Disposing || account == null || confirmation == null)
+                return;
 
             string title = confirmation.ConfType == Confirmation.EMobileConfirmationType.MarketListing
                 ? "Market confirmation needed"
@@ -1577,12 +1662,13 @@ namespace Steam_Desktop_Authenticator
         {
             if (InvokeRequired)
             {
-                BeginInvoke((MethodInvoker)(() => UpdateTradePendingCount(count)));
+                TryBeginInvoke(() => UpdateTradePendingCount(count));
                 return;
             }
+            if (IsDisposed || Disposing)
+                return;
 
-            if (webView?.CoreWebView2 != null)
-                _ = webView.CoreWebView2.ExecuteScriptAsync("setTradePendingCount(" + Math.Max(0, count).ToString() + ");");
+            _ = ExecuteScriptSafelyAsync("setTradePendingCount(" + Math.Max(0, count).ToString() + ");", "Trade confirmation badge");
         }
 
         private void CloseLoginNotificationPopups()
@@ -1797,7 +1883,8 @@ namespace Steam_Desktop_Authenticator
 
         private async Task PublishCachedTradesAsync(string errorMessage = null, string selection = null)
         {
-            if (webView == null || webView.CoreWebView2 == null)
+            CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
+            if (coreWebView == null)
                 return;
 
             string selectionToPublish = String.IsNullOrWhiteSpace(selection) ? tradeAccountSelection : selection;
@@ -1821,7 +1908,14 @@ namespace Steam_Desktop_Authenticator
             string jsError = String.IsNullOrWhiteSpace(errorMessage) ? "null" : JsonConvert.SerializeObject(errorMessage);
             long revision = Interlocked.Increment(ref tradeViewRevision);
             string jsSelection = JsonConvert.SerializeObject(selectionToPublish);
-            await webView.CoreWebView2.ExecuteScriptAsync($"loadConfirmations({jsonStr}, {jsError}, {revision}, {jsSelection})");
+            try
+            {
+                await coreWebView.ExecuteScriptAsync($"loadConfirmations({jsonStr}, {jsError}, {revision}, {jsSelection})");
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Trade confirmation UI", ex, "The trade confirmation list could not be sent to the UI.");
+            }
         }
 
         private async Task LoadCachedTradesAsync(string selectedAccountName)
@@ -1879,16 +1973,20 @@ namespace Steam_Desktop_Authenticator
                 IPAddress.Parse(first).Equals(IPAddress.Parse(second));
         }
 
-        private static async Task<string> GetCurrentPublicIpv4Async()
+        private static async Task<string> GetCurrentPublicIpv4Async(CancellationToken cancellationToken = default)
         {
             try
             {
                 using (var client = ProxyService.CreateActiveHttpClient())
                 {
                     client.Timeout = TimeSpan.FromSeconds(5);
-                    string candidate = (await client.GetStringAsync("https://api.ipify.org")).Trim();
+                    string candidate = (await client.GetStringAsync("https://api.ipify.org", cancellationToken)).Trim();
                     return IsValidIpv4Address(candidate) ? candidate : null;
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (HttpRequestException)
             {
@@ -1907,20 +2005,21 @@ namespace Steam_Desktop_Authenticator
         private void OpenLoginActionsFromTray()
         {
             trayRestore_Click(this, EventArgs.Empty);
-            if (webView != null && webView.CoreWebView2 != null)
-                _ = webView.CoreWebView2.ExecuteScriptAsync("switchTab('login-actions');");
+            _ = ExecuteScriptSafelyAsync("switchTab('login-actions');", "Login actions navigation");
         }
 
         private void OpenTradeConfirmationsFromNotification()
         {
             trayRestore_Click(this, EventArgs.Empty);
-            if (webView != null && webView.CoreWebView2 != null)
-                _ = webView.CoreWebView2.ExecuteScriptAsync("switchTab('trades');");
+            _ = ExecuteScriptSafelyAsync("switchTab('trades');", "Trade confirmations navigation");
         }
 
         private async Task FetchLoginActionsForManualRefreshAsync()
         {
             if (manifest == null || loginApprovalService == null || allAccounts == null)
+                return;
+            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
+            if (cancellationToken.IsCancellationRequested)
                 return;
             if (TryGetLoginRateLimitMessage(out _))
                 return;
@@ -1935,7 +2034,7 @@ namespace Steam_Desktop_Authenticator
                         continue;
 
                     LoginApprovalFetchResult result = await RunSteamAccountOperationAsync(account,
-                        () => loginApprovalService.FetchPendingRequestsAsync(account));
+                        () => loginApprovalService.FetchPendingRequestsAsync(account, cancellationToken: cancellationToken), cancellationToken);
                     if (result.ErrorKind == LoginApprovalErrorKind.SessionExpired)
                     {
                         unavailableLoginAccounts[account.AccountName] = result.ErrorMessage;
@@ -1980,7 +2079,8 @@ namespace Steam_Desktop_Authenticator
 
         private async Task PublishCachedLoginActionsAsync()
         {
-            if (webView == null || webView.CoreWebView2 == null)
+            CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
+            if (coreWebView == null)
                 return;
 
             var jsonSettings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
@@ -2029,7 +2129,14 @@ namespace Steam_Desktop_Authenticator
                     occurredAtUtc = attempt.OccurredAtUtc.ToString("O")
                 })
             }, jsonSettings);
-            await webView.CoreWebView2.ExecuteScriptAsync("loadLoginActions(" + json + ");");
+            try
+            {
+                await coreWebView.ExecuteScriptAsync("loadLoginActions(" + json + ");");
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Login actions UI", ex, "The login-action list could not be returned to the UI.");
+            }
         }
 
         private async Task RefreshLoginActionsAsync()
@@ -2053,8 +2160,10 @@ namespace Steam_Desktop_Authenticator
 
         private async Task RespondToLoginActionAsync(string accountName, ulong clientId, string action)
         {
+            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (manifest.LoginActionMode != LoginActionModes.Manual)
                 {
                     AstroMessageBox.Show("Manual actions are disabled while an automatic login action is enabled.", "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -2081,11 +2190,11 @@ namespace Steam_Desktop_Authenticator
                 if (AstroMessageBox.Show(prompt, "Confirm Login Action", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     return;
 
-                await loginActionsSemaphore.WaitAsync();
+                await loginActionsSemaphore.WaitAsync(cancellationToken);
                 try
                 {
                     LoginApprovalActionResult result = await RunSteamAccountOperationAsync(account,
-                        () => loginApprovalService.RespondAsync(account, request, decision));
+                        () => loginApprovalService.RespondAsync(account, request, decision, cancellationToken), cancellationToken);
                     if (!result.Succeeded && result.ErrorKind != LoginApprovalErrorKind.ExpiredOrDuplicate)
                     {
                         AstroMessageBox.Show(result.ErrorMessage, "Login Actions", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -2116,10 +2225,35 @@ namespace Steam_Desktop_Authenticator
                 await PublishCachedLoginActionsAsync();
                 _ = RefreshLoginActionsAsync();
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // The form is closing; cancellation is expected.
+            }
             finally
             {
                 await HideWebSpinnerAsync("login-action");
             }
+        }
+
+        private static bool TryGetQrClientId(string text, out ulong clientId)
+        {
+            clientId = 0;
+            if (String.IsNullOrWhiteSpace(text) ||
+                !Uri.TryCreate(text.Trim(), UriKind.Absolute, out Uri uri) ||
+                !String.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+                uri.IsDefaultPort == false && uri.Port != 443)
+            {
+                return false;
+            }
+
+            string[] allowedHosts = { "steamcommunity.com", "s.team", "steampowered.com" };
+            if (!allowedHosts.Any(host => String.Equals(uri.Host, host, StringComparison.OrdinalIgnoreCase)))
+                return false;
+
+            string[] pathSegments = uri.AbsolutePath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            return pathSegments.Length > 0 &&
+                UInt64.TryParse(pathSegments[pathSegments.Length - 1], NumberStyles.None, CultureInfo.InvariantCulture, out clientId) &&
+                clientId != 0;
         }
 
         // Other methods
@@ -2161,11 +2295,10 @@ namespace Steam_Desktop_Authenticator
                 txtLoginToken.Text = token;
                 groupAccount.Text = "Account: " + currentAccount.AccountName;
 
-                if (webView != null && webView.CoreWebView2 != null)
-                {
-                    webView.CoreWebView2.ExecuteScriptAsync($"updateToken('{token}')");
-                    webView.CoreWebView2.ExecuteScriptAsync($"updateCurrentAccount('{currentAccount.AccountName}')");
-                }
+                string jsToken = JsonConvert.SerializeObject(token ?? String.Empty);
+                string jsAccountName = JsonConvert.SerializeObject(currentAccount.AccountName ?? String.Empty);
+                _ = ExecuteScriptSafelyAsync($"updateToken({jsToken})", "Authenticator token UI");
+                _ = ExecuteScriptSafelyAsync($"updateCurrentAccount({jsAccountName})", "Current account UI");
             }
         }
 
@@ -2230,7 +2363,7 @@ namespace Steam_Desktop_Authenticator
                 AstroTheme.StyleDisabledGlassButton(btnCopy);
             }
 
-            if (webView != null && webView.CoreWebView2 != null)
+            if (GetCoreWebView2IfAvailable() != null)
             {
                 var accounts = allAccounts.Select(a => new
                 {
@@ -2238,8 +2371,8 @@ namespace Steam_Desktop_Authenticator
                     steamId = a.Session == null ? null : a.Session.SteamID.ToString()
                 }).ToArray();
                 string jsonAccounts = JsonConvert.SerializeObject(accounts);
-                webView.CoreWebView2.ExecuteScriptAsync($"updateAccountList({jsonAccounts})");
-                webView.CoreWebView2.ExecuteScriptAsync($"updateEncryptionState({manifest.Encrypted.ToString().ToLower()}, {hasAccounts.ToString().ToLower()})");
+                _ = ExecuteScriptSafelyAsync($"updateAccountList({jsonAccounts})", "Account list UI");
+                _ = ExecuteScriptSafelyAsync($"updateEncryptionState({manifest.Encrypted.ToString().ToLowerInvariant()}, {hasAccounts.ToString().ToLowerInvariant()})", "Encryption state UI");
             }
         }
 
@@ -2336,10 +2469,11 @@ namespace Steam_Desktop_Authenticator
         }
 
         // Logic for version checking
-        // Logic for version checking
         private Version newVersion = null;
         private Version currentVersion = null;
         private static readonly HttpClient updateClient = new HttpClient();
+        private const int MaximumUpdateResponseBytes = 1024 * 1024;
+        private static readonly TimeSpan UpdateRequestTimeout = TimeSpan.FromSeconds(20);
         private string updateUrl = null;
         private bool startupUpdateCheck = true;
         private bool isCheckingForUpdates = false;
@@ -2347,6 +2481,9 @@ namespace Steam_Desktop_Authenticator
         private async void checkForUpdates()
         {
             if (isCheckingForUpdates) return;
+            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
+            if (cancellationToken.IsCancellationRequested)
+                return;
             
             if (startupUpdateCheck && !Manifest.GetManifest().CheckForUpdates)
             {
@@ -2358,19 +2495,54 @@ namespace Steam_Desktop_Authenticator
 
             try
             {
-                var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest");
-                request.Headers.Add("User-Agent", "Astro Steam Desktop Assistant");
-                request.Headers.Add("Accept", "application/json");
+                using (CancellationTokenSource updateTimeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                using (var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest"))
+                {
+                    updateTimeoutSource.CancelAfter(UpdateRequestTimeout);
+                    CancellationToken requestCancellationToken = updateTimeoutSource.Token;
+                    request.Headers.Add("User-Agent", "Astro Steam Desktop Assistant");
+                    request.Headers.Add("Accept", "application/json");
                 
-                var response = await updateClient.SendAsync(request);
-                response.EnsureSuccessStatusCode();
+                    using (HttpResponseMessage response = await updateClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, requestCancellationToken))
+                    {
+                        response.EnsureSuccessStatusCode();
+                        if (response.Content == null || response.Content.Headers.ContentLength > MaximumUpdateResponseBytes)
+                            throw new InvalidDataException("The update service returned an oversized response.");
                 
-                string result = await response.Content.ReadAsStringAsync();
-                dynamic resultObject = JsonConvert.DeserializeObject(result);
-                newVersion = new Version(resultObject.tag_name.Value);
-                currentVersion = new Version(Application.ProductVersion);
-                updateUrl = resultObject.assets.First.browser_download_url.Value;
-                compareVersions();
+                        string responseBody = await ReadResponseBodyWithLimitAsync(response.Content, requestCancellationToken);
+
+                        JObject resultObject;
+                        using (StringReader stringReader = new StringReader(responseBody))
+                        using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                        {
+                            resultObject = JObject.Load(jsonReader);
+                        }
+
+                        string tagName = resultObject.Value<string>("tag_name")?.Trim();
+                        if (String.IsNullOrWhiteSpace(tagName) || tagName.Length > 64)
+                            throw new InvalidDataException("The update service returned an invalid version.");
+                        if (tagName.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+                            tagName = tagName.Substring(1);
+                        if (!Version.TryParse(tagName, out Version parsedVersion) || parsedVersion < new Version(0, 0))
+                            throw new InvalidDataException("The update service returned an invalid version.");
+
+                        JArray assets = resultObject["assets"] as JArray;
+                        string downloadUrl = assets?.OfType<JObject>()
+                            .Select(asset => asset.Value<string>("browser_download_url"))
+                            .FirstOrDefault(IsTrustedUpdateUrl);
+                        if (String.IsNullOrWhiteSpace(downloadUrl))
+                            throw new InvalidDataException("The update service returned no trusted download.");
+
+                        newVersion = parsedVersion;
+                        currentVersion = new Version(Application.ProductVersion);
+                        updateUrl = downloadUrl;
+                        compareVersions();
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // The form is closing; cancellation is expected.
             }
             catch (Exception)
             {
@@ -2413,7 +2585,18 @@ namespace Steam_Desktop_Authenticator
 
                 if (updateDialog == DialogResult.Yes)
                 {
-                    Process.Start(new ProcessStartInfo(updateUrl) { UseShellExecute = true });
+                    try
+                    {
+                        using (Process process = Process.Start(new ProcessStartInfo(updateUrl) { UseShellExecute = true })
+                            ?? throw new InvalidOperationException("Windows did not create the update process."))
+                        {
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Application update", ex, "The trusted update page could not be opened.");
+                        AstroMessageBox.Show("The update page could not be opened. Visit the project release page to download the update.", "Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
                 }
             }
             else
@@ -2451,6 +2634,53 @@ namespace Steam_Desktop_Authenticator
 
         // --- Astro Modern UI Restructuring (WebView2) ---
         private WebView2 webView;
+
+        private CoreWebView2 GetCoreWebView2IfAvailable()
+        {
+            if (IsDisposed || Disposing || webView == null)
+                return null;
+
+            try
+            {
+                return webView.CoreWebView2;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException || ex is ObjectDisposedException)
+            {
+                return null;
+            }
+        }
+
+        private bool TryBeginInvoke(MethodInvoker action)
+        {
+            if (action == null || IsDisposed || Disposing || !IsHandleCreated)
+                return false;
+
+            try
+            {
+                BeginInvoke(action);
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private async Task ExecuteScriptSafelyAsync(string script, string operation)
+        {
+            CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
+            if (coreWebView == null)
+                return;
+
+            try
+            {
+                await coreWebView.ExecuteScriptAsync(script);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log(operation, ex, "The WebView2 operation could not be completed.");
+            }
+        }
 
         private async void SetupModernUI()
         {
@@ -2496,7 +2726,7 @@ namespace Steam_Desktop_Authenticator
                 spinnerAngle = (spinnerAngle + 12) % 360;
             };
 
-            System.Windows.Forms.Timer loadingTimer = new System.Windows.Forms.Timer();
+            loadingTimer = new System.Windows.Forms.Timer();
             loadingTimer.Interval = 30;
             loadingTimer.Tick += (s, e) => {
                 if (lblStatus.Text != "") lblLoading.Text = lblStatus.Text;
@@ -2535,13 +2765,16 @@ namespace Steam_Desktop_Authenticator
             {
                 loadingTimer.Stop();
                 loadingTimer.Dispose();
-                lblLoading.Text = "Astro UI could not be initialized. Restore the complete release folder and try again.";
+                if (!IsDisposed && !Disposing)
+                    lblLoading.Text = "Astro UI could not be initialized. Restore the complete release folder and try again.";
                 DiagnosticErrorLogger.Log("Astro UI", ex, "The dashboard could not be initialized.");
-                StartBackgroundServicesAfterUiReady();
                 return;
             }
 
-            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+            if (IsDisposed || lifetimeCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
+                return;
+
+            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
 
             // Wire up message receiving from JS
@@ -2550,13 +2783,15 @@ namespace Steam_Desktop_Authenticator
             // When navigation is done, we swap out the old UI for the new one
             webView.NavigationCompleted += (sender, args) =>
             {
+                if (IsDisposed || lifetimeCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
+                    return;
                 if (!args.IsSuccess)
                 {
                     loadingTimer.Stop();
                     loadingTimer.Dispose();
-                    lblLoading.Text = "Astro UI could not be loaded. Restore the complete release folder and try again.";
+                    if (!IsDisposed && !Disposing)
+                        lblLoading.Text = "Astro UI could not be loaded. Restore the complete release folder and try again.";
                     DiagnosticErrorLogger.Log("Astro UI", new InvalidOperationException("WebView2 navigation failed: " + args.WebErrorStatus), "The dashboard could not be loaded.");
-                    StartBackgroundServicesAfterUiReady();
                     return;
                 }
 
@@ -2570,23 +2805,27 @@ namespace Steam_Desktop_Authenticator
                 loadAccountInfo();
                 
                 // Set app version
-                webView.ExecuteScriptAsync($"setAppVersion('{Application.ProductVersion}');");
+                string jsVersion = JsonConvert.SerializeObject(Application.ProductVersion);
+                _ = ExecuteScriptSafelyAsync($"setAppVersion({jsVersion});", "Application version UI");
                 
                 // Set autostart checkbox
                 bool isAutoStart = WindowsStartup.IsEnabled();
-                webView.ExecuteScriptAsync($"setAutoStart({isAutoStart.ToString().ToLower()});");
+                _ = ExecuteScriptSafelyAsync($"setAutoStart({isAutoStart.ToString().ToLowerInvariant()});", "Startup setting UI");
 
                 StartBackgroundServicesAfterUiReady();
             };
 
             // Load local html file
             string htmlPath = System.IO.Path.Combine(ApplicationPaths.UiDirectory, "index.html");
+            if (IsDisposed || lifetimeCancellationSource.IsCancellationRequested || webView == null)
+                return;
             webView.Source = new Uri(htmlPath);
         }
 
         private void SendSettingsToWebView()
         {
-            if (webView == null || webView.CoreWebView2 == null || manifest == null)
+            CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
+            if (coreWebView == null || manifest == null)
                 return;
 
             var settings = new JObject();
@@ -2608,12 +2847,13 @@ namespace Steam_Desktop_Authenticator
             settings["proxyUsername"] = manifest.ProxyUsername;
             settings["proxyHasPassword"] = !String.IsNullOrEmpty(manifest.ProxyPassword);
 
-            webView.CoreWebView2.ExecuteScriptAsync($"loadSettings({settings.ToString(Newtonsoft.Json.Formatting.None)})");
+            _ = ExecuteScriptSafelyAsync($"loadSettings({settings.ToString(Newtonsoft.Json.Formatting.None)})", "Settings UI");
         }
 
         private async Task PublishProxyTestResultAsync(ProxyTestResult result)
         {
-            if (webView == null || webView.CoreWebView2 == null || result == null)
+            CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
+            if (coreWebView == null || result == null)
                 return;
             JObject payload = new JObject
             {
@@ -2621,16 +2861,31 @@ namespace Steam_Desktop_Authenticator
                 ["message"] = result.Message ?? String.Empty,
                 ["exitIp"] = result.ExitIp
             };
-            await webView.CoreWebView2.ExecuteScriptAsync($"proxyTestCompleted({payload.ToString(Newtonsoft.Json.Formatting.None)});");
+            try
+            {
+                await coreWebView.ExecuteScriptAsync($"proxyTestCompleted({payload.ToString(Newtonsoft.Json.Formatting.None)});");
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Proxy settings UI", ex, "The proxy test result could not be returned to the UI.");
+            }
         }
 
         private async Task PublishSettingsSaveFailureAsync(string message)
         {
             exitAfterSettingsSaveRequested = false;
-            if (webView == null || webView.CoreWebView2 == null)
+            CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
+            if (coreWebView == null)
                 return;
             string jsMessage = JsonConvert.SerializeObject(message ?? "Settings were not saved.");
-            await webView.CoreWebView2.ExecuteScriptAsync($"settingsSaveFailed({jsMessage});");
+            try
+            {
+                await coreWebView.ExecuteScriptAsync($"settingsSaveFailed({jsMessage});");
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Settings UI", ex, "The settings-save failure could not be returned to the UI.");
+            }
         }
 
         private CancellationTokenSource BeginProxyOperation()
@@ -2839,15 +3094,14 @@ namespace Steam_Desktop_Authenticator
                 settingsDirty = false;
                 SendSettingsToWebView();
                 string jsContext = JsonConvert.SerializeObject(saveContext);
-                if (webView != null && webView.CoreWebView2 != null)
-                    await webView.CoreWebView2.ExecuteScriptAsync($"settingsSaved({jsContext});");
+                await ExecuteScriptSafelyAsync($"settingsSaved({jsContext});", "Settings UI");
 
                 if (String.Equals(saveContext, "exit", StringComparison.Ordinal) || exitAfterSettingsSaveRequested)
                 {
                     exitAfterSettingsSaveRequested = false;
                     allowExitAfterSettingsSave = true;
                     explicitExitRequested = true;
-                    BeginInvoke((MethodInvoker)Close);
+                    TryBeginInvoke(Close);
                 }
             }
             catch (OperationCanceledException)
@@ -2867,13 +3121,108 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private static bool IsTrustedUpdateUrl(string value)
+        {
+            return Uri.TryCreate(value, UriKind.Absolute, out Uri uri) &&
+                String.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase) &&
+                uri.Port == 443 &&
+                uri.AbsolutePath.StartsWith(
+                    "/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/download/",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static async Task<string> ReadResponseBodyWithLimitAsync(HttpContent content, CancellationToken cancellationToken)
+        {
+            if (content == null)
+                throw new InvalidDataException("The update service returned an empty response.");
+
+            using (Stream responseStream = await content.ReadAsStreamAsync())
+            using (MemoryStream responseBody = new MemoryStream())
+            {
+                byte[] buffer = new byte[81920];
+                int bytesRead;
+                int totalBytes = 0;
+                while ((bytesRead = await responseStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                {
+                    if (bytesRead > MaximumUpdateResponseBytes - totalBytes)
+                        throw new InvalidDataException("The update service returned an oversized response.");
+                    responseBody.Write(buffer, 0, bytesRead);
+                    totalBytes += bytesRead;
+                }
+
+                return new UTF8Encoding(false, true).GetString(responseBody.ToArray());
+            }
+        }
+
+        private static bool TryGetWebMessageString(JObject payload, string propertyName, int maximumLength, out string value, bool required = false)
+        {
+            value = null;
+            JToken token = payload?[propertyName];
+            if (token == null || token.Type == JTokenType.Null)
+                return !required;
+            if (token.Type != JTokenType.String)
+                return false;
+
+            value = token.Value<string>();
+            return value != null && value.Length <= maximumLength && (!required || !String.IsNullOrWhiteSpace(value));
+        }
+
+        private static bool HasPayloadType(JObject payload, string propertyName, JTokenType expectedType)
+        {
+            JToken token = payload?[propertyName];
+            return token == null || token.Type == JTokenType.Null || token.Type == expectedType;
+        }
+
+        private static bool IsSettingsPayloadValid(JObject payload)
+        {
+            string[] booleanProperties =
+            {
+                "proxyEnabled", "loginActionAutoAllowIpEnabled", "loginActionAutoAllowCurrentDeviceIp",
+                "tradeConfirmationCustomIntervalEnabled", "autoConfirmMarket", "autoConfirmTrades",
+                "minimizeToTray", "diagnosticErrorLoggingEnabled", "loginActionMonitoringEnabled"
+            };
+            foreach (string property in booleanProperties)
+            {
+                if (!HasPayloadType(payload, property, JTokenType.Boolean))
+                    return false;
+            }
+
+            if (!HasPayloadType(payload, "tradeConfirmationCheckInterval", JTokenType.Integer) ||
+                !HasPayloadType(payload, "proxyPort", JTokenType.Integer))
+                return false;
+
+            return TryGetWebMessageString(payload, "saveContext", 32, out _) &&
+                TryGetWebMessageString(payload, "loginActionMode", 32, out _) &&
+                TryGetWebMessageString(payload, "loginActionAutoAllowIp", 64, out _) &&
+                TryGetWebMessageString(payload, "proxyScheme", 16, out _) &&
+                TryGetWebMessageString(payload, "proxyHost", 256, out _) &&
+                TryGetWebMessageString(payload, "proxyUsername", 256, out _) &&
+                TryGetWebMessageString(payload, "proxyPasswordAction", 16, out _) &&
+                TryGetWebMessageString(payload, "proxyPassword", 4096, out _);
+        }
+
         private async void CoreWebView2_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             string message = e.WebMessageAsJson;
-            if (string.IsNullOrEmpty(message)) return;
+            if (String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
 
-            JObject payload = JObject.Parse(message);
-            string action = (string)payload["action"];
+            JObject payload;
+            try
+            {
+                using (StringReader stringReader = new StringReader(message))
+                using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                {
+                    payload = JObject.Load(jsonReader);
+                }
+            }
+            catch (JsonException)
+            {
+                return;
+            }
+
+            if (!TryGetWebMessageString(payload, "action", 64, out string action, true))
+                return;
 
             if (action == "copy_token")
             {
@@ -2881,15 +3230,16 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "setup_account")
             {
-                this.BeginInvoke((MethodInvoker)delegate { btnSteamLogin_Click(this, EventArgs.Empty); });
+                TryBeginInvoke(() => btnSteamLogin_Click(this, EventArgs.Empty));
             }
             else if (action == "setup_encryption")
             {
-                this.BeginInvoke((MethodInvoker)delegate { btnManageEncryption_Click(this, EventArgs.Empty); });
+                TryBeginInvoke(() => btnManageEncryption_Click(this, EventArgs.Empty));
             }
             else if (action == "import_account")
             {
-                this.BeginInvoke((MethodInvoker)delegate { 
+                TryBeginInvoke(() =>
+                {
                     using (ImportAccountForm importForm = new ImportAccountForm(this.passKey))
                     {
                         importForm.ShowDialog(this);
@@ -2900,15 +3250,16 @@ namespace Steam_Desktop_Authenticator
 
             else if (action == "login_qr")
             {
-                this.BeginInvoke((MethodInvoker)delegate { btnLoginViaQr_Click(this, EventArgs.Empty); });
+                TryBeginInvoke(() => btnLoginViaQr_Click(this, EventArgs.Empty));
             }
             else if (action == "switch_account")
             {
-                string accName = (string)payload["accountName"];
-                string steamIdText = (string)payload["steamId"];
+                if (!TryGetWebMessageString(payload, "accountName", 256, out string accName) ||
+                    !TryGetWebMessageString(payload, "steamId", 32, out string steamIdText))
+                    return;
                 ulong steamId;
                 SteamGuardAccount selectedAccount = null;
-                if (allAccounts != null && ulong.TryParse(steamIdText, out steamId))
+                if (allAccounts != null && ulong.TryParse(steamIdText, NumberStyles.None, CultureInfo.InvariantCulture, out steamId))
                 {
                     selectedAccount = allAccounts.FirstOrDefault(account => account.Session != null && account.Session.SteamID == steamId);
                 }
@@ -2924,23 +3275,23 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "remove_account")
             {
-                string steamIdText = (string)payload["steamId"];
-                string accountName = (string)payload["accountName"];
-                string removalMode = (string)payload["removalMode"];
+                if (!TryGetWebMessageString(payload, "steamId", 32, out string steamIdText) ||
+                    !TryGetWebMessageString(payload, "accountName", 256, out string accountName) ||
+                    !TryGetWebMessageString(payload, "removalMode", 16, out string removalMode, true))
+                    return;
                 ulong steamId;
-                bool hasSteamId = ulong.TryParse(steamIdText, out steamId);
+                bool hasSteamId = ulong.TryParse(steamIdText, NumberStyles.None, CultureInfo.InvariantCulture, out steamId);
                 bool validMode = removalMode == "unlink" || removalMode == "remove";
                 bool validLocalRemoval = removalMode == "remove" && !String.IsNullOrWhiteSpace(accountName);
                 if (validMode && (hasSteamId || validLocalRemoval))
                 {
                     ulong? selectedSteamId = hasSteamId ? steamId : (ulong?)null;
-                    this.BeginInvoke((MethodInvoker)delegate { _ = RemoveManagedAccountFromWebAsync(selectedSteamId, accountName, removalMode); });
+                    TryBeginInvoke(() => _ = RemoveManagedAccountFromWebAsync(selectedSteamId, accountName, removalMode));
                 }
                 else
                 {
                     AstroMessageBox.Show("The requested account removal is invalid. Refresh the account list and try again.", "Remove Account", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    if (webView != null && webView.CoreWebView2 != null)
-                        _ = webView.CoreWebView2.ExecuteScriptAsync("hideSpinner('remove-account');");
+                    _ = ExecuteScriptSafelyAsync("hideSpinner('remove-account');", "Managed account removal");
                 }
             }
             else if (action == "load_settings")
@@ -2949,14 +3300,26 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "save_settings")
             {
+                if (!IsSettingsPayloadValid(payload))
+                {
+                    await PublishSettingsSaveFailureAsync("The settings message was invalid. No changes were saved.");
+                    return;
+                }
                 await SaveSettingsAsync(payload);
             }
             else if (action == "test_proxy")
             {
+                if (!IsSettingsPayloadValid(payload))
+                {
+                    await PublishProxyTestResultAsync(new ProxyTestResult { Succeeded = false, Message = "The proxy settings message was invalid." });
+                    return;
+                }
                 await TestProxyFromPayloadAsync(payload);
             }
             else if (action == "settings_dirty_changed")
             {
+                if (!HasPayloadType(payload, "dirty", JTokenType.Boolean))
+                    return;
                 settingsDirty = (bool?)payload["dirty"] ?? false;
             }
             else if (action == "discard_settings")
@@ -2966,22 +3329,27 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "toggle_autostart")
             {
+                if (!HasPayloadType(payload, "enabled", JTokenType.Boolean))
+                    return;
                 bool enable = (bool?)payload["enabled"] ?? false;
                 WindowsStartup.SetEnabled(enable);
             }
             else if (action == "active_tab_changed")
             {
-                string tabName = (string)payload["tabName"];
+                if (!TryGetWebMessageString(payload, "tabName", 32, out string tabName, true))
+                    return;
                 if (tabName == "authenticator" || tabName == "trades" || tabName == "login-actions" || tabName == "settings")
                     activeWebTab = tabName;
             }
             else if (action == "load_trades_cache")
             {
-                _ = LoadCachedTradesAsync((string)payload["accountName"]);
+                if (TryGetWebMessageString(payload, "accountName", 256, out string accountName))
+                    _ = LoadCachedTradesAsync(accountName);
             }
             else if (action == "refresh_trades")
             {
-                _ = LoadTradesAsync((string)payload["accountName"]);
+                if (TryGetWebMessageString(payload, "accountName", 256, out string accountName))
+                    _ = LoadTradesAsync(accountName);
             }
             else if (action == "load_login_actions")
             {
@@ -2993,10 +3361,13 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "respond_login_action")
             {
-                string accountName = (string)payload["accountName"];
-                string clientIdText = (string)payload["clientId"];
-                string decision = (string)payload["decision"];
-                if (!String.IsNullOrWhiteSpace(accountName) && ulong.TryParse(clientIdText, out ulong clientId) &&
+                if (!TryGetWebMessageString(payload, "accountName", 256, out string accountName, true) ||
+                    !TryGetWebMessageString(payload, "clientId", 32, out string clientIdText, true) ||
+                    !TryGetWebMessageString(payload, "decision", 16, out string decision, true))
+                {
+                    await HideWebSpinnerAsync("login-action");
+                }
+                else if (!String.IsNullOrWhiteSpace(accountName) && ulong.TryParse(clientIdText, NumberStyles.None, CultureInfo.InvariantCulture, out ulong clientId) && clientId != 0 &&
                     (decision == "approve" || decision == "deny"))
                 {
                     _ = RespondToLoginActionAsync(accountName, clientId, decision);
@@ -3008,7 +3379,8 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "refresh_login_account")
             {
-                string accountName = (string)payload["accountName"];
+                if (!TryGetWebMessageString(payload, "accountName", 256, out string accountName, true))
+                    return;
                 SteamGuardAccount account = allAccounts?.FirstOrDefault(item => item.AccountName == accountName);
                 if (account != null)
                 {
@@ -3018,11 +3390,14 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "accept_trade" || action == "reject_trade")
             {
-                string confirmationKey = (string)payload["id"];
-                if (!String.IsNullOrWhiteSpace(confirmationKey))
+                if (!TryGetWebMessageString(payload, "id", 64, out string confirmationKey, true))
+                {
+                    await CompleteWebTradeActionAsync(null, false);
+                }
+                else if (TryParseTradeConfirmationKey(confirmationKey, out _))
                     _ = RespondToTradeConfirmationAsync(confirmationKey, action == "accept_trade");
                 else
-                    await HideWebSpinnerAsync("trade-action");
+                    await CompleteWebTradeActionAsync(confirmationKey, false);
             }
         }
 
@@ -3033,21 +3408,49 @@ namespace Steam_Desktop_Authenticator
 
         private async Task RespondToTradeConfirmationAsync(string confirmationKey, bool accept)
         {
-            if (!loadedTradeConfirmations.TryGetValue(confirmationKey, out LoadedTradeConfirmation entry))
+            if (!TryParseTradeConfirmationKey(confirmationKey, out _))
+                return;
+            if (IsTradeActionRecentlyCompleted(confirmationKey))
             {
-                await HideWebSpinnerAsync("trade-action");
+                await CompleteWebTradeActionAsync(confirmationKey, true);
+                return;
+            }
+
+            TaskCompletionSource<bool> tradeActionCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!tradeActionsInProgress.TryAdd(confirmationKey, tradeActionCompletion))
+            {
+                if (tradeActionsInProgress.TryGetValue(confirmationKey, out TaskCompletionSource<bool> existingCompletion))
+                {
+                    bool existingResult = false;
+                    try
+                    {
+                        existingResult = await existingCompletion.Task;
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Trade confirmation action", ex, "A duplicate trade action could not observe the original result.");
+                    }
+                    await CompleteWebTradeActionAsync(confirmationKey, existingResult);
+                }
+                else
+                {
+                    await CompleteWebTradeActionAsync(confirmationKey, IsTradeActionRecentlyCompleted(confirmationKey));
+                }
                 return;
             }
 
             bool actionSucceeded = false;
             try
             {
-                await confirmationsSemaphore.WaitAsync();
+                if (!loadedTradeConfirmations.TryGetValue(confirmationKey, out LoadedTradeConfirmation entry))
+                    throw new InvalidOperationException("This confirmation is no longer available. Refresh the list and try again.");
+
+                await confirmationsSemaphore.WaitAsync(lifetimeCancellationSource.Token);
                 try
                 {
                     bool steamAcceptedAction = await RunSteamAccountOperationAsync(entry.Account, () => accept
-                        ? entry.Account.AcceptConfirmation(entry.Confirmation)
-                        : entry.Account.DenyConfirmation(entry.Confirmation));
+                        ? entry.Account.AcceptConfirmation(entry.Confirmation, lifetimeCancellationSource.Token)
+                        : entry.Account.DenyConfirmation(entry.Confirmation, lifetimeCancellationSource.Token), lifetimeCancellationSource.Token);
                     if (!steamAcceptedAction)
                         throw new InvalidOperationException("Steam did not accept that confirmation action. The confirmation remains pending.");
                     actionSucceeded = true;
@@ -3060,7 +3463,8 @@ namespace Steam_Desktop_Authenticator
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Trade confirmation action", ex, accept ? "Accept request failed." : "Deny request failed.");
-                AstroMessageBox.Show(ex.Message, "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!lifetimeCancellationSource.IsCancellationRequested)
+                    AstroMessageBox.Show(ex.Message, "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
@@ -3069,26 +3473,91 @@ namespace Steam_Desktop_Authenticator
                     if (actionSucceeded)
                     {
                         MarkRecentlyResolved(recentlyResolvedTradeConfirmations, confirmationKey);
+                        completedTradeActions[confirmationKey] = DateTime.UtcNow;
                         loadedTradeConfirmations.Remove(confirmationKey);
-                        await PublishCachedTradesAsync();
+                        try
+                        {
+                            await PublishCachedTradesAsync();
+                        }
+                        catch (Exception ex)
+                        {
+                            DiagnosticErrorLogger.Log("Trade confirmation action", ex, "The confirmation was resolved, but the trade list could not be refreshed.");
+                        }
                     }
                 }
                 finally
                 {
-                    await HideWebSpinnerAsync("trade-action");
+                    tradeActionCompletion.TrySetResult(actionSucceeded);
+                    tradeActionsInProgress.TryRemove(confirmationKey, out _);
+                await CompleteWebTradeActionAsync(confirmationKey, actionSucceeded);
                     _ = LoadTradesAsync();
                 }
             }
         }
 
+        private async Task CompleteWebTradeActionAsync(string confirmationKey, bool succeeded)
+        {
+            try
+            {
+                CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
+                if (coreWebView == null)
+                    return;
+
+                string jsKey = JsonConvert.SerializeObject(confirmationKey ?? String.Empty);
+                string jsSucceeded = succeeded.ToString().ToLowerInvariant();
+                await coreWebView.ExecuteScriptAsync($"tradeActionCompleted({jsKey}, {jsSucceeded});");
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Trade confirmation action", ex, "The trade action result could not be returned to the UI.");
+            }
+        }
+
+        private bool IsTradeActionRecentlyCompleted(string confirmationKey)
+        {
+            DateTime now = DateTime.UtcNow;
+            foreach (string expiredKey in completedTradeActions
+                .Where(entry => now - entry.Value >= RecentlyResolvedTradeConfirmationsRetention)
+                .Select(entry => entry.Key)
+                .ToList())
+            {
+                completedTradeActions.Remove(expiredKey);
+            }
+
+            return completedTradeActions.ContainsKey(confirmationKey);
+        }
+
+        private static bool TryParseTradeConfirmationKey(string confirmationKey, out ulong steamId)
+        {
+            steamId = 0;
+            if (String.IsNullOrWhiteSpace(confirmationKey) || confirmationKey.Length > 64)
+                return false;
+
+            string[] parts = confirmationKey.Split(new[] { ':' }, StringSplitOptions.None);
+            return parts.Length == 2 &&
+                UInt64.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out steamId) && steamId != 0 &&
+                UInt64.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out ulong confirmationId) && confirmationId != 0;
+        }
+
         private async Task HideWebSpinnerAsync(string operation)
         {
-            if (webView?.CoreWebView2 != null)
-                await webView.CoreWebView2.ExecuteScriptAsync("hideSpinner(" + JsonConvert.SerializeObject(operation) + ");");
+            CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
+            if (coreWebView != null)
+            {
+                try
+                {
+                    await coreWebView.ExecuteScriptAsync("hideSpinner(" + JsonConvert.SerializeObject(operation) + ");");
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Web UI", ex, "The operation spinner could not be updated.");
+                }
+            }
         }
 
         private async Task LoadTradesAsync(string selectedAccountName = null)
         {
+            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
             if (!String.IsNullOrWhiteSpace(selectedAccountName))
                 tradeAccountSelection = selectedAccountName;
             string selectionToLoad = tradeAccountSelection;
@@ -3099,12 +3568,12 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            if (!await tradeLoadSemaphore.WaitAsync(0))
+            if (cancellationToken.IsCancellationRequested || !await tradeLoadSemaphore.WaitAsync(0))
                 return;
             bool confirmationsSemaphoreAcquired = false;
             try
             {
-                await confirmationsSemaphore.WaitAsync();
+                await confirmationsSemaphore.WaitAsync(cancellationToken);
                 confirmationsSemaphoreAcquired = true;
 
                 SteamGuardAccount[] accountsToLoad = selectionToLoad == "all"
@@ -3125,7 +3594,7 @@ namespace Steam_Desktop_Authenticator
                             InvalidateTradeConfirmationCache(account);
                             continue;
                         }
-                        Confirmation[] accountConfirmations = await FetchTradeConfirmationsForPageAsync(account);
+                        Confirmation[] accountConfirmations = await FetchTradeConfirmationsForPageAsync(account, cancellationToken);
                         if (accountConfirmations == null)
                             continue;
                         CacheTradeConfirmations(account, accountConfirmations.Where(confirmation => !ShouldAutoConfirmTrade(confirmation)));
@@ -3150,6 +3619,9 @@ namespace Steam_Desktop_Authenticator
                 UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
                 await PublishCachedTradesAsync(errorMessage, selectionToLoad);
             }
+            catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+            {
+            }
             catch (Exception ex)
             {
                 Debug.WriteLine("Trade confirmation load failed: " + ex.Message);
@@ -3162,7 +3634,8 @@ namespace Steam_Desktop_Authenticator
                     confirmationsSemaphore.Release();
                 tradeLoadSemaphore.Release();
 
-                if (!String.Equals(selectionToLoad, tradeAccountSelection, StringComparison.Ordinal))
+                if (!lifetimeCancellationSource.IsCancellationRequested &&
+                    !String.Equals(selectionToLoad, tradeAccountSelection, StringComparison.Ordinal))
                     _ = LoadTradesAsync();
             }
         }

@@ -7,8 +7,10 @@ using SteamKit2.Authentication;
 using SteamKit2.Internal;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Drawing;
+using System.IO;
 using System.Threading;
 
 namespace Steam_Desktop_Authenticator
@@ -62,6 +64,42 @@ namespace Steam_Desktop_Authenticator
             activeSteamClient?.Disconnect();
             base.OnFormClosing(e);
         }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            if (webView != null)
+            {
+                webView.Dispose();
+                webView = null;
+            }
+
+            if (loginCancellationSource != null)
+            {
+                loginCancellationSource.Dispose();
+                loginCancellationSource = null;
+            }
+
+            base.OnFormClosed(e);
+        }
+
+        private async Task ExecuteScriptSafelyAsync(string script, string operation)
+        {
+            if (IsDisposed || Disposing || webView == null)
+                return;
+
+            try
+            {
+                CoreWebView2 coreWebView = webView.CoreWebView2;
+                if (coreWebView == null)
+                    return;
+                await coreWebView.ExecuteScriptAsync(script);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log(operation, ex, "The WebView2 operation could not be completed.");
+            }
+        }
+
         private async void SetupModernUI()
         {
             this.Size = new Size(450, 750);
@@ -93,20 +131,27 @@ namespace Steam_Desktop_Authenticator
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Login UI", ex, "The WebView2 login dialog could not be initialized.");
-                lblLoading.Text = "Login UI could not be loaded. Restore the complete release folder and try again.";
+                if (!IsDisposed && !Disposing)
+                    lblLoading.Text = "Login UI could not be loaded. Restore the complete release folder and try again.";
                 return;
             }
 
-            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+            if (IsDisposed || loginCancellationSource?.IsCancellationRequested == true || webView?.CoreWebView2 == null)
+                return;
+
+            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
 
             webView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
 
             webView.NavigationCompleted += (sender, args) =>
             {
+                if (IsDisposed || loginCancellationSource?.IsCancellationRequested == true || webView?.CoreWebView2 == null)
+                    return;
                 if (!args.IsSuccess)
                 {
-                    lblLoading.Text = "Login UI could not be loaded. Restore the complete release folder and try again.";
+                    if (!IsDisposed && !Disposing)
+                        lblLoading.Text = "Login UI could not be loaded. Restore the complete release folder and try again.";
                     return;
                 }
 
@@ -119,31 +164,57 @@ namespace Steam_Desktop_Authenticator
                 webView.Visible = true;
 
                 // Push initial values to JS
-                string jsExp = labelLoginExplanation.Text.Replace("'", "\\'");
-                webView.CoreWebView2.ExecuteScriptAsync($"setExplanation('{jsExp}')");
+                string jsExp = Newtonsoft.Json.JsonConvert.SerializeObject(labelLoginExplanation.Text);
+                _ = ExecuteScriptSafelyAsync($"setExplanation({jsExp})", "Login explanation UI");
                 
                 if (this.LoginReason != LoginType.Initial)
                 {
-                    webView.CoreWebView2.ExecuteScriptAsync($"setUsername('{account.AccountName}', true)");
+                    string jsAccountName = Newtonsoft.Json.JsonConvert.SerializeObject(account.AccountName ?? String.Empty);
+                    _ = ExecuteScriptSafelyAsync($"setUsername({jsAccountName}, true)", "Login account UI");
                 }
             };
 
             string htmlPath = System.IO.Path.Combine(ApplicationPaths.UiDirectory, "login.html");
+            if (IsDisposed || loginCancellationSource?.IsCancellationRequested == true || webView == null)
+                return;
             webView.Source = new Uri(htmlPath);
         }
 
         private void CoreWebView2_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             string message = e.WebMessageAsJson;
-            if (string.IsNullOrEmpty(message)) return;
+            if (IsDisposed || String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
 
-            JObject payload = JObject.Parse(message);
-            string action = (string)payload["action"];
+            JObject payload;
+            try
+            {
+                using (StringReader stringReader = new StringReader(message))
+                using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                {
+                    payload = JObject.Load(jsonReader);
+                }
+            }
+            catch (Newtonsoft.Json.JsonException)
+            {
+                return;
+            }
+
+            string action = payload.Value<string>("action");
+            if (payload["action"]?.Type != JTokenType.String || action == null || action.Length > 32)
+                return;
 
             if (action == "login")
             {
-                txtUsername.Text = (string)payload["user"];
-                txtPassword.Text = (string)payload["pass"];
+                if (payload["user"]?.Type != JTokenType.String || payload["pass"]?.Type != JTokenType.String)
+                    return;
+
+                string username = payload.Value<string>("user");
+                string password = payload.Value<string>("pass");
+                if (username == null || password == null || username.Length > 256 || password.Length > 4096)
+                    return;
+
+                txtUsername.Text = username;
+                txtPassword.Text = password;
                 btnSteamLogin_Click(this, EventArgs.Empty);
             }
         }
@@ -167,12 +238,22 @@ namespace Steam_Desktop_Authenticator
 
         private void ResetLoginButton(CancellationToken attemptCancellationToken)
         {
-            if (IsDisposed || loginCancellationSource == null || loginCancellationSource.Token != attemptCancellationToken)
+            if (IsDisposed || loginCancellationSource == null)
                 return;
+
+            try
+            {
+                if (loginCancellationSource.Token != attemptCancellationToken)
+                    return;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+
             btnSteamLogin.Enabled = true;
             btnSteamLogin.Text = "Login";
-            if (webView != null && webView.CoreWebView2 != null)
-                _ = webView.CoreWebView2.ExecuteScriptAsync("setButtonState('LOGIN', false)");
+            _ = ExecuteScriptSafelyAsync("setButtonState('LOGIN', false)", "Login button UI");
         }
 
         private static async Task WaitForSteamConnectionAsync(SteamClient steamClient, CancellationToken cancellationToken)
@@ -193,8 +274,7 @@ namespace Steam_Desktop_Authenticator
             // Disable button while we login
             btnSteamLogin.Enabled = false;
             btnSteamLogin.Text = "Logging in...";
-            if (webView != null && webView.CoreWebView2 != null)
-                _ = webView.CoreWebView2.ExecuteScriptAsync("setButtonState('LOGGING IN...', true)");
+            _ = ExecuteScriptSafelyAsync("setButtonState('LOGGING IN...', true)", "Login button UI");
 
             string username = txtUsername.Text;
             string password = txtPassword.Text;
@@ -293,7 +373,7 @@ namespace Steam_Desktop_Authenticator
             AuthPollResult pollResponse;
             try
             {
-                pollResponse = await authSession.PollingWaitForResultAsync();
+                pollResponse = await authSession.PollingWaitForResultAsync(cancellationToken);
             }
             catch (AuthenticatorAlreadyLinkedException)
             {
@@ -600,8 +680,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             labelLoginExplanation.Text = message;
-            if (webView?.CoreWebView2 != null)
-                _ = webView.CoreWebView2.ExecuteScriptAsync("setExplanation(" + Newtonsoft.Json.JsonConvert.SerializeObject(message) + ");");
+            _ = ExecuteScriptSafelyAsync("setExplanation(" + Newtonsoft.Json.JsonConvert.SerializeObject(message) + ");", "Login progress UI");
         }
 
         private sealed class LoginPhoneEnrollmentInteraction : IPhoneEnrollmentInteraction

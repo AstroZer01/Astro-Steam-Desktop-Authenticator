@@ -3,12 +3,16 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
 using System.Drawing;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Steam_Desktop_Authenticator
@@ -80,6 +84,44 @@ namespace Steam_Desktop_Authenticator
         }
 
         private WebView2 webView;
+        private readonly CancellationTokenSource uiCancellationSource = new CancellationTokenSource();
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            uiCancellationSource.Cancel();
+            base.OnFormClosing(e);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            if (webView != null)
+            {
+                webView.Dispose();
+                webView = null;
+            }
+
+            uiCancellationSource.Dispose();
+            base.OnFormClosed(e);
+        }
+
+        private async Task ExecuteScriptSafelyAsync(string script, string operation)
+        {
+            if (IsDisposed || Disposing || webView == null)
+                return;
+
+            try
+            {
+                CoreWebView2 coreWebView = webView.CoreWebView2;
+                if (coreWebView == null)
+                    return;
+                await coreWebView.ExecuteScriptAsync(script);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log(operation, ex, "The WebView2 operation could not be completed.");
+            }
+        }
+
         private async void SetupModernUI(string label, bool isPassword)
         {
             this.Size = new Size(400, 300);
@@ -111,24 +153,48 @@ namespace Steam_Desktop_Authenticator
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Input UI", ex, "The WebView2 input dialog could not be initialized.");
-                lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                if (!IsDisposed && !Disposing)
+                    lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
                 return;
             }
 
-            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+            if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
+                return;
+
+            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
 
             webView.CoreWebView2.WebMessageReceived += (sender, e) =>
             {
                 string message = e.WebMessageAsJson;
-                if (string.IsNullOrEmpty(message)) return;
+                if (IsDisposed || uiCancellationSource.IsCancellationRequested || String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
 
-                JObject payload = JObject.Parse(message);
-                string action = (string)payload["action"];
+                JObject payload;
+                try
+                {
+                    using (StringReader stringReader = new StringReader(message))
+                    using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                    {
+                        payload = JObject.Load(jsonReader);
+                    }
+                }
+                catch (JsonException)
+                {
+                    return;
+                }
+
+                string action = payload.Value<string>("action");
+                if (payload["action"]?.Type != JTokenType.String || action == null || action.Length > 32)
+                    return;
 
                 if (action == "accept")
                 {
-                    this.txtBox.Text = (string)payload["value"];
+                    if (payload["value"]?.Type != JTokenType.String)
+                        return;
+                    string value = (string)payload["value"];
+                    if (value == null || value.Length > 4096) return;
+
+                    this.txtBox.Text = value;
                     btnAccept_Click(this, EventArgs.Empty);
                 }
                 else if (action == "cancel")
@@ -137,16 +203,23 @@ namespace Steam_Desktop_Authenticator
                 }
                 else if (action == "resize")
                 {
-                    int height = (int)payload["height"];
+                    if (payload["height"]?.Type != JTokenType.Integer ||
+                        !long.TryParse(payload["height"].ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out long requestedHeight))
+                        return;
+
+                    int height = (int)Math.Clamp(requestedHeight, 100L, 1000L);
                     this.ClientSize = new Size(this.ClientSize.Width, height);
                 }
             };
 
             webView.NavigationCompleted += (sender, args) =>
             {
+                if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
+                    return;
                 if (!args.IsSuccess)
                 {
-                    lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                    if (!IsDisposed && !Disposing)
+                        lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
                     return;
                 }
 
@@ -158,12 +231,14 @@ namespace Steam_Desktop_Authenticator
                 }
                 webView.Visible = true;
 
-                string jsLabel = label.Replace("'", "\\'");
+                string jsLabel = JsonConvert.SerializeObject(label);
                 string isPassStr = isPassword ? "true" : "false";
-                webView.CoreWebView2.ExecuteScriptAsync($"setupInput('{jsLabel}', {isPassStr})");
+                _ = ExecuteScriptSafelyAsync($"setupInput({jsLabel}, {isPassStr})", "Input dialog UI");
             };
 
             string htmlPath = System.IO.Path.Combine(ApplicationPaths.UiDirectory, "input.html");
+            if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView == null)
+                return;
             webView.Source = new Uri(htmlPath);
         }
 

@@ -5,10 +5,14 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
     <AssemblyName>Steam Desktop Authenticator</AssemblyName>
     <ApplicationIcon>..\Steam Desktop Authenticator\ASDA-icon.ico</ApplicationIcon>
     <DebugType>portable</DebugType>
     <SupportedOSPlatformVersion>7.0</SupportedOSPlatformVersion>
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
   <Target Name="PublishMainApp" AfterTargets="Publish">

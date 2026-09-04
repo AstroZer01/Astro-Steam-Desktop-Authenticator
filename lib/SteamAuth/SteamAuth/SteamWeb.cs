@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -48,6 +49,8 @@ namespace SteamAuth
     public sealed class HttpClientSteamWebTransport : ISteamWebTransport
     {
         private const int MaximumRedirects = 5;
+        private const int MaximumResponseBodyBytes = 4 * 1024 * 1024;
+        private const int MaximumRequestBodyBytes = 1 * 1024 * 1024;
         private readonly HttpClient httpClient;
 
         public HttpClientSteamWebTransport()
@@ -74,92 +77,158 @@ namespace SteamAuth
                 throw new ArgumentException("A valid Steam URL is required.", nameof(uri));
             }
 
-            byte[] requestBody;
-            IEnumerable<KeyValuePair<string, IEnumerable<string>>> contentHeaders;
-            try
-            {
-                requestBody = content == null ? null : await content.ReadAsByteArrayAsync().ConfigureAwait(false);
-                contentHeaders = content == null
-                    ? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>()
-                    : content.Headers.ToArray();
-            }
-            finally
-            {
-                content?.Dispose();
-            }
-
-            using (SteamNetworkConfiguration.HttpClientLease clientLease = httpClient == null
-                ? SteamNetworkConfiguration.AcquireHttpClient()
-                : null)
             using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                HttpClient requestClient = httpClient ?? clientLease.Client;
                 timeoutSource.CancelAfter(timeout);
-                Uri requestUri = uri;
-                HttpMethod requestMethod = method;
-                for (int redirectCount = 0; ; redirectCount++)
+                byte[] requestBody = null;
+                IEnumerable<KeyValuePair<string, IEnumerable<string>>> contentHeaders;
+                try
                 {
-                    HttpResponseMessage response;
-                    using (HttpRequestMessage request = CreateRequest(
-                        requestMethod,
-                        requestUri,
-                        cookies,
-                        requestMethod == HttpMethod.Get ? null : requestBody,
-                        contentHeaders,
-                        headers,
-                        IsSameOrigin(uri, requestUri)))
+                    if (content != null)
                     {
-                        try
+                        if (content.Headers.ContentLength > MaximumRequestBodyBytes)
+                            throw new InvalidDataException("Steam request body is larger than the supported size limit.");
+
+                        using (Stream requestStream = await content.ReadAsStreamAsync().ConfigureAwait(false))
+                        using (MemoryStream requestBytes = new MemoryStream())
                         {
-                            response = await requestClient.SendAsync(request, timeoutSource.Token).ConfigureAwait(false);
-                        }
-                        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                        {
-                            throw new TimeoutException("The Steam request timed out.");
+                            byte[] buffer = new byte[81920];
+                            int bytesRead;
+                            int totalBytes = 0;
+                            try
+                            {
+                                while ((bytesRead = await requestStream.ReadAsync(buffer, 0, buffer.Length, timeoutSource.Token).ConfigureAwait(false)) > 0)
+                                {
+                                    if (bytesRead > MaximumRequestBodyBytes - totalBytes)
+                                        throw new InvalidDataException("Steam request body is larger than the supported size limit.");
+                                    requestBytes.Write(buffer, 0, bytesRead);
+                                    totalBytes += bytesRead;
+                                }
+                            }
+                            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                            {
+                                throw new TimeoutException("The Steam request timed out.");
+                            }
+
+                            requestBody = requestBytes.ToArray();
                         }
                     }
 
-                    using (response)
+                    contentHeaders = content == null
+                        ? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>()
+                        : content.Headers.ToArray();
+                }
+                finally
+                {
+                    content?.Dispose();
+                }
+
+                using (SteamNetworkConfiguration.HttpClientLease clientLease = httpClient == null
+                    ? SteamNetworkConfiguration.AcquireHttpClient()
+                    : null)
+                {
+                    HttpClient requestClient = httpClient ?? clientLease.Client;
+                    Uri requestUri = uri;
+                    HttpMethod requestMethod = method;
+                    for (int redirectCount = 0; ; redirectCount++)
                     {
-                        StoreResponseCookies(response, requestUri, cookies);
-                        if (IsRedirect(response.StatusCode) && !followRedirects)
+                        HttpResponseMessage response;
+                        using (HttpRequestMessage request = CreateRequest(
+                            requestMethod,
+                            requestUri,
+                            cookies,
+                            requestMethod == HttpMethod.Get ? null : requestBody,
+                            contentHeaders,
+                            headers,
+                            IsSameOrigin(uri, requestUri)))
                         {
+                            try
+                            {
+                                response = await requestClient.SendAsync(
+                                    request,
+                                    HttpCompletionOption.ResponseHeadersRead,
+                                    timeoutSource.Token).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                            {
+                                throw new TimeoutException("The Steam request timed out.");
+                            }
+                        }
+
+                        using (response)
+                        {
+                            StoreResponseCookies(response, requestUri, cookies);
+                            if (IsRedirect(response.StatusCode) && !followRedirects)
+                            {
+                                return new SteamWebResponse
+                                {
+                                    Body = await ReadBodyAsync(response.Content, timeoutSource.Token, cancellationToken).ConfigureAwait(false),
+                                    Headers = CopyHeaders(response)
+                                };
+                            }
+
+                            if (IsRedirect(response.StatusCode) && response.Headers.Location != null)
+                            {
+                                if (redirectCount >= MaximumRedirects)
+                                    throw new HttpRequestException("Steam redirected the request too many times.");
+                                if (!Uri.TryCreate(requestUri, response.Headers.Location, out Uri redirectedUri) || !IsHttpUri(redirectedUri))
+                                    throw new HttpRequestException("Steam returned an invalid redirect location.");
+                                if (requestUri.Scheme == Uri.UriSchemeHttps && redirectedUri.Scheme != Uri.UriSchemeHttps)
+                                    throw new HttpRequestException("Steam redirected the request to an insecure location.");
+
+                                bool preservesMethod = (int)response.StatusCode == 307 || (int)response.StatusCode == 308;
+                                if (!preservesMethod && requestMethod != HttpMethod.Get)
+                                    requestMethod = HttpMethod.Get;
+                                requestUri = redirectedUri;
+                                continue;
+                            }
+
+                            if (!response.IsSuccessStatusCode)
+                                throw new SteamWebRequestException(
+                                    "Steam returned HTTP " + (int)response.StatusCode + " (" + response.ReasonPhrase + ").",
+                                    response.StatusCode,
+                                    CopyHeaders(response));
+
                             return new SteamWebResponse
                             {
-                                Body = response.Content == null ? String.Empty : await response.Content.ReadAsStringAsync().ConfigureAwait(false),
+                                Body = await ReadBodyAsync(response.Content, timeoutSource.Token, cancellationToken).ConfigureAwait(false),
                                 Headers = CopyHeaders(response)
                             };
                         }
-
-                        if (IsRedirect(response.StatusCode) && response.Headers.Location != null)
-                        {
-                            if (redirectCount >= MaximumRedirects)
-                                throw new HttpRequestException("Steam redirected the request too many times.");
-                            if (!Uri.TryCreate(requestUri, response.Headers.Location, out Uri redirectedUri) || !IsHttpUri(redirectedUri))
-                                throw new HttpRequestException("Steam returned an invalid redirect location.");
-                            if (requestUri.Scheme == Uri.UriSchemeHttps && redirectedUri.Scheme != Uri.UriSchemeHttps)
-                                throw new HttpRequestException("Steam redirected the request to an insecure location.");
-
-                            bool preservesMethod = (int)response.StatusCode == 307 || (int)response.StatusCode == 308;
-                            if (!preservesMethod && requestMethod != HttpMethod.Get)
-                                requestMethod = HttpMethod.Get;
-                            requestUri = redirectedUri;
-                            continue;
-                        }
-
-                        if (!response.IsSuccessStatusCode)
-                            throw new SteamWebRequestException(
-                                "Steam returned HTTP " + (int)response.StatusCode + " (" + response.ReasonPhrase + ").",
-                                response.StatusCode,
-                                CopyHeaders(response));
-
-                        return new SteamWebResponse
-                        {
-                            Body = response.Content == null ? String.Empty : await response.Content.ReadAsStringAsync().ConfigureAwait(false),
-                            Headers = CopyHeaders(response)
-                        };
                     }
                 }
+            }
+        }
+
+        private static async Task<string> ReadBodyAsync(HttpContent content, CancellationToken timeoutToken, CancellationToken callerToken)
+        {
+            if (content == null)
+                return String.Empty;
+            if (content.Headers.ContentLength > MaximumResponseBodyBytes)
+                throw new InvalidDataException("Steam returned a response that is larger than the supported size limit.");
+
+            try
+            {
+                using (Stream responseStream = await content.ReadAsStreamAsync().ConfigureAwait(false))
+                using (MemoryStream responseBody = new MemoryStream())
+                {
+                    byte[] buffer = new byte[81920];
+                    int bytesRead;
+                    long totalBytes = 0;
+                    while ((bytesRead = await responseStream.ReadAsync(buffer, 0, buffer.Length, timeoutToken).ConfigureAwait(false)) > 0)
+                    {
+                        totalBytes += bytesRead;
+                        if (totalBytes > MaximumResponseBodyBytes)
+                            throw new InvalidDataException("Steam returned a response that is larger than the supported size limit.");
+                        responseBody.Write(buffer, 0, bytesRead);
+                    }
+
+                    return new UTF8Encoding(false, true).GetString(responseBody.ToArray());
+                }
+            }
+            catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("The Steam request timed out.");
             }
         }
 

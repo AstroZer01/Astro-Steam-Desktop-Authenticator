@@ -97,6 +97,11 @@ jobs:
       env:
         Configuration: ${{ matrix.configuration }}
 
+    - name: Run automated tests
+      run: dotnet test tests\SteamAuth.PhoneEnrollment.Tests\SteamAuth.PhoneEnrollment.Tests.csproj --configuration $env:Configuration --no-restore --no-build
+      env:
+        Configuration: ${{ matrix.configuration }}
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v7
       with:

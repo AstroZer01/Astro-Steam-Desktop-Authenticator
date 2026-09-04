@@ -9,30 +9,30 @@
 
 
 <nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-2 py-3 bg-surface/80 backdrop-blur-lg border-t border-white/10 shadow-xl rounded-t-xl" id="mobile-nav">
-    <a onclick="switchTab('authenticator')" data-tab="authenticator" class="tab-link flex flex-col items-center justify-center bg-secondary-container/20 text-secondary rounded-xl px-3 py-1 transition-all duration-200 cursor-pointer min-w-[72px]">
+    <button type="button" onclick="switchTab('authenticator')" data-tab="authenticator" aria-controls="view-authenticator" aria-current="page" class="tab-link flex flex-col items-center justify-center bg-secondary-container/20 text-secondary rounded-xl px-3 py-1 transition-all duration-200 cursor-pointer min-w-[72px]">
         <svg class="ui-icon ui-icon-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V21a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg>
         <span class="text-xs mt-1">Home</span>
-    </a>
-    <a onclick="switchTab('trades')" data-tab="trades" class="tab-link relative flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
+    </button>
+    <button type="button" onclick="switchTab('trades')" data-tab="trades" aria-controls="view-trades" class="tab-link relative flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
         <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" style="stroke-width: 2.25"><path d="M5 8h12m0 0-3-3m3 3-3 3M19 16H7m0 0 3-3m-3 3 3 3"/></svg>
         <span id="trade-pending-badge" class="hidden absolute top-0 right-2 min-w-4 h-4 px-1 rounded-full bg-error text-[10px] leading-4 text-on-error font-bold text-center" aria-label="Pending trade confirmations"></span>
         <span class="text-xs mt-1">Trade</span>
-    </a>
-    <a onclick="switchTab('login-actions')" data-tab="login-actions" class="tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
+    </button>
+    <button type="button" onclick="switchTab('login-actions')" data-tab="login-actions" aria-controls="view-login-actions" class="tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
         <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.8 2.9 8.8 7 10 4.1-1.2 7-5.2 7-10V6z"/><circle cx="12" cy="10" r="2"/><path d="M8.5 16c.8-1.7 2-2.5 3.5-2.5s2.7.8 3.5 2.5"/></svg>
         <span class="text-xs mt-1">Logins</span>
-    </a>
-    <a onclick="switchTab('settings')" data-tab="settings" class="tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
+    </button>
+    <button type="button" onclick="switchTab('settings')" data-tab="settings" aria-controls="view-settings" class="tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]">
         <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10m4 0h2M4 17h4m4 0h8M14 4v6M8 14v6"/></svg>
         <span class="text-xs mt-1">Settings</span>
-    </a>
+    </button>
 </nav>
 
 <main class="flex-1 p-4 md:p-6 lg:p-8 max-w-md mx-auto w-full relative z-10">
     <div class="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] bg-primary/5 rounded-full blur-[120px] pointer-events-none"></div>
 
     <!-- Global Loading Spinner -->
-    <div id="global-spinner" class="hidden absolute inset-0 flex items-center justify-center bg-surface/50 backdrop-blur-sm z-50 rounded-xl">
+    <div id="global-spinner" class="hidden absolute inset-0 flex items-center justify-center bg-surface/50 backdrop-blur-sm z-50 rounded-xl" role="status" aria-live="polite" aria-label="Loading">
         <div class="loader"></div>
     </div>
 
@@ -316,14 +316,14 @@
     </div>
 </main>
 
-<div id="recent-login-attempt-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="recent-login-attempt-title">
+<div id="recent-login-attempt-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="recent-login-attempt-title" aria-describedby="recent-login-attempt-outcome">
     <div class="w-full max-w-md max-h-[80vh] overflow-y-auto rounded-xl border border-white/10 bg-surface-container shadow-2xl p-4 space-y-4">
         <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
                 <h2 id="recent-login-attempt-title" class="font-semibold text-on-surface">Login attempt</h2>
                 <p id="recent-login-attempt-outcome" class="text-sm text-secondary mt-1"></p>
             </div>
-            <button id="btn-close-recent-login-attempt" class="shrink-0 p-1 rounded hover:bg-surface-variant text-on-surface-variant" aria-label="Close login attempt details">
+            <button id="btn-close-recent-login-attempt" type="button" class="shrink-0 p-1 rounded hover:bg-surface-variant text-on-surface-variant" aria-label="Close login attempt details">
                 <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
             </button>
         </div>
@@ -337,15 +337,15 @@
             <h2 id="remove-account-title" class="font-semibold text-on-surface">Remove account</h2>
             <p class="text-sm text-on-surface-variant mt-2">Choose what to do with <span id="remove-account-name" class="font-semibold text-on-surface"></span>.</p>
         </div>
-        <button id="btn-unlink-steam-guard" class="w-full text-left rounded-lg border border-error/40 bg-error-container/20 p-3 hover:bg-error-container/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-error-container/20">
+        <button id="btn-unlink-steam-guard" type="button" class="w-full text-left rounded-lg border border-error/40 bg-error-container/20 p-3 hover:bg-error-container/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-error-container/20">
             <span class="block font-semibold text-error">Unlink Steam Guard</span>
             <span class="block text-sm text-on-surface-variant mt-1">Removes Steam Guard from Steam, then deletes this account's local data.</span>
         </button>
-        <button id="btn-remove-account" class="w-full text-left rounded-lg border border-white/10 bg-surface-variant p-3 hover:bg-surface-bright transition-colors">
+        <button id="btn-remove-account" type="button" class="w-full text-left rounded-lg border border-white/10 bg-surface-variant p-3 hover:bg-surface-bright transition-colors">
             <span class="block font-semibold text-on-surface">Remove user from app</span>
             <span class="block text-sm text-on-surface-variant mt-1">Keeps Steam Guard enabled on Steam and deletes only this account's local data.</span>
         </button>
-        <button id="btn-cancel-remove-account" class="w-full rounded-lg border border-white/10 py-2.5 text-sm text-on-surface-variant hover:bg-surface-variant transition-colors">Cancel</button>
+        <button id="btn-cancel-remove-account" type="button" class="w-full rounded-lg border border-white/10 py-2.5 text-sm text-on-surface-variant hover:bg-surface-variant transition-colors">Cancel</button>
     </div>
 </div>
 
@@ -364,12 +364,6 @@
 </div>
 
 <script>
-    document.addEventListener('contextmenu', event => {
-        if (event.target.tagName !== 'INPUT' && event.target.tagName !== 'TEXTAREA') {
-            event.preventDefault();
-        }
-    });
-
     // Tab Switching Logic
     let activeTabId = 'authenticator';
     let pendingSettingsNavigation = null;
@@ -379,8 +373,10 @@
     let proxyPasswordAction = 'keep';
     let settingsSavePending = false;
     let unsavedSettingsPreviousFocus = null;
+    const validTabIds = new Set(['authenticator', 'trades', 'login-actions', 'settings']);
 
     function switchTab(tabId) {
+        if (!validTabIds.has(tabId)) return;
         if (activeTabId === tabId) return;
         if (activeTabId === 'settings' && tabId !== 'settings' && settingsDirty) {
             pendingSettingsNavigation = tabId;
@@ -391,27 +387,20 @@
     }
 
     function performTabSwitch(tabId) {
+        if (!validTabIds.has(tabId)) return;
         document.querySelectorAll('section[id^="view-"]').forEach(s => s.classList.add('hidden'));
         document.getElementById('view-' + tabId).classList.remove('hidden');
         activeTabId = tabId;
         window.chrome.webview.postMessage({ action: 'active_tab_changed', tabName: tabId });
 
         document.querySelectorAll('.tab-link').forEach(l => {
-            const isDesktop = l.parentElement.id === 'desktop-nav';
             const tradeBadgePosition = l.dataset.tab === 'trades' ? " relative" : "";
             if (l.dataset.tab === tabId) {
-                if (isDesktop) {
-                    l.className = "tab-link flex items-center gap-3 px-4 py-3 rounded-lg bg-primary/10 text-primary border-l-4 border-primary transition-all duration-300 cursor-pointer" + tradeBadgePosition;
-                } else {
-                    l.className = "tab-link flex flex-col items-center justify-center bg-secondary-container/20 text-secondary rounded-xl px-3 py-1 transition-all duration-200 cursor-pointer min-w-[72px]" + tradeBadgePosition;
-                }
+                l.setAttribute('aria-current', 'page');
+                l.className = "tab-link flex flex-col items-center justify-center bg-secondary-container/20 text-secondary rounded-xl px-3 py-1 transition-all duration-200 cursor-pointer min-w-[72px]" + tradeBadgePosition;
             } else {
-                if (isDesktop) {
-                    let extra = l.dataset.tab === 'settings' ? " mt-8 border-t border-white/5 pt-4" : "";
-                    l.className = "tab-link flex items-center gap-3 px-4 py-3 rounded-lg text-on-surface-variant hover:bg-white/5 transition-all duration-300 cursor-pointer border-l-4 border-transparent" + extra + tradeBadgePosition;
-                } else {
-                    l.className = "tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]" + tradeBadgePosition;
-                }
+                l.removeAttribute('aria-current');
+                l.className = "tab-link flex flex-col items-center justify-center text-on-surface-variant opacity-60 hover:text-primary rounded-xl px-3 py-1 transition-all cursor-pointer min-w-[72px]" + tradeBadgePosition;
             }
         });
 
@@ -772,6 +761,7 @@
         confirms.forEach(c => {
             const card = document.createElement('article');
             card.className = 'rounded-xl border border-white/10 bg-surface-container-low p-3 space-y-3';
+            card.dataset.tradeId = String(c.Id || '');
             const content = document.createElement('div');
             content.className = 'flex gap-3 min-w-0';
             if (c.Icon) {
@@ -808,13 +798,15 @@
             const actions = document.createElement('div');
             actions.className = 'flex flex-col-reverse gap-2 sm:flex-row sm:justify-end';
             const cancel = document.createElement('button');
+            cancel.type = 'button';
             cancel.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-error-container/30 hover:bg-error-container/60 text-error text-sm font-medium transition-colors border border-error/30';
             cancel.textContent = 'Cancel';
-            cancel.onclick = () => sendTradeAction(c.Id, 'reject_trade');
+            cancel.onclick = () => sendTradeAction(c.Id, 'reject_trade', card);
             const accept = document.createElement('button');
+            accept.type = 'button';
             accept.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30';
             accept.textContent = 'Accept';
-            accept.onclick = () => sendTradeAction(c.Id, 'accept_trade');
+            accept.onclick = () => sendTradeAction(c.Id, 'accept_trade', card);
             actions.appendChild(cancel);
             actions.appendChild(accept);
             card.appendChild(content);
@@ -831,9 +823,35 @@
         badge.setAttribute('aria-label', count + (count === 1 ? ' pending trade confirmation' : ' pending trade confirmations'));
     }
 
-    function sendTradeAction(id, act) {
+    const tradeActionsInFlight = new Set();
+
+    function sendTradeAction(id, act, card) {
+        const key = String(id || '');
+        if (!key || tradeActionsInFlight.has(key)) return;
+
+        tradeActionsInFlight.add(key);
+        if (card) {
+            card.querySelectorAll('button').forEach(button => button.disabled = true);
+        }
         showSpinner('trade-action');
         window.chrome.webview.postMessage({ action: act, id: id });
+    }
+
+    function tradeActionCompleted(id, succeeded) {
+        const key = String(id || '');
+        if (!key) {
+            hideSpinner('trade-action');
+            return;
+        }
+
+        tradeActionsInFlight.delete(key);
+        const card = Array.from(document.querySelectorAll('[data-trade-id]'))
+            .find(candidate => candidate.dataset.tradeId === key);
+        if (card && !succeeded) {
+            card.querySelectorAll('button').forEach(button => button.disabled = false);
+        }
+        if (tradeActionsInFlight.size === 0)
+            hideSpinner('trade-action');
     }
 
     // Login Actions
@@ -933,7 +951,7 @@
     }
 
     function showRecentLoginAttempt(attempt, opener) {
-        recentLoginAttemptOpener = opener || null;
+        recentLoginAttemptOpener = opener || (document.activeElement instanceof HTMLElement ? document.activeElement : null);
         const modal = document.getElementById('recent-login-attempt-modal');
         const details = document.getElementById('recent-login-attempt-details');
         document.getElementById('recent-login-attempt-title').textContent = attempt.deviceName || attempt.platform || 'Steam login attempt';
@@ -957,17 +975,41 @@
         const modal = document.getElementById('recent-login-attempt-modal');
         modal.classList.add('hidden');
         modal.classList.remove('flex');
-        if (recentLoginAttemptOpener) {
-            recentLoginAttemptOpener.focus();
-            recentLoginAttemptOpener = null;
+        const opener = recentLoginAttemptOpener;
+        recentLoginAttemptOpener = null;
+        if (opener && document.contains(opener)) {
+            opener.focus();
+        } else {
+            document.getElementById('btn-refresh-login-actions').focus();
         }
     }
 
     document.getElementById('btn-close-recent-login-attempt').addEventListener('click', closeRecentLoginAttempt);
     document.addEventListener('keydown', event => {
         const modal = document.getElementById('recent-login-attempt-modal');
-        if (event.key === 'Escape' && !modal.classList.contains('hidden')) {
+        if (modal.classList.contains('hidden')) return;
+
+        if (event.key === 'Escape') {
+            event.preventDefault();
             closeRecentLoginAttempt();
+            return;
+        }
+
+        if (event.key !== 'Tab') return;
+        const focusable = Array.from(modal.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+        if (focusable.length === 0) return;
+
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (!modal.contains(document.activeElement)) {
+            event.preventDefault();
+            first.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
         }
     });
     document.getElementById('recent-login-attempt-modal').addEventListener('click', event => {

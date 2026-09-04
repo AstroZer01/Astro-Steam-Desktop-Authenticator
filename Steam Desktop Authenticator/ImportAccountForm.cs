@@ -16,6 +16,13 @@ namespace Steam_Desktop_Authenticator
 {
     public partial class ImportAccountForm : Form
     {
+        private const long MaximumImportFileSizeBytes = 4 * 1024 * 1024;
+        private const int MaximumImportManifestEntries = 1000;
+        private static readonly JsonSerializerSettings ImportJsonSettings = new JsonSerializerSettings
+        {
+            MaxDepth = 32,
+            DateParseHandling = DateParseHandling.None
+        };
         private Manifest mManifest;
 
         [System.Runtime.InteropServices.DllImport("Gdi32.dll", EntryPoint = "CreateRoundRectRgn")]
@@ -59,49 +66,61 @@ namespace Steam_Desktop_Authenticator
 
                 try
                 {
-                string fullPath = openFileDialog1.FileName;
-                string fileContents = File.ReadAllText(fullPath);
-                SteamGuardAccount maFile = null;
-                bool isEncrypted = false;
-                string salt = null;
-                string iv = null;
+                    string fullPath = Path.GetFullPath(openFileDialog1.FileName);
+                    FileInfo sourceFile = new FileInfo(fullPath);
+                    if (!sourceFile.Exists || (sourceFile.Attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidDataException("The selected account file is unavailable or uses an unsupported link.");
 
-                // Check if the source manifest exists to see if it's encrypted
-                string path = fullPath.Replace(openFileDialog1.SafeFileName, "");
-                string manifestPath = path + "manifest.json";
-                
-                if (File.Exists(manifestPath))
-                {
-                    try
+                    string filename = sourceFile.Name;
+                    if (!IsValidImportFilename(filename))
+                        throw new InvalidDataException("Select a valid .maFile account file.");
+
+                    EnsureNoReparsePoints(sourceFile.DirectoryName);
+                    string fileContents = ReadTextWithLimit(fullPath, MaximumImportFileSizeBytes);
+                    SteamGuardAccount maFile = null;
+                    bool isEncrypted = false;
+                    string salt = null;
+                    string iv = null;
+                    ulong expectedSteamId = 0;
+
+                    // Check the source manifest beside the selected account file. A
+                    // malformed manifest must not silently turn an encrypted file into
+                    // an unencrypted import attempt.
+                    string sourceDirectory = sourceFile.DirectoryName;
+                    string manifestPath = Path.Combine(sourceDirectory, "manifest.json");
+                    if (File.Exists(manifestPath))
                     {
-                        string manifestContents = File.ReadAllText(manifestPath);
-                        ImportManifest account = JsonConvert.DeserializeObject<ImportManifest>(manifestContents);
-                        
-                        if (account != null && account.Entries != null)
+                        ImportManifest sourceManifest = ReadImportManifest(manifestPath);
+                        ImportManifestEntry matchingEntry = ValidateImportManifest(sourceManifest, filename);
+                        if (sourceManifest.Encrypted)
                         {
-                            foreach (var entry in account.Entries)
-                            {
-                                if (entry.Filename == openFileDialog1.SafeFileName)
-                                {
-                                    if (!string.IsNullOrEmpty(entry.Salt) && !string.IsNullOrEmpty(entry.IV))
-                                    {
-                                        isEncrypted = true;
-                                        salt = entry.Salt;
-                                        iv = entry.IV;
-                                    }
-                                    break;
-                                }
-                            }
+                            if (matchingEntry == null)
+                                throw new InvalidDataException("The selected encrypted account is not listed in its source manifest.");
+
+                            isEncrypted = true;
+                            salt = matchingEntry.Salt;
+                            iv = matchingEntry.IV;
+                            expectedSteamId = matchingEntry.SteamID;
+                        }
+                        else if (matchingEntry != null)
+                        {
+                            expectedSteamId = matchingEntry.SteamID;
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        DiagnosticErrorLogger.Log("Account import", ex, "The source manifest could not be read; the selected maFile will be imported without its source encryption metadata.");
-                    }
-                }
 
                 if (isEncrypted)
                 {
+                    try
+                    {
+                        byte[] ciphertext = Convert.FromBase64String(fileContents);
+                        if (ciphertext.Length == 0 || ciphertext.Length % 16 != 0)
+                            throw new InvalidDataException("The selected encrypted account file is invalid.");
+                    }
+                    catch (FormatException ex)
+                    {
+                        throw new InvalidDataException("The selected encrypted account file is not valid base64.", ex);
+                    }
+
                     // Try silent decrypt with RAM passkey
                     string decryptedText = null;
                     if (!string.IsNullOrEmpty(mCurrentPassKey))
@@ -131,17 +150,25 @@ namespace Steam_Desktop_Authenticator
                     fileContents = decryptedText;
                 }
 
-                maFile = JsonConvert.DeserializeObject<SteamGuardAccount>(fileContents);
+                if (Encoding.UTF8.GetByteCount(fileContents ?? String.Empty) > MaximumImportFileSizeBytes)
+                    throw new InvalidDataException("The decrypted account file is larger than the supported size limit.");
+
+                maFile = JsonConvert.DeserializeObject<SteamGuardAccount>(fileContents, ImportJsonSettings);
                 if (maFile == null) throw new InvalidDataException("The selected file did not contain a Steam Guard account.");
+
+                if (expectedSteamId != 0 && maFile.Session != null && maFile.Session.SteamID != 0 &&
+                    maFile.Session.SteamID != expectedSteamId)
+                    throw new InvalidDataException("The selected account does not match its source manifest entry.");
 
                 if (maFile.Session == null || maFile.Session.SteamID == 0 || maFile.Session.IsAccessTokenExpired())
                 {
                     using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Import, maFile))
                     {
                         ShowOwnedDialog(loginForm, dialogOwner);
-                        if (loginForm.Session == null || loginForm.Session.SteamID == 0)
+                        if (loginForm.Session == null || loginForm.Session.SteamID == 0 ||
+                            (expectedSteamId != 0 && loginForm.Session.SteamID != expectedSteamId))
                         {
-                            MessageBox.Show("Login failed. Try to import this account again.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            MessageBox.Show("The login did not match the selected account. Try to import this account again.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             return;
                         }
 
@@ -165,6 +192,117 @@ namespace Steam_Desktop_Authenticator
                     DiagnosticErrorLogger.Log("Account import", ex, "The selected maFile could not be imported.");
                     MessageBox.Show("This file is not a valid SteamAuth maFile or decryption failed.\nImport Failed.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
+            }
+        }
+
+        private static ImportManifest ReadImportManifest(string manifestPath)
+        {
+            FileInfo manifestFile = new FileInfo(manifestPath);
+            if (!manifestFile.Exists || (manifestFile.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("The source manifest is unavailable or uses an unsupported link.");
+
+            string contents = ReadTextWithLimit(manifestPath, MaximumImportFileSizeBytes);
+            using (StringReader stringReader = new StringReader(contents))
+            using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 32, DateParseHandling = DateParseHandling.None })
+            {
+                ImportManifest manifest = JsonSerializer.Create(ImportJsonSettings).Deserialize<ImportManifest>(jsonReader);
+                if (manifest == null || manifest.Entries == null || manifest.Entries.Count > MaximumImportManifestEntries)
+                    throw new InvalidDataException("The source manifest contains an invalid account list.");
+                return manifest;
+            }
+        }
+
+        private static ImportManifestEntry ValidateImportManifest(ImportManifest manifest, string selectedFilename)
+        {
+            HashSet<string> filenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<ulong> steamIds = new HashSet<ulong>();
+            ImportManifestEntry matchingEntry = null;
+            foreach (ImportManifestEntry entry in manifest.Entries)
+            {
+                if (entry == null || !IsValidImportFilename(entry.Filename) || entry.SteamID == 0 ||
+                    !filenames.Add(entry.Filename) || !steamIds.Add(entry.SteamID))
+                    throw new InvalidDataException("The source manifest contains an invalid account entry.");
+
+                bool hasSalt = !String.IsNullOrWhiteSpace(entry.Salt);
+                bool hasIv = !String.IsNullOrWhiteSpace(entry.IV);
+                if (manifest.Encrypted)
+                {
+                    if (!hasSalt || !hasIv || !IsBase64WithLength(entry.Salt, 8) || !IsBase64WithLength(entry.IV, 16))
+                        throw new InvalidDataException("The encrypted source manifest contains invalid encryption metadata.");
+                }
+                else if (hasSalt || hasIv)
+                {
+                    throw new InvalidDataException("The unencrypted source manifest contains encryption metadata.");
+                }
+
+                if (String.Equals(entry.Filename, selectedFilename, StringComparison.OrdinalIgnoreCase))
+                    matchingEntry = entry;
+            }
+
+            return matchingEntry;
+        }
+
+        private static string ReadTextWithLimit(string filename, long maximumBytes)
+        {
+            FileInfo fileInfo = new FileInfo(filename);
+            if (!fileInfo.Exists || (fileInfo.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("The selected import file is unavailable or uses an unsupported link.");
+            if (fileInfo.Length > maximumBytes)
+                throw new InvalidDataException("The selected import file is larger than the supported size limit.");
+
+            using (FileStream stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan))
+            using (MemoryStream contents = new MemoryStream())
+            {
+                byte[] buffer = new byte[81920];
+                int bytesRead;
+                long totalBytes = 0;
+                while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    totalBytes += bytesRead;
+                    if (totalBytes > maximumBytes)
+                        throw new InvalidDataException("The selected import file is larger than the supported size limit.");
+                    contents.Write(buffer, 0, bytesRead);
+                }
+
+                return new UTF8Encoding(false, true).GetString(contents.ToArray());
+            }
+        }
+
+        private static bool IsValidImportFilename(string filename)
+        {
+            return !String.IsNullOrWhiteSpace(filename) && filename.Length <= 255 &&
+                filename.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 &&
+                String.Equals(Path.GetFileName(filename), filename, StringComparison.Ordinal) &&
+                filename.EndsWith(".maFile", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsBase64WithLength(string value, int expectedLength)
+        {
+            if (String.IsNullOrWhiteSpace(value))
+                return false;
+
+            try
+            {
+                return Convert.FromBase64String(value).Length == expectedLength;
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+        }
+
+        private static void EnsureNoReparsePoints(string directoryPath)
+        {
+            DirectoryInfo current = new DirectoryInfo(Path.GetFullPath(directoryPath));
+            while (current != null)
+            {
+                if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException("The selected import path uses an unsupported link.");
+
+                DirectoryInfo parent = current.Parent;
+                if (parent == null || String.Equals(parent.FullName, current.FullName, StringComparison.OrdinalIgnoreCase))
+                    break;
+                current = parent;
             }
         }
 

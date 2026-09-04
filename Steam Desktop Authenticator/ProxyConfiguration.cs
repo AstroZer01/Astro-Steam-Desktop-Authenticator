@@ -1,11 +1,14 @@
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SteamAuth;
 using SteamKit2;
 using System;
 using System.Globalization;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -44,6 +47,18 @@ namespace Steam_Desktop_Authenticator
                 return false;
             }
 
+            if (!HasTokenType(payload, "proxyEnabled", JTokenType.Boolean) ||
+                !HasTokenType(payload, "proxyScheme", JTokenType.String) ||
+                !HasTokenType(payload, "proxyHost", JTokenType.String) ||
+                !HasTokenType(payload, "proxyPort", JTokenType.Integer, JTokenType.String) ||
+                !HasTokenType(payload, "proxyUsername", JTokenType.String) ||
+                !HasTokenType(payload, "proxyPasswordAction", JTokenType.String) ||
+                !HasTokenType(payload, "proxyPassword", JTokenType.String))
+            {
+                error = "Proxy settings contained an invalid value type.";
+                return false;
+            }
+
             bool enabled = (bool?)payload["proxyEnabled"] ?? false;
             string scheme = NormalizeScheme((string)payload["proxyScheme"]);
             string host = NormalizeHost((string)payload["proxyHost"]);
@@ -58,6 +73,12 @@ namespace Steam_Desktop_Authenticator
             }
             string username = ((string)payload["proxyUsername"] ?? String.Empty).Trim();
             string passwordAction = ((string)payload["proxyPasswordAction"] ?? PasswordKeep).Trim().ToLowerInvariant();
+            if (scheme.Length > 16 || host.Length > 256 || username.Length > 256 || passwordAction.Length > 16)
+            {
+                error = "Proxy settings are too long.";
+                return false;
+            }
+
             string password;
             switch (passwordAction)
             {
@@ -66,6 +87,11 @@ namespace Steam_Desktop_Authenticator
                     break;
                 case PasswordReplace:
                     password = (string)payload["proxyPassword"] ?? String.Empty;
+                    if (password.Length > 4096)
+                    {
+                        error = "The proxy password is too long.";
+                        return false;
+                    }
                     break;
                 case PasswordClear:
                     password = String.Empty;
@@ -73,6 +99,12 @@ namespace Steam_Desktop_Authenticator
                 default:
                     error = "The proxy password action is invalid.";
                     return false;
+            }
+
+            if (password.Length > 4096)
+            {
+                error = "The proxy password is too long.";
+                return false;
             }
 
             if (requireEndpoint || enabled)
@@ -109,6 +141,21 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
+        private static bool HasTokenType(JObject payload, string propertyName, params JTokenType[] expectedTypes)
+        {
+            JToken token = payload[propertyName];
+            if (token == null || token.Type == JTokenType.Null)
+                return true;
+
+            foreach (JTokenType expectedType in expectedTypes)
+            {
+                if (token.Type == expectedType)
+                    return true;
+            }
+
+            return false;
+        }
+
         public static bool TryFromManifest(Manifest manifest, out ProxyConfiguration configuration, out string error)
         {
             if (manifest == null)
@@ -116,19 +163,6 @@ namespace Steam_Desktop_Authenticator
                 configuration = null;
                 error = "Application settings are unavailable.";
                 return false;
-            }
-
-            if (!manifest.ProxyEnabled)
-            {
-                configuration = new ProxyConfiguration(
-                    false,
-                    NormalizeScheme(manifest.ProxyScheme),
-                    NormalizeHost(manifest.ProxyHost),
-                    manifest.ProxyPort,
-                    (manifest.ProxyUsername ?? String.Empty).Trim(),
-                    manifest.ProxyPassword ?? String.Empty);
-                error = null;
-                return true;
             }
 
             JObject payload = new JObject
@@ -204,6 +238,7 @@ namespace Steam_Desktop_Authenticator
     {
         private const string SteamServerInfoUrl = "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/";
         private const string ExitIpUrl = "https://api.ipify.org";
+        private const int MaximumProxyTestResponseBytes = 1024 * 1024;
         private static readonly object configurationLock = new object();
         private static ProxyConfiguration activeConfiguration;
         private static bool steamTrafficBlocked;
@@ -291,11 +326,24 @@ namespace Steam_Desktop_Authenticator
                         if (!steamResponse.IsSuccessStatusCode)
                             return Failure("The proxy connected, but Steam returned HTTP " + (int)steamResponse.StatusCode + ".");
 
-                        string body = await steamResponse.Content.ReadAsStringAsync(timeoutSource.Token);
+                        string body = await ReadResponseBodyWithLimitAsync(steamResponse.Content, timeoutSource.Token);
                         try
                         {
-                            JObject steamPayload = JObject.Parse(body);
-                            if (steamPayload.GetValue("servertime", StringComparison.OrdinalIgnoreCase) == null)
+                            JObject steamPayload;
+                            using (StringReader stringReader = new StringReader(body))
+                            using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                            {
+                                steamPayload = JObject.Load(jsonReader);
+                            }
+                            JToken serverTime = steamPayload.GetValue("servertime", StringComparison.OrdinalIgnoreCase);
+                            if (serverTime == null ||
+                                (serverTime.Type != JTokenType.Integer && serverTime.Type != JTokenType.String))
+                                return Failure("The proxy connected, but Steam returned an unexpected response.");
+                            string serverTimeText = serverTime.Type == JTokenType.String
+                                ? serverTime.Value<string>()
+                                : serverTime.ToString();
+                            if (!Int64.TryParse(serverTimeText, NumberStyles.None, CultureInfo.InvariantCulture, out long parsedServerTime) ||
+                                parsedServerTime <= 0)
                                 return Failure("The proxy connected, but Steam returned an unexpected response.");
                         }
                         catch
@@ -315,8 +363,8 @@ namespace Steam_Desktop_Authenticator
                         {
                             if (exitIpResponse.IsSuccessStatusCode)
                             {
-                                string candidate = (await exitIpResponse.Content.ReadAsStringAsync(timeoutSource.Token)).Trim();
-                                if (IPAddress.TryParse(candidate, out _))
+                                string candidate = (await ReadResponseBodyWithLimitAsync(exitIpResponse.Content, timeoutSource.Token)).Trim();
+                                if (IPAddress.TryParse(candidate, out IPAddress address) && address.AddressFamily == AddressFamily.InterNetwork)
                                     exitIp = candidate;
                             }
                         }
@@ -342,6 +390,16 @@ namespace Steam_Desktop_Authenticator
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
                     return Failure("Proxy test timed out before Steam's API replied. Check the host, port, and whether the proxy permits api.steampowered.com.");
+                }
+                catch (InvalidDataException ex)
+                {
+                    SteamAuthDiagnostics.Log(ex, "The proxy returned an invalid or oversized response during testing.");
+                    return Failure("The proxy returned an invalid response. Use a proxy that permits the Steam API endpoint.");
+                }
+                catch (DecoderFallbackException ex)
+                {
+                    SteamAuthDiagnostics.Log(ex, "The proxy returned invalid text during testing.");
+                    return Failure("The proxy returned an invalid response. Use a proxy that permits the Steam API endpoint.");
                 }
                 catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.ProxyAuthenticationRequired)
                 {
@@ -380,6 +438,31 @@ namespace Steam_Desktop_Authenticator
             request.Headers.Accept.ParseAdd("application/json");
             request.Headers.ConnectionClose = true;
             return request;
+        }
+
+        private static async Task<string> ReadResponseBodyWithLimitAsync(HttpContent content, CancellationToken cancellationToken)
+        {
+            if (content == null)
+                throw new InvalidDataException("The proxy test returned an empty response.");
+            if (content.Headers.ContentLength > MaximumProxyTestResponseBytes)
+                throw new InvalidDataException("The proxy test returned an oversized response.");
+
+            using (Stream responseStream = await content.ReadAsStreamAsync())
+            using (MemoryStream responseBody = new MemoryStream())
+            {
+                byte[] buffer = new byte[81920];
+                int bytesRead;
+                int totalBytes = 0;
+                while ((bytesRead = await responseStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                {
+                    if (bytesRead > MaximumProxyTestResponseBytes - totalBytes)
+                        throw new InvalidDataException("The proxy test returned an oversized response.");
+                    responseBody.Write(buffer, 0, bytesRead);
+                    totalBytes += bytesRead;
+                }
+
+                return new UTF8Encoding(false, true).GetString(responseBody.ToArray());
+            }
         }
 
         private static bool TryGetProxyTunnelStatusCode(HttpRequestException exception, out int statusCode)

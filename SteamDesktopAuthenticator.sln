@@ -9,6 +9,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SteamAuth", "lib\SteamAuth\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Launcher", "Launcher\Launcher.csproj", "{6A679694-AA04-4446-ABCF-C5E98F566801}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SteamAuth.PhoneEnrollment.Tests", "tests\SteamAuth.PhoneEnrollment.Tests\SteamAuth.PhoneEnrollment.Tests.csproj", "{C8F4A4E5-31AE-4B2E-A3D5-03A37D8902C4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,6 +29,10 @@ Global
 		{6A679694-AA04-4446-ABCF-C5E98F566801}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{6A679694-AA04-4446-ABCF-C5E98F566801}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{6A679694-AA04-4446-ABCF-C5E98F566801}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C8F4A4E5-31AE-4B2E-A3D5-03A37D8902C4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C8F4A4E5-31AE-4B2E-A3D5-03A37D8902C4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C8F4A4E5-31AE-4B2E-A3D5-03A37D8902C4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C8F4A4E5-31AE-4B2E-A3D5-03A37D8902C4}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

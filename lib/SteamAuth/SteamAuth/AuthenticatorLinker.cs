@@ -21,7 +21,7 @@ namespace SteamAuth
         private readonly SessionData session;
         private readonly IAuthenticatorProtocolTransport transport;
         private readonly Func<CancellationToken, Task<long>> steamTimeProvider;
-        private readonly Func<TimeSpan, Task> waitForNextAuthenticatorCodeAsync;
+        private readonly Func<TimeSpan, CancellationToken, Task> waitForNextAuthenticatorCodeAsync;
 
         public string PhoneNumber = null;
         public string PhoneCountryCode = null;
@@ -52,31 +52,36 @@ namespace SteamAuth
         private PhoneLinkStep phoneLinkStep;
 
         public AuthenticatorLinker(SessionData sessionData)
-            : this(sessionData, new SteamProtobufAuthenticatorTransport(), cancellationToken => TimeAligner.GetSteamTimeAsync(cancellationToken), delay => Task.Delay(delay))
+            : this(sessionData, new SteamProtobufAuthenticatorTransport(), cancellationToken => TimeAligner.GetSteamTimeAsync(cancellationToken), (delay, cancellationToken) => Task.Delay(delay, cancellationToken))
         {
         }
 
         public AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport)
-            : this(sessionData, transport, cancellationToken => TimeAligner.GetSteamTimeAsync(cancellationToken), delay => Task.Delay(delay))
+            : this(sessionData, transport, cancellationToken => TimeAligner.GetSteamTimeAsync(cancellationToken), (delay, cancellationToken) => Task.Delay(delay, cancellationToken))
         {
         }
 
         public AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<long> steamTimeProvider)
-            : this(sessionData, transport, WrapSteamTimeProvider(steamTimeProvider), delay => Task.Delay(delay))
+            : this(sessionData, transport, WrapSteamTimeProvider(steamTimeProvider), (delay, cancellationToken) => Task.Delay(delay, cancellationToken))
         {
         }
 
         public AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<long> steamTimeProvider, Func<TimeSpan, Task> waitForNextAuthenticatorCodeAsync)
+            : this(sessionData, transport, WrapSteamTimeProvider(steamTimeProvider), WrapWaitProvider(waitForNextAuthenticatorCodeAsync))
+        {
+        }
+
+        public AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<long> steamTimeProvider, Func<TimeSpan, CancellationToken, Task> waitForNextAuthenticatorCodeAsync)
             : this(sessionData, transport, WrapSteamTimeProvider(steamTimeProvider), waitForNextAuthenticatorCodeAsync)
         {
         }
 
         public AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<Task<long>> steamTimeProvider)
-            : this(sessionData, transport, WrapSteamTimeProvider(steamTimeProvider), delay => Task.Delay(delay))
+            : this(sessionData, transport, WrapSteamTimeProvider(steamTimeProvider), (delay, cancellationToken) => Task.Delay(delay, cancellationToken))
         {
         }
 
-        private AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<CancellationToken, Task<long>> steamTimeProvider, Func<TimeSpan, Task> waitForNextAuthenticatorCodeAsync)
+        private AuthenticatorLinker(SessionData sessionData, IAuthenticatorProtocolTransport transport, Func<CancellationToken, Task<long>> steamTimeProvider, Func<TimeSpan, CancellationToken, Task> waitForNextAuthenticatorCodeAsync)
         {
             session = sessionData ?? throw new ArgumentNullException(nameof(sessionData));
             this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
@@ -276,7 +281,13 @@ namespace SteamAuth
                     }
 
                     long serverTime = (long)response.Body.ServerTime;
-                    long nextAuthenticatorWindow = ((serverTime / 30) + 1) * 30;
+                    long currentAuthenticatorWindow = (serverTime / 30) * 30;
+                    if (currentAuthenticatorWindow > Int64.MaxValue - 30)
+                    {
+                        LastErrorMessage = "Steam returned an unusable authenticator time. Please try again later.";
+                        return FinalizeResult.GeneralFailure;
+                    }
+                    long nextAuthenticatorWindow = currentAuthenticatorWindow + 30;
                     TimeSpan retryDelay = TimeSpan.FromSeconds(Math.Max(2, nextAuthenticatorWindow - serverTime));
                     ReportFinalizationProgress("Steam is verifying the authenticator. Retrying in " + Math.Ceiling(retryDelay.TotalSeconds) + " seconds. You can close this window to cancel safely.");
                     await WaitForNextAuthenticatorCodeAsync(retryDelay, cancellationToken);
@@ -381,28 +392,7 @@ namespace SteamAuth
         private async Task WaitForNextAuthenticatorCodeAsync(TimeSpan delay, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!cancellationToken.CanBeCanceled)
-            {
-                await waitForNextAuthenticatorCodeAsync(delay);
-                return;
-            }
-
-            using (CancellationTokenSource waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
-            {
-                Task delayTask = waitForNextAuthenticatorCodeAsync(delay);
-                Task cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, waitCancellation.Token);
-                try
-                {
-                    if (await Task.WhenAny(delayTask, cancellationTask) == cancellationTask)
-                        cancellationToken.ThrowIfCancellationRequested();
-
-                    await delayTask;
-                }
-                finally
-                {
-                    waitCancellation.Cancel();
-                }
-            }
+            await waitForNextAuthenticatorCodeAsync(delay, cancellationToken);
         }
 
         private PhoneLinkResult PhoneFailure<TResponse>(SteamProtocolResponse<TResponse> response, string action)
@@ -438,6 +428,14 @@ namespace SteamAuth
                 throw new ArgumentNullException(nameof(steamTimeProvider));
 
             return _ => steamTimeProvider();
+        }
+
+        private static Func<TimeSpan, CancellationToken, Task> WrapWaitProvider(Func<TimeSpan, Task> waitProvider)
+        {
+            if (waitProvider == null)
+                throw new ArgumentNullException(nameof(waitProvider));
+
+            return (delay, _) => waitProvider(delay);
         }
 
         private void ReportFinalizationProgress(string message)

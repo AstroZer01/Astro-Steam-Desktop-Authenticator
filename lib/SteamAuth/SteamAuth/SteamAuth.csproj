@@ -2,6 +2,10 @@
   <PropertyGroup>
     <ProjectGuid>{5AD0934E-F6C4-4AE5-83AF-C788313B2A87}</ProjectGuid>
     <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
     <AssemblyTitle>SteamAuth</AssemblyTitle>
     <Product>SteamAuth</Product>
     <Copyright>Copyright ©  2015</Copyright>
@@ -14,11 +18,11 @@
     <DebugType>pdbonly</DebugType>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Google.Protobuf" Version="3.36.0" />
-    <PackageReference Include="Grpc.Tools" Version="2.83.0">
+    <PackageReference Include="Google.Protobuf" />
+    <PackageReference Include="Grpc.Tools">
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="Newtonsoft.Json" />
   </ItemGroup>
   <ItemGroup>
     <Protobuf Include="Protos\service_twofactor.proto" GrpcServices="None" />

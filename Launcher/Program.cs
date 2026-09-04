@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Windows.Forms;
 
 const string DataDirectoryEnvironmentVariable = "ASDA_DATA_DIRECTORY";
 string binPath = Path.Combine(AppContext.BaseDirectory, "bin", "Steam Desktop Authenticator.exe");
@@ -21,15 +22,25 @@ if (File.Exists(binPath))
 
     try
     {
-        Process.Start(processInfo);
+        using Process process = Process.Start(processInfo)
+            ?? throw new InvalidOperationException("Windows did not create the application process.");
     }
-    catch (Exception)
+    catch (Exception ex)
     {
-        // Ignore or log error
+        Environment.ExitCode = 1;
+        MessageBox.Show(
+            "Astro Steam Desktop Assistant could not be started.\n\n" + ex.Message,
+            "Astro Steam Desktop Assistant",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error);
     }
 }
 else
 {
-    // The bin folder or executable is missing.
-    // In a real app we might show a MessageBox, but since it's a console/WinExe without WinForms references, we just exit.
+    Environment.ExitCode = 1;
+    MessageBox.Show(
+        "Astro Steam Desktop Assistant is incomplete. The main application executable is missing:\n\n" + binPath,
+        "Astro Steam Desktop Assistant",
+        MessageBoxButtons.OK,
+        MessageBoxIcon.Error);
 }
