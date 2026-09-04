@@ -2634,6 +2634,7 @@ namespace Steam_Desktop_Authenticator
 
         // --- Astro Modern UI Restructuring (WebView2) ---
         private WebView2 webView;
+        private string trustedUiDocumentPath;
 
         private CoreWebView2 GetCoreWebView2IfAvailable()
         {
@@ -2774,8 +2775,23 @@ namespace Steam_Desktop_Authenticator
             if (IsDisposed || lifetimeCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
                 return;
 
+            string htmlPath = Path.GetFullPath(Path.Combine(ApplicationPaths.UiDirectory, "index.html"));
+            trustedUiDocumentPath = htmlPath;
+
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+            webView.NavigationStarting += (sender, args) =>
+            {
+                if (WebViewSecurityPolicy.IsTrustedLocalDocument(args.Uri, htmlPath))
+                    return;
+
+                args.Cancel = true;
+                DiagnosticErrorLogger.Log(
+                    "Astro UI",
+                    new InvalidOperationException("An untrusted WebView2 navigation was blocked."),
+                    "The dashboard attempted to navigate away from its packaged local document.");
+            };
 
             // Wire up message receiving from JS
             webView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
@@ -2792,6 +2808,18 @@ namespace Steam_Desktop_Authenticator
                     if (!IsDisposed && !Disposing)
                         lblLoading.Text = "Astro UI could not be loaded. Restore the complete release folder and try again.";
                     DiagnosticErrorLogger.Log("Astro UI", new InvalidOperationException("WebView2 navigation failed: " + args.WebErrorStatus), "The dashboard could not be loaded.");
+                    return;
+                }
+                if (!WebViewSecurityPolicy.IsTrustedLocalDocument(webView.CoreWebView2.Source, htmlPath))
+                {
+                    loadingTimer.Stop();
+                    loadingTimer.Dispose();
+                    if (!IsDisposed && !Disposing)
+                        lblLoading.Text = "Astro UI could not be loaded. Restore the complete release folder and try again.";
+                    DiagnosticErrorLogger.Log(
+                        "Astro UI",
+                        new InvalidOperationException("WebView2 completed navigation to an untrusted document."),
+                        "The dashboard refused to expose account data to an untrusted document.");
                     return;
                 }
 
@@ -2815,11 +2843,9 @@ namespace Steam_Desktop_Authenticator
                 StartBackgroundServicesAfterUiReady();
             };
 
-            // Load local html file
-            string htmlPath = System.IO.Path.Combine(ApplicationPaths.UiDirectory, "index.html");
             if (IsDisposed || lifetimeCancellationSource.IsCancellationRequested || webView == null)
                 return;
-            webView.Source = new Uri(htmlPath);
+            webView.Source = new Uri(trustedUiDocumentPath);
         }
 
         private void SendSettingsToWebView()
@@ -3205,7 +3231,8 @@ namespace Steam_Desktop_Authenticator
         private async void CoreWebView2_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             string message = e.WebMessageAsJson;
-            if (String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
+            if (!WebViewSecurityPolicy.IsTrustedLocalDocument(e.Source, trustedUiDocumentPath) ||
+                String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
 
             JObject payload;
             try

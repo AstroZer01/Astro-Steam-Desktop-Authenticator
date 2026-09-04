@@ -131,7 +131,7 @@ namespace Steam_Desktop_Authenticator
                 throw new ManifestParseException();
             }
             if (!RecoverPendingStorageTransaction(maDir, manifestFile))
-                throw new ManifestParseException();
+                throw new ManifestRecoveryException();
             if (!RestoreManifestBackupIfNeeded(manifestFile, Path.Combine(maDir, SettingsBackupFilename), false))
                 throw new ManifestParseException();
 
@@ -962,11 +962,10 @@ namespace Steam_Desktop_Authenticator
                     {
                         if (!manifestCommitted)
                         {
-                            // The manifest still contains the original data. The only
-                            // remaining files are unreferenced staging files, so let
-                            // startup continue and keep the journal for diagnosis.
-                            QuarantineStorageJournal(journalFilename);
-                            return true;
+                            // The manifest still contains the original data, but the
+                            // created files are not safe to leave untracked. Keep the
+                            // journal and fail closed so recovery can retry them later.
+                            return false;
                         }
 
                         // The manifest is committed, so its newly created files are live.
@@ -996,7 +995,6 @@ namespace Steam_Desktop_Authenticator
                 catch (Exception ex)
                 {
                     DiagnosticErrorLogger.Log("Authenticator storage", ex, "A pending storage transaction could not be recovered automatically.");
-                    QuarantineStorageJournal(journalFilename);
                     return false;
                 }
             }
@@ -1055,24 +1053,6 @@ namespace Steam_Desktop_Authenticator
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", ex, "The manifest backup could not be restored safely.");
                 return false;
-            }
-        }
-
-        private static void QuarantineStorageJournal(string journalFilename)
-        {
-            try
-            {
-                if (!File.Exists(journalFilename))
-                    return;
-
-                string directory = Path.GetDirectoryName(journalFilename);
-                string filename = Path.GetFileName(journalFilename);
-                string quarantineFilename = Path.Combine(directory, filename + "." + Guid.NewGuid().ToString("N") + ".quarantine");
-                File.Move(journalFilename, quarantineFilename);
-            }
-            catch (Exception ex)
-            {
-                DiagnosticErrorLogger.Log("Authenticator storage", ex, "The unrecoverable storage journal could not be quarantined.");
             }
         }
 

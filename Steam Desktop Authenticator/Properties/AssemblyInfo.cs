@@ -36,3 +36,4 @@ using System.Runtime.InteropServices;
 
 [assembly: AssemblyMetadata("SquirrelAwareVersion", "1")]
 [assembly: System.Runtime.Versioning.SupportedOSPlatform("windows7.0")]
+[assembly: InternalsVisibleTo("SteamAuth.PhoneEnrollment.Tests")]

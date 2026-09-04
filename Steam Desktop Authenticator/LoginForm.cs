@@ -54,6 +54,7 @@ namespace Steam_Desktop_Authenticator
         }
 
         private WebView2 webView;
+        private string trustedUiDocumentPath;
         private const int SteamConnectionTimeoutMilliseconds = 20000;
         private CancellationTokenSource loginCancellationSource;
         private SteamClient activeSteamClient;
@@ -139,8 +140,23 @@ namespace Steam_Desktop_Authenticator
             if (IsDisposed || loginCancellationSource?.IsCancellationRequested == true || webView?.CoreWebView2 == null)
                 return;
 
+            string htmlPath = Path.GetFullPath(Path.Combine(ApplicationPaths.UiDirectory, "login.html"));
+            trustedUiDocumentPath = htmlPath;
+
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+            webView.NavigationStarting += (sender, args) =>
+            {
+                if (WebViewSecurityPolicy.IsTrustedLocalDocument(args.Uri, htmlPath))
+                    return;
+
+                args.Cancel = true;
+                DiagnosticErrorLogger.Log(
+                    "Login UI",
+                    new InvalidOperationException("An untrusted WebView2 navigation was blocked."),
+                    "The login dialog attempted to navigate away from its packaged local document.");
+            };
 
             webView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
 
@@ -152,6 +168,16 @@ namespace Steam_Desktop_Authenticator
                 {
                     if (!IsDisposed && !Disposing)
                         lblLoading.Text = "Login UI could not be loaded. Restore the complete release folder and try again.";
+                    return;
+                }
+                if (!WebViewSecurityPolicy.IsTrustedLocalDocument(webView.CoreWebView2.Source, htmlPath))
+                {
+                    if (!IsDisposed && !Disposing)
+                        lblLoading.Text = "Login UI could not be loaded. Restore the complete release folder and try again.";
+                    DiagnosticErrorLogger.Log(
+                        "Login UI",
+                        new InvalidOperationException("WebView2 completed navigation to an untrusted document."),
+                        "The login dialog refused to expose credentials to an untrusted document.");
                     return;
                 }
 
@@ -174,16 +200,17 @@ namespace Steam_Desktop_Authenticator
                 }
             };
 
-            string htmlPath = System.IO.Path.Combine(ApplicationPaths.UiDirectory, "login.html");
             if (IsDisposed || loginCancellationSource?.IsCancellationRequested == true || webView == null)
                 return;
-            webView.Source = new Uri(htmlPath);
+            webView.Source = new Uri(trustedUiDocumentPath);
         }
 
         private void CoreWebView2_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             string message = e.WebMessageAsJson;
-            if (IsDisposed || String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
+            if (IsDisposed ||
+                !WebViewSecurityPolicy.IsTrustedLocalDocument(e.Source, trustedUiDocumentPath) ||
+                String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
 
             JObject payload;
             try

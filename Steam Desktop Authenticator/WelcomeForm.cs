@@ -224,7 +224,7 @@ namespace Steam_Desktop_Authenticator
             ValidateStagedManifest(stagedManifestPath, stagingPath);
         }
 
-        private static void ValidateStagedManifest(string manifestPath, string stagingDirectory)
+        internal static void ValidateStagedManifest(string manifestPath, string stagingDirectory)
         {
             if (new FileInfo(manifestPath).Length > MaxImportFileSizeBytes)
                 throw new InvalidDataException("The imported manifest is larger than the supported size limit.");
@@ -273,15 +273,8 @@ namespace Steam_Desktop_Authenticator
                         throw new InvalidDataException("The imported encrypted manifest is missing encryption metadata.");
 
                     string encryptedContents = ReadTextWithLimit(accountPath, MaxImportFileSizeBytes);
-                    try
-                    {
-                        if (Convert.FromBase64String(encryptedContents).Length == 0)
-                            throw new InvalidDataException("An imported encrypted account file is empty.");
-                    }
-                    catch (FormatException ex)
-                    {
-                        throw new InvalidDataException("An imported encrypted account file is not valid base64.", ex);
-                    }
+                    if (!FileEncryptor.IsValidCiphertext(encryptedContents))
+                        throw new InvalidDataException("An imported encrypted account file is not a valid AES-CBC ciphertext.");
                     continue;
                 }
 

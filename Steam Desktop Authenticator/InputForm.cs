@@ -161,13 +161,29 @@ namespace Steam_Desktop_Authenticator
             if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
                 return;
 
+            string htmlPath = Path.GetFullPath(Path.Combine(ApplicationPaths.UiDirectory, "input.html"));
+
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+            webView.NavigationStarting += (sender, args) =>
+            {
+                if (WebViewSecurityPolicy.IsTrustedLocalDocument(args.Uri, htmlPath))
+                    return;
+
+                args.Cancel = true;
+                DiagnosticErrorLogger.Log(
+                    "Input UI",
+                    new InvalidOperationException("An untrusted WebView2 navigation was blocked."),
+                    "The input dialog attempted to navigate away from its packaged local document.");
+            };
 
             webView.CoreWebView2.WebMessageReceived += (sender, e) =>
             {
                 string message = e.WebMessageAsJson;
-                if (IsDisposed || uiCancellationSource.IsCancellationRequested || String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
+                if (IsDisposed || uiCancellationSource.IsCancellationRequested ||
+                    !WebViewSecurityPolicy.IsTrustedLocalDocument(e.Source, htmlPath) ||
+                    String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
 
                 JObject payload;
                 try
@@ -222,6 +238,16 @@ namespace Steam_Desktop_Authenticator
                         lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
                     return;
                 }
+                if (!WebViewSecurityPolicy.IsTrustedLocalDocument(webView.CoreWebView2.Source, htmlPath))
+                {
+                    if (!IsDisposed && !Disposing)
+                        lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                    DiagnosticErrorLogger.Log(
+                        "Input UI",
+                        new InvalidOperationException("WebView2 completed navigation to an untrusted document."),
+                        "The input dialog refused to process an untrusted document.");
+                    return;
+                }
 
                 loadingPanel.Visible = false;
                 foreach (Control c in this.Controls)
@@ -236,7 +262,6 @@ namespace Steam_Desktop_Authenticator
                 _ = ExecuteScriptSafelyAsync($"setupInput({jsLabel}, {isPassStr})", "Input dialog UI");
             };
 
-            string htmlPath = System.IO.Path.Combine(ApplicationPaths.UiDirectory, "input.html");
             if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView == null)
                 return;
             webView.Source = new Uri(htmlPath);

@@ -223,6 +223,29 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void StartupRecovery_FailsClosedWhenAnUncommittedFileCannotBeRemoved()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            JObject replacement = JObject.Parse(File.ReadAllText(manifestPath));
+            string oldFilename = replacement["entries"][0]["filename"].Value<string>();
+            string newFilename = "locked-uncommitted.maFile";
+            File.Copy(Path.Combine(maDirectory, oldFilename), Path.Combine(maDirectory, newFilename));
+            replacement["entries"][0]["filename"] = newFilename;
+            string replacementContents = replacement.ToString(Formatting.None);
+            WriteJournal(maDirectory, replacementContents, newFilename, oldFilename);
+
+            using (new FileStream(Path.Combine(maDirectory, newFilename), FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+                Assert.True(File.Exists(Path.Combine(maDirectory, newFilename)));
+                Assert.True(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+            }
+        }
+
+        [Fact]
         public void SaveWithResult_CompletesAPendingCommittedTransactionBeforeSaving()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
@@ -284,6 +307,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             File.WriteAllText(Path.Combine(maDirectory, ".asda-storage-transaction.json"), "not valid JSON");
 
             Assert.ThrowsAny<Exception>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
         }
 
         [Fact]

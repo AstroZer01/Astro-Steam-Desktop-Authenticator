@@ -110,16 +110,8 @@ namespace Steam_Desktop_Authenticator
 
                 if (isEncrypted)
                 {
-                    try
-                    {
-                        byte[] ciphertext = Convert.FromBase64String(fileContents);
-                        if (ciphertext.Length == 0 || ciphertext.Length % 16 != 0)
-                            throw new InvalidDataException("The selected encrypted account file is invalid.");
-                    }
-                    catch (FormatException ex)
-                    {
-                        throw new InvalidDataException("The selected encrypted account file is not valid base64.", ex);
-                    }
+                    if (!FileEncryptor.IsValidCiphertext(fileContents))
+                        throw new InvalidDataException("The selected encrypted account file is not a valid AES-CBC ciphertext.");
 
                     // Try silent decrypt with RAM passkey
                     string decryptedText = null;
