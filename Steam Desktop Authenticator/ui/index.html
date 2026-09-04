@@ -73,8 +73,8 @@
                 </div>
             </div>
             
-            <div class="glass-panel rounded-xl p-4 flex flex-col gap-4 flex-1 min-h-[300px]">
-                <div id="account-list-container" class="bg-surface-container-lowest border border-white/10 rounded-lg flex-1 overflow-y-auto overflow-x-hidden"></div>
+            <div class="glass-panel rounded-xl p-4 flex flex-col gap-4">
+                <div id="account-list-container" class="account-list-scroll bg-surface-container-lowest border border-white/10 rounded-lg overflow-y-auto overflow-x-hidden"></div>
                 <div class="flex items-center gap-3 pt-2">
                     <span class="text-on-surface-variant text-sm">Filter:</span>
                     <input id="filter-input" class="flex-1 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-1.5 px-3 focus:ring-1 focus:ring-[#00daf3] focus:outline-none h-8" type="text">
@@ -598,7 +598,7 @@
             } else {
                 row.className = "text-white px-3 py-2 hover:bg-surface-variant transition-colors";
             }
-            row.classList.add('flex', 'items-center', 'gap-2');
+            row.classList.add('account-list-row', 'flex', 'items-center', 'gap-2');
             const accountButton = document.createElement('button');
             accountButton.type = 'button';
             accountButton.className = "min-w-0 flex-1 border-0 bg-transparent p-0 text-left text-inherit cursor-pointer";
