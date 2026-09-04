@@ -148,7 +148,7 @@ namespace SteamAuth
             {
                 throw;
             }
-            catch (SteamWebRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized || ex.StatusCode == HttpStatusCode.Forbidden)
+            catch (SteamWebRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized)
             {
                 throw new SteamSessionException(
                     SteamSessionFailureKind.InvalidSession,

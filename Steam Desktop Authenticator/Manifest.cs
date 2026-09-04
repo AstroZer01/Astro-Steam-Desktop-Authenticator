@@ -98,6 +98,9 @@ namespace Steam_Desktop_Authenticator
         private const string StorageBackupFilenameSuffix = ".bak";
         private const long MaximumManifestFileSizeBytes = 4 * 1024 * 1024;
         private const long MaximumAccountFileSizeBytes = 4 * 1024 * 1024;
+        private const int MaximumAuthenticatorSecretTextLength = 4096;
+        private const int MaximumAuthenticatorSecretBytes = 64;
+        private const int MaximumDeviceIdLength = 256;
         private const int MaximumManifestEntries = 1000;
         private static readonly JsonSerializerSettings storageJsonSettings = new JsonSerializerSettings
         {
@@ -605,6 +608,8 @@ namespace Steam_Desktop_Authenticator
                         ulong steamId = account?.Session?.SteamID ?? 0;
                         if (steamId == 0 || managedSteamIds.Contains(steamId))
                             continue;
+                        if (!IsValidAutomaticImportAccount(account))
+                            throw new InvalidDataException("The authenticator file is missing usable authenticator secrets or device data.");
 
                         // A duplicate identity is not safe to import automatically:
                         // keep all source files available for manual selection.
@@ -677,7 +682,8 @@ namespace Steam_Desktop_Authenticator
                             return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files changed before it could be imported.");
 
                         SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
-                        if (account?.Session == null || account.Session.SteamID == 0 || account.Session.SteamID != candidate.SteamID)
+                        if (account?.Session == null || account.Session.SteamID == 0 || account.Session.SteamID != candidate.SteamID ||
+                            !IsValidAutomaticImportAccount(account))
                             return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files is no longer valid.");
                         if (!managedSteamIds.Add(account.Session.SteamID))
                             return StorageResult.Failure(StorageFailureKind.Validation, "Two selected authenticator files use the same Steam identity.");
@@ -1503,6 +1509,35 @@ namespace Steam_Desktop_Authenticator
             using (SHA256 sha256 = SHA256.Create())
             {
                 return Convert.ToBase64String(sha256.ComputeHash(new UTF8Encoding(false).GetBytes(contents)));
+            }
+        }
+
+        private static bool IsValidAutomaticImportAccount(SteamGuardAccount account)
+        {
+            return account?.Session != null && account.Session.SteamID != 0 &&
+                IsValidAuthenticatorSecret(account.SharedSecret) &&
+                IsValidAuthenticatorSecret(account.IdentitySecret) &&
+                !String.IsNullOrWhiteSpace(account.DeviceID) &&
+                account.DeviceID.Length <= MaximumDeviceIdLength;
+        }
+
+        private static bool IsValidAuthenticatorSecret(string value)
+        {
+            if (String.IsNullOrWhiteSpace(value) || value.Length > MaximumAuthenticatorSecretTextLength)
+                return false;
+
+            try
+            {
+                byte[] decoded = Convert.FromBase64String(value);
+                return decoded.Length > 0 && decoded.Length <= MaximumAuthenticatorSecretBytes;
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+            catch (ArgumentException)
+            {
+                return false;
             }
         }
 

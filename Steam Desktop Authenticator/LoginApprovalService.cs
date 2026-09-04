@@ -382,7 +382,7 @@ namespace Steam_Desktop_Authenticator
                 if (current is SteamSessionException sessionException && sessionException.Kind == SteamSessionFailureKind.InvalidSession)
                     return true;
                 if (current is SteamWebRequestException steamWebException &&
-                    (steamWebException.StatusCode == System.Net.HttpStatusCode.Unauthorized || steamWebException.StatusCode == System.Net.HttpStatusCode.Forbidden))
+                    steamWebException.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                     return true;
             }
             return false;
@@ -435,11 +435,13 @@ namespace Steam_Desktop_Authenticator
             {
                 return await protocolTransport.SendAsync("IAuthenticationService", method, request, account.Session.AccessToken, responseParser, requestMethod, cancellationToken);
             }
-            catch (SteamWebRequestException exception) when (
-                exception.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
-                exception.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            catch (SteamWebRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.Unauthorized)
             {
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unauthorized, "Steam rejected this account session. Log in again and retry.");
+            }
+            catch (SteamWebRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam refused this login action for the current account.");
             }
             catch (SteamWebRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
             {

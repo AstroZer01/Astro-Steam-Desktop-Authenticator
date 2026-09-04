@@ -231,7 +231,13 @@ namespace Steam_Desktop_Authenticator
                     return await RunAvailableSteamAccountOperationAsync(account, async () =>
                     {
                         if (refreshAccessTokenBeforeRetry || account.Session.IsAccessTokenExpired())
+                        {
                             await RefreshAndPersistAccessTokenAsync(account, cancellationToken);
+                            // A successful forced refresh has done its job. If the
+                            // confirmation request fails transiently, retry that
+                            // request without refreshing the token again.
+                            refreshAccessTokenBeforeRetry = false;
+                        }
                         return await account.FetchConfirmationsAsync(cancellationToken);
                     }, cancellationToken);
                 }
@@ -369,17 +375,16 @@ namespace Steam_Desktop_Authenticator
                 if (current is SteamSessionException sessionException && sessionException.Kind == SteamSessionFailureKind.InvalidSession)
                     return true;
                 if (current is SteamWebRequestException steamWebException &&
-                    (steamWebException.StatusCode == HttpStatusCode.Unauthorized || steamWebException.StatusCode == HttpStatusCode.Forbidden))
+                    steamWebException.StatusCode == HttpStatusCode.Unauthorized)
                     return true;
                 if (current is WebException webException && webException.Response is HttpWebResponse httpResponse &&
-                    (httpResponse.StatusCode == HttpStatusCode.Unauthorized || httpResponse.StatusCode == HttpStatusCode.Forbidden))
+                    httpResponse.StatusCode == HttpStatusCode.Unauthorized)
                     return true;
 
                 string message = current.Message ?? String.Empty;
                 if (message.IndexOf("Needs Authentication", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("not logged in", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("403", StringComparison.OrdinalIgnoreCase) >= 0)
+                    message.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0)
                     return true;
             }
             return false;
@@ -2158,10 +2163,10 @@ namespace Steam_Desktop_Authenticator
                 if (current is SteamSessionException sessionException && sessionException.Kind == SteamSessionFailureKind.InvalidSession)
                     return true;
                 if (current is SteamWebRequestException steamWebException &&
-                    (steamWebException.StatusCode == HttpStatusCode.Unauthorized || steamWebException.StatusCode == HttpStatusCode.Forbidden))
+                    steamWebException.StatusCode == HttpStatusCode.Unauthorized)
                     return true;
                 if (current is WebException webException && webException.Response is HttpWebResponse httpResponse &&
-                    (httpResponse.StatusCode == HttpStatusCode.Unauthorized || httpResponse.StatusCode == HttpStatusCode.Forbidden))
+                    httpResponse.StatusCode == HttpStatusCode.Unauthorized)
                     return true;
             }
 
@@ -2180,8 +2185,7 @@ namespace Steam_Desktop_Authenticator
                     message.IndexOf("refresh token is expired", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("refresh token is empty", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("invalid token", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("403", StringComparison.OrdinalIgnoreCase) >= 0)
+                    message.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0)
                     return true;
             }
             return false;

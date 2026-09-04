@@ -155,6 +155,52 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Empty(manifest.FindUnmanagedMaFiles());
         }
 
+        [Theory]
+        [InlineData("shared")]
+        [InlineData("identity")]
+        [InlineData("device")]
+        public void StartupImport_IgnoresAccountsWithIncompleteAuthenticatorData(string invalidField)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "incomplete-authenticator.maFile";
+            SteamGuardAccount account = CreateAccount();
+            if (invalidField == "shared")
+                account.SharedSecret = "not-base64";
+            else if (invalidField == "identity")
+                account.IdentitySecret = null;
+            else
+                account.DeviceID = null;
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+        }
+
+        [Fact]
+        public void StartupImport_RevalidatesAuthenticatorDataBeforeCommit()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "changed-authenticator.maFile";
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(CreateAccount()));
+
+            Manifest.UnmanagedMaFileCandidate candidate = Assert.Single(manifest.FindUnmanagedMaFiles());
+            SteamGuardAccount changedAccount = CreateAccount();
+            changedAccount.IdentitySecret = "not-base64";
+            string changedContents = JsonConvert.SerializeObject(changedAccount);
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), changedContents);
+            candidate.ContentHash = ComputeContentHash(changedContents);
+
+            StorageResult result = manifest.ImportUnmanagedMaFiles(new[] { candidate });
+
+            Assert.False(result.Succeeded);
+            Assert.Empty(manifest.Entries);
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+        }
+
         [Fact]
         public void SessionRenewalState_PersistsAndCanBeCleared()
         {
@@ -567,9 +613,18 @@ namespace SteamAuth.PhoneEnrollment.Tests
         {
             return new SteamGuardAccount
             {
+                SharedSecret = Convert.ToBase64String(new byte[20]),
+                IdentitySecret = Convert.ToBase64String(new byte[20]),
+                DeviceID = "android:storage-test",
                 Session = new SessionData { SteamID = steamId, AccessToken = "test-access-token" },
                 AccountName = "storage-test"
             };
+        }
+
+        private static string ComputeContentHash(string contents)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+                return Convert.ToBase64String(sha256.ComputeHash(new UTF8Encoding(false).GetBytes(contents)));
         }
 
         private static void WriteJournal(
