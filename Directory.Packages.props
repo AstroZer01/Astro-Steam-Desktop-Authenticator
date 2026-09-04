@@ -6,10 +6,10 @@
   <ItemGroup>
     <!-- Production dependency versions are owned in this file so app, library, and tests cannot drift. -->
     <PackageVersion Include="CommandLineParser" Version="2.9.1" />
-    <PackageVersion Include="Google.Protobuf" Version="3.36.0" />
+    <PackageVersion Include="Google.Protobuf" Version="3.36.1" />
     <PackageVersion Include="Grpc.Tools" Version="2.83.0" />
-    <PackageVersion Include="libphonenumber-csharp" Version="9.0.37" />
-    <PackageVersion Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+    <PackageVersion Include="libphonenumber-csharp" Version="9.0.38" />
+    <PackageVersion Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
     <PackageVersion Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageVersion Include="SteamKit2" Version="3.4.0" />
     <PackageVersion Include="ZXing.Net" Version="0.16.11" />
