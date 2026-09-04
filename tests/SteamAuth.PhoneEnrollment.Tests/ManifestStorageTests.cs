@@ -20,6 +20,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
     [Collection("Manifest storage")]
     public sealed class ManifestStorageTests : IDisposable
     {
+        private const string TestBackupFilename = ".manifest.00000000000000000000000000000000.bak";
         private readonly string dataDirectory = Path.Combine(Path.GetTempPath(), "asda-storage-tests", Guid.NewGuid().ToString("N"));
         private readonly string previousDataDirectory;
 
@@ -306,7 +307,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             string maDirectory = Path.Combine(dataDirectory, "maFiles");
             File.WriteAllText(Path.Combine(maDirectory, ".asda-storage-transaction.json"), "not valid JSON");
 
-            Assert.ThrowsAny<Exception>(() => Manifest.GetManifest(true));
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
             Assert.True(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
         }
 
@@ -317,13 +318,13 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
             string maDirectory = Path.Combine(dataDirectory, "maFiles");
             string manifestPath = Path.Combine(maDirectory, "manifest.json");
-            string backupPath = Path.Combine(maDirectory, ".manifest.test.bak");
+            string backupPath = Path.Combine(maDirectory, TestBackupFilename);
             File.WriteAllText(backupPath, "backup");
             WriteJournal(maDirectory, File.ReadAllText(manifestPath), manifest.Entries[0].Filename, "obsolete.maFile");
 
             using (new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.None))
             {
-                Assert.ThrowsAny<Exception>(() => Manifest.GetManifest(true));
+                Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
                 Assert.True(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
             }
         }
@@ -358,6 +359,64 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void StartupRecovery_RejectsABackupNameThatTargetsALiveAccountFile()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string liveFilename = manifest.Entries[0].Filename;
+            WriteJournal(
+                maDirectory,
+                File.ReadAllText(manifestPath),
+                "created.maFile",
+                "obsolete.maFile",
+                liveFilename);
+
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(Path.Combine(maDirectory, liveFilename)));
+            Assert.True(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+        }
+
+        [Fact]
+        public void StartupRecovery_RejectsAFileListThatTargetsALiveAccountFile()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string liveFilename = manifest.Entries[0].Filename;
+            WriteJournal(
+                maDirectory,
+                File.ReadAllText(manifestPath),
+                "created.maFile",
+                liveFilename);
+
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(Path.Combine(maDirectory, liveFilename)));
+            Assert.True(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+        }
+
+        [Fact]
+        public void StartupRecovery_RejectsAnUncommittedCreatedFileThatTargetsALiveAccountFile()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string liveFilename = manifest.Entries[0].Filename;
+            WriteJournal(
+                maDirectory,
+                File.ReadAllText(manifestPath) + "changed",
+                liveFilename,
+                "obsolete.maFile");
+
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(Path.Combine(maDirectory, liveFilename)));
+            Assert.True(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+        }
+
+        [Fact]
         public void StartupRemovesAStaleSettingsBackupAfterLoadingAValidManifest()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
@@ -388,7 +447,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
             };
         }
 
-        private static void WriteJournal(string maDirectory, string manifestContents, string createdFilename, string obsoleteFilename)
+        private static void WriteJournal(
+            string maDirectory,
+            string manifestContents,
+            string createdFilename,
+            string obsoleteFilename,
+            string backupFilename = TestBackupFilename)
         {
             string hash;
             using (SHA256 sha256 = SHA256.Create())
@@ -398,7 +462,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 ["manifest_hash"] = hash,
                 ["created_filenames"] = new JArray(createdFilename),
                 ["obsolete_filenames"] = new JArray(obsoleteFilename),
-                ["backup_filename"] = ".manifest.test.bak"
+                ["backup_filename"] = backupFilename
             };
             File.WriteAllText(Path.Combine(maDirectory, ".asda-storage-transaction.json"), journal.ToString(Formatting.None));
         }

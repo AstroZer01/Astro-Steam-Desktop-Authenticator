@@ -93,6 +93,8 @@ namespace Steam_Desktop_Authenticator
         private static readonly object storageLock = new object();
         private const string StorageJournalFilename = ".asda-storage-transaction.json";
         private const string SettingsBackupFilename = ".manifest.settings.bak";
+        private const string StorageBackupFilenamePrefix = ".manifest.";
+        private const string StorageBackupFilenameSuffix = ".bak";
         private const long MaximumManifestFileSizeBytes = 4 * 1024 * 1024;
         private const long MaximumAccountFileSizeBytes = 4 * 1024 * 1024;
         private const int MaximumManifestEntries = 1000;
@@ -946,14 +948,19 @@ namespace Steam_Desktop_Authenticator
                     foreach (string filename in created.Concat(obsolete))
                         ValidateStorageFilename(filename);
 
-                    string backupFilename = String.IsNullOrWhiteSpace(journal.BackupFilename)
-                        ? null
-                        : Path.Combine(maDir, Path.GetFileName(journal.BackupFilename));
+                    string backupFilename = GetValidatedStorageBackupPath(maDir, journal.BackupFilename);
                     if (!RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, false))
                         return false;
 
                     bool manifestCommitted = File.Exists(manifestFilename) &&
                         String.Equals(GetContentHash(ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes)), journal.ManifestHash, StringComparison.Ordinal);
+                    HashSet<string> manifestFilenames = GetManifestFilenamesForRecovery(manifestFilename);
+                    ValidateStorageTransactionFileOwnership(
+                        created,
+                        obsolete,
+                        backupFilename,
+                        manifestFilenames,
+                        manifestCommitted);
                     bool cleanupSucceeded = manifestCommitted
                         ? DeleteFilesBestEffort(maDir, obsolete, "An obsolete authenticator file could not be removed during storage recovery.")
                         : DeleteFilesBestEffort(maDir, created, "A temporary authenticator file could not be removed during storage recovery.");
@@ -1017,9 +1024,7 @@ namespace Steam_Desktop_Authenticator
                     foreach (string filename in (journal.ObsoleteFilenames ?? new List<string>()))
                         ValidateStorageFilename(filename);
 
-                    string backupFilename = String.IsNullOrWhiteSpace(journal.BackupFilename)
-                        ? null
-                        : Path.Combine(maDir, Path.GetFileName(journal.BackupFilename));
+                    string backupFilename = GetValidatedStorageBackupPath(maDir, journal.BackupFilename);
                     if (backupFilename != null)
                         DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed while rebasing retained storage cleanup.");
 
@@ -1053,6 +1058,69 @@ namespace Steam_Desktop_Authenticator
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", ex, "The manifest backup could not be restored safely.");
                 return false;
+            }
+        }
+
+        private static string GetValidatedStorageBackupPath(string maDir, string filename)
+        {
+            if (String.IsNullOrWhiteSpace(filename))
+                return null;
+
+            if (!String.Equals(Path.GetFileName(filename), filename, StringComparison.Ordinal) ||
+                !filename.StartsWith(StorageBackupFilenamePrefix, StringComparison.OrdinalIgnoreCase) ||
+                !filename.EndsWith(StorageBackupFilenameSuffix, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("A storage transaction contained an invalid manifest backup filename.");
+
+            int guidStart = StorageBackupFilenamePrefix.Length;
+            int guidLength = filename.Length - guidStart - StorageBackupFilenameSuffix.Length;
+            if (guidLength != 32 || !Guid.TryParseExact(filename.Substring(guidStart, guidLength), "N", out _))
+                throw new InvalidDataException("A storage transaction contained an invalid manifest backup filename.");
+
+            return Path.Combine(maDir, filename);
+        }
+
+        private static HashSet<string> GetManifestFilenamesForRecovery(string manifestFilename)
+        {
+            HashSet<string> filenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!File.Exists(manifestFilename))
+                return filenames;
+
+            Manifest currentManifest = JsonConvert.DeserializeObject<Manifest>(
+                ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes),
+                storageJsonSettings);
+            ValidateManifestEntries(currentManifest, Path.GetDirectoryName(manifestFilename));
+
+            foreach (ManifestEntry entry in currentManifest.Entries)
+            {
+                if (!filenames.Add(entry.Filename))
+                    throw new InvalidDataException("The current account manifest contains duplicate account filenames.");
+            }
+
+            return filenames;
+        }
+
+        private static void ValidateStorageTransactionFileOwnership(
+            IEnumerable<string> created,
+            IEnumerable<string> obsolete,
+            string backupFilename,
+            HashSet<string> manifestFilenames,
+            bool manifestCommitted)
+        {
+            HashSet<string> transactionFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string filename in created.Concat(obsolete))
+            {
+                if (!transactionFilenames.Add(filename))
+                    throw new InvalidDataException("A storage transaction reused a filename across its file lists.");
+            }
+
+            if (backupFilename != null && transactionFilenames.Contains(Path.GetFileName(backupFilename)))
+                throw new InvalidDataException("A storage transaction reused its manifest backup filename.");
+
+            IEnumerable<string> filesThatWouldBeDeleted = manifestCommitted ? obsolete : created;
+            foreach (string filename in filesThatWouldBeDeleted)
+            {
+                if (manifestFilenames.Contains(filename))
+                    throw new InvalidDataException("A storage transaction attempted to delete a live authenticator file.");
             }
         }
 
