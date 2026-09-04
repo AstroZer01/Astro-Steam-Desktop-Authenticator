@@ -8,6 +8,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SteamAuth
@@ -66,13 +67,20 @@ namespace SteamAuth
         public string LastAuthenticatorOperationError { get; private set; }
 
         private static byte[] steamGuardCodeTranslations = new byte[] { 50, 51, 52, 53, 54, 55, 56, 57, 66, 67, 68, 70, 71, 72, 74, 75, 77, 78, 80, 81, 82, 84, 86, 87, 88, 89 };
+        private const int MaximumSecretTextLength = 4096;
+        private const int MaximumSecretBytes = 64;
+        private static readonly JsonSerializerSettings steamResponseJsonSettings = new JsonSerializerSettings
+        {
+            MaxDepth = 16,
+            DateParseHandling = DateParseHandling.None
+        };
 
         /// <summary>
         /// Remove steam guard from this account
         /// </summary>
         /// <param name="scheme">1 = Return to email codes, 2 = Remove completley</param>
         /// <returns></returns>
-        public async Task<bool> DeactivateAuthenticator(int scheme = 1)
+        public async Task<bool> DeactivateAuthenticator(int scheme = 1, CancellationToken cancellationToken = default)
         {
             LastAuthenticatorOperationError = null;
             if (String.IsNullOrWhiteSpace(RevocationCode))
@@ -85,7 +93,7 @@ namespace SteamAuth
                 LastAuthenticatorOperationError = "The requested Steam Guard removal method is invalid.";
                 return false;
             }
-            if (Session == null || String.IsNullOrWhiteSpace(Session.AccessToken))
+            if (Session == null || Session.SteamID == 0 || String.IsNullOrWhiteSpace(Session.AccessToken))
             {
                 LastAuthenticatorOperationError = "The saved Steam session has expired. Sign in again before removing Steam Guard.";
                 return false;
@@ -104,7 +112,8 @@ namespace SteamAuth
                         SteamguardScheme = (uint)scheme
                     },
                     Session.AccessToken,
-                    CTwoFactor_RemoveAuthenticator_Response.Parser);
+                    CTwoFactor_RemoveAuthenticator_Response.Parser,
+                    cancellationToken: cancellationToken);
 
                 if (response == null || response.Result != 1 || response.Body == null || !response.Body.Success)
                 {
@@ -122,6 +131,10 @@ namespace SteamAuth
 
                 return true;
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 SteamAuthDiagnostics.Log(ex, "Steam Guard removal request failed.");
@@ -135,20 +148,21 @@ namespace SteamAuth
             return GenerateSteamGuardCodeForTime(TimeAligner.GetSteamTime());
         }
 
-        public async Task<string> GenerateSteamGuardCodeAsync()
+        public async Task<string> GenerateSteamGuardCodeAsync(CancellationToken cancellationToken = default)
         {
-            return GenerateSteamGuardCodeForTime(await TimeAligner.GetSteamTimeAsync());
+            return GenerateSteamGuardCodeForTime(await TimeAligner.GetSteamTimeAsync(cancellationToken));
         }
 
-        public async Task<string> SignInViaQR(string idOfQR) {
-            if (Session == null || String.IsNullOrWhiteSpace(Session.AccessToken))
+        public async Task<string> SignInViaQR(string idOfQR, CancellationToken cancellationToken = default) {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Session == null || Session.SteamID == 0 || String.IsNullOrWhiteSpace(Session.AccessToken))
                 throw new InvalidOperationException("The saved Steam session has expired. Log in again before approving a QR login.");
-            if (!UInt64.TryParse(idOfQR, out ulong clientId))
+            if (!UInt64.TryParse(idOfQR, out ulong clientId) || clientId == 0)
                 throw new ArgumentException("Steam provided an invalid QR login identifier.", nameof(idOfQR));
             if (String.IsNullOrWhiteSpace(SharedSecret))
                 throw new InvalidOperationException("The saved authenticator is missing its shared secret. Re-import or re-link the account before approving a QR login.");
 
-            byte[] sharedSecretBytes = Convert.FromBase64String(Regex.Unescape(this.SharedSecret));
+            byte[] sharedSecretBytes = DecodeSecret(this.SharedSecret, "shared authenticator secret");
             byte[] signatureData = new byte[18];
             
             // version (uint16 LE)
@@ -180,7 +194,8 @@ namespace SteamAuth
                         Persistence = ESessionPersistence.KEsessionPersistencePersistent
                     },
                     Session.AccessToken,
-                    CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response.Parser);
+                    CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response.Parser,
+                    cancellationToken: cancellationToken);
                 return (response?.Result ?? 0).ToString();
             }
         }
@@ -192,8 +207,7 @@ namespace SteamAuth
                 return "";
             }
 
-            string sharedSecretUnescaped = Regex.Unescape(this.SharedSecret);
-            byte[] sharedSecretArray = Convert.FromBase64String(sharedSecretUnescaped);
+            byte[] sharedSecretArray = DecodeSecret(this.SharedSecret, "shared authenticator secret");
             byte[] timeArray = new byte[8];
 
             time /= 30L;
@@ -229,16 +243,16 @@ namespace SteamAuth
             return FetchConfirmationInternal(response);
         }
 
-        public async Task<Confirmation[]> FetchConfirmationsAsync()
+        public async Task<Confirmation[]> FetchConfirmationsAsync(CancellationToken cancellationToken = default)
         {
-            string url = this.GenerateConfirmationURL();
-            string response = await SteamWeb.GETRequest(url, this.Session.GetCookies());
+            string url = await GenerateConfirmationURLAsync("conf", cancellationToken);
+            string response = await SteamWeb.GETRequest(url, this.Session.GetCookies(), cancellationToken);
             return FetchConfirmationInternal(response);
         }
 
         private Confirmation[] FetchConfirmationInternal(string response)
         {
-            var confirmationsResponse = JsonConvert.DeserializeObject<ConfirmationsResponse>(response);
+            var confirmationsResponse = JsonConvert.DeserializeObject<ConfirmationsResponse>(response, steamResponseJsonSettings);
 
             if (confirmationsResponse == null)
                 throw new InvalidOperationException("Steam returned an invalid confirmation response.");
@@ -254,6 +268,9 @@ namespace SteamAuth
                     ? "Steam could not load confirmations."
                     : confirmationsResponse.Message);
 
+            if (confirmationsResponse.Confirmations == null || confirmationsResponse.Confirmations.Length > 1000 ||
+                confirmationsResponse.Confirmations.Any(confirmation => confirmation == null || confirmation.ID == 0 || confirmation.Key == 0))
+                throw new InvalidOperationException("Steam returned an invalid confirmation list.");
 
             return confirmationsResponse.Confirmations;
         }
@@ -271,49 +288,60 @@ namespace SteamAuth
             return (long)conf.Creator;
         }
 
-        public async Task<bool> AcceptMultipleConfirmations(Confirmation[] confs)
+        public async Task<bool> AcceptMultipleConfirmations(Confirmation[] confs, CancellationToken cancellationToken = default)
         {
-            return await _sendMultiConfirmationAjax(confs, "allow");
+            ValidateConfirmations(confs);
+            return await _sendMultiConfirmationAjax(confs, "allow", cancellationToken);
         }
 
-        public async Task<bool> DenyMultipleConfirmations(Confirmation[] confs)
+        public async Task<bool> DenyMultipleConfirmations(Confirmation[] confs, CancellationToken cancellationToken = default)
         {
-            return await _sendMultiConfirmationAjax(confs, "cancel");
+            ValidateConfirmations(confs);
+            return await _sendMultiConfirmationAjax(confs, "cancel", cancellationToken);
         }
 
-        public async Task<bool> AcceptConfirmation(Confirmation conf)
+        public async Task<bool> AcceptConfirmation(Confirmation conf, CancellationToken cancellationToken = default)
         {
-            return await _sendConfirmationAjax(conf, "allow");
+            ValidateConfirmation(conf);
+            return await _sendConfirmationAjax(conf, "allow", cancellationToken);
         }
 
-        public async Task<bool> DenyConfirmation(Confirmation conf)
+        public async Task<bool> DenyConfirmation(Confirmation conf, CancellationToken cancellationToken = default)
         {
-            return await _sendConfirmationAjax(conf, "cancel");
+            ValidateConfirmation(conf);
+            return await _sendConfirmationAjax(conf, "cancel", cancellationToken);
         }
 
-        private async Task<bool> _sendConfirmationAjax(Confirmation conf, string op)
+        private async Task<bool> _sendConfirmationAjax(Confirmation conf, string op, CancellationToken cancellationToken)
         {
             string url = APIEndpoints.COMMUNITY_BASE + "/mobileconf/ajaxop";
-            string queryString = "?op=" + op + "&";
             // tag is different from op now
             string tag = op == "allow" ? "accept" : "reject";
-            queryString += GenerateConfirmationQueryParams(tag);
+            NameValueCollection queryParams = await GenerateConfirmationQueryParamsAsNVCAsync(tag, cancellationToken);
+            string queryString = "?op=" + WebUtility.UrlEncode(op) + "&" + EncodeQueryParameters(queryParams);
             queryString += "&cid=" + conf.ID + "&ck=" + conf.Key;
             url += queryString;
 
-            string response = await SteamWeb.GETRequest(url, this.Session.GetCookies());
+            string response = await SteamWeb.GETRequest(url, this.Session.GetCookies(), cancellationToken);
             if (response == null) return false;
 
-            SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response);
-            return confResponse?.Success ?? false;
+            try
+            {
+                SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response, steamResponseJsonSettings);
+                return confResponse?.Success ?? false;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
         }
 
-        private async Task<bool> _sendMultiConfirmationAjax(Confirmation[] confs, string op)
+        private async Task<bool> _sendMultiConfirmationAjax(Confirmation[] confs, string op, CancellationToken cancellationToken)
         {
             string url = APIEndpoints.COMMUNITY_BASE + "/mobileconf/multiajaxop";
             // tag is different from op now
             string tag = op == "allow" ? "accept" : "reject";
-            NameValueCollection body = GenerateConfirmationQueryParamsAsNVC(tag);
+            NameValueCollection body = await GenerateConfirmationQueryParamsAsNVCAsync(tag, cancellationToken);
             body.Add("op", op);
             foreach (var conf in confs)
             {
@@ -325,12 +353,20 @@ namespace SteamAuth
                 url,
                 this.Session.GetCookies(),
                 body,
-                new System.Collections.Generic.Dictionary<string, string> { ["Origin"] = APIEndpoints.COMMUNITY_BASE });
+                new System.Collections.Generic.Dictionary<string, string> { ["Origin"] = APIEndpoints.COMMUNITY_BASE },
+                cancellationToken: cancellationToken);
             string response = steamResponse?.Body;
             if (response == null) return false;
 
-            SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response);
-            return confResponse?.Success ?? false;
+            try
+            {
+                SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response, steamResponseJsonSettings);
+                return confResponse?.Success ?? false;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
         }
 
         public string GenerateConfirmationURL(string tag = "conf")
@@ -346,17 +382,33 @@ namespace SteamAuth
                 throw new ArgumentException("Device ID is not present");
 
             var queryParams = GenerateConfirmationQueryParamsAsNVC(tag);
-
-            return string.Join("&", queryParams.AllKeys.Select(key =>
-                WebUtility.UrlEncode(key) + "=" + WebUtility.UrlEncode(queryParams[key])));
+            return EncodeQueryParameters(queryParams);
         }
 
         public NameValueCollection GenerateConfirmationQueryParamsAsNVC(string tag)
         {
+            return GenerateConfirmationQueryParamsAsNVC(tag, TimeAligner.GetSteamTime());
+        }
+
+        private async Task<string> GenerateConfirmationURLAsync(string tag, CancellationToken cancellationToken)
+        {
+            NameValueCollection queryParams = await GenerateConfirmationQueryParamsAsNVCAsync(tag, cancellationToken);
+            return APIEndpoints.COMMUNITY_BASE + "/mobileconf/getlist?" + EncodeQueryParameters(queryParams);
+        }
+
+        private async Task<NameValueCollection> GenerateConfirmationQueryParamsAsNVCAsync(string tag, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            long time = await TimeAligner.GetSteamTimeAsync(cancellationToken);
+            return GenerateConfirmationQueryParamsAsNVC(tag, time);
+        }
+
+        private NameValueCollection GenerateConfirmationQueryParamsAsNVC(string tag, long time)
+        {
             if (String.IsNullOrEmpty(DeviceID))
                 throw new ArgumentException("Device ID is not present");
-
-            long time = TimeAligner.GetSteamTime();
+            if (Session == null || Session.SteamID == 0)
+                throw new InvalidOperationException("A valid Steam session is required for confirmation requests.");
 
             var ret = new NameValueCollection();
             ret.Add("p", this.DeviceID);
@@ -369,9 +421,53 @@ namespace SteamAuth
             return ret;
         }
 
+        private static string EncodeQueryParameters(NameValueCollection queryParams)
+        {
+            return string.Join("&", queryParams.AllKeys.Select(key =>
+                WebUtility.UrlEncode(key) + "=" + WebUtility.UrlEncode(queryParams[key])));
+        }
+
+        private static void ValidateConfirmation(Confirmation confirmation)
+        {
+            if (confirmation == null || confirmation.ID == 0 || confirmation.Key == 0)
+                throw new ArgumentException("A valid Steam confirmation is required.", nameof(confirmation));
+        }
+
+        private static void ValidateConfirmations(Confirmation[] confirmations)
+        {
+            if (confirmations == null || confirmations.Length == 0 || confirmations.Length > 1000)
+                throw new ArgumentException("The confirmation list is invalid.", nameof(confirmations));
+            foreach (Confirmation confirmation in confirmations)
+                ValidateConfirmation(confirmation);
+        }
+
+        private static byte[] DecodeSecret(string value, string fieldName)
+        {
+            if (String.IsNullOrWhiteSpace(value) || value.Length > MaximumSecretTextLength)
+                throw new InvalidOperationException("The account contains an invalid " + fieldName + ".");
+
+            byte[] decoded;
+            try
+            {
+                decoded = Convert.FromBase64String(Regex.Unescape(value));
+            }
+            catch (FormatException ex)
+            {
+                throw new InvalidOperationException("The account contains an invalid " + fieldName + ".", ex);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new InvalidOperationException("The account contains an invalid " + fieldName + ".", ex);
+            }
+
+            if (decoded.Length == 0 || decoded.Length > MaximumSecretBytes)
+                throw new InvalidOperationException("The account contains an invalid " + fieldName + ".");
+            return decoded;
+        }
+
         private string _generateConfirmationHashForTime(long time, string tag)
         {
-            byte[] decode = Convert.FromBase64String(this.IdentitySecret);
+            byte[] decode = DecodeSecret(this.IdentitySecret, "identity secret");
             int n2 = 8;
             if (tag != null)
             {

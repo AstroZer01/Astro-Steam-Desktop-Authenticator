@@ -1,6 +1,8 @@
 using Google.Protobuf;
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
@@ -49,6 +51,8 @@ namespace SteamAuth
     public sealed class SteamProtobufAuthenticatorTransport : IAuthenticatorProtocolTransport
     {
         public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(20);
+        private const int MaximumResponseBodyBytes = 4 * 1024 * 1024;
+        private const int MaximumAccessTokenLength = 16 * 1024;
         private static readonly TimeSpan MaximumRequestTimeout = TimeSpan.FromMilliseconds(Int32.MaxValue);
         private readonly HttpClient httpClient;
         private readonly TimeSpan requestTimeout;
@@ -93,14 +97,16 @@ namespace SteamAuth
             where TRequest : class, IMessage<TRequest>
             where TResponse : class, IMessage<TResponse>
         {
-            if (String.IsNullOrWhiteSpace(service))
+            if (String.IsNullOrWhiteSpace(service) || !IsValidRouteSegment(service))
                 throw new ArgumentException("A Steam service is required.", nameof(service));
-            if (String.IsNullOrWhiteSpace(method))
+            if (String.IsNullOrWhiteSpace(method) || !IsValidRouteSegment(method))
                 throw new ArgumentException("A Steam method is required.", nameof(method));
             if (request == null)
                 throw new ArgumentNullException(nameof(request));
             if (responseParser == null)
                 throw new ArgumentNullException(nameof(responseParser));
+            if (!String.IsNullOrEmpty(accessToken) && accessToken.Length > MaximumAccessTokenLength)
+                throw new ArgumentException("The Steam access token is larger than the supported size limit.", nameof(accessToken));
 
             string url = "https://api.steampowered.com/" + service + "/" + method + "/v1";
             string encodedRequest = Convert.ToBase64String(request.ToByteArray());
@@ -110,6 +116,9 @@ namespace SteamAuth
                     "Authenticated Steam protocol requests must use POST so the access token is not placed in the URL.",
                     nameof(requestMethod));
             }
+
+            if (requestMethod != SteamProtocolRequestMethod.Get && requestMethod != SteamProtocolRequestMethod.Post)
+                throw new ArgumentOutOfRangeException(nameof(requestMethod));
 
             bool useGet = requestMethod == SteamProtocolRequestMethod.Get;
             using (HttpRequestMessage httpRequest = new HttpRequestMessage(useGet ? HttpMethod.Get : HttpMethod.Post, url))
@@ -143,7 +152,10 @@ namespace SteamAuth
                     HttpResponseMessage response;
                     try
                     {
-                        response = await requestClient.SendAsync(httpRequest, timeoutSource.Token).ConfigureAwait(false);
+                        response = await requestClient.SendAsync(
+                            httpRequest,
+                            HttpCompletionOption.ResponseHeadersRead,
+                            timeoutSource.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                     {
@@ -182,8 +194,27 @@ namespace SteamAuth
                         };
                     }
 
-                    byte[] responseBytes = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
-                    TResponse body = responseBytes.Length == 0 ? responseParser.ParseFrom(ByteString.Empty) : responseParser.ParseFrom(responseBytes);
+                    if (response.Content == null)
+                        throw new InvalidDataException("Steam returned an empty protobuf response body.");
+                    if (response.Content.Headers.ContentLength > MaximumResponseBodyBytes)
+                        throw new InvalidDataException("Steam returned a protobuf response that is larger than the supported size limit.");
+
+                    byte[] responseBytes = await ReadResponseBodyAsync(
+                        response.Content,
+                        timeoutSource.Token,
+                        cancellationToken).ConfigureAwait(false);
+
+                    TResponse body;
+                    try
+                    {
+                        body = responseBytes.Length == 0
+                            ? responseParser.ParseFrom(ByteString.Empty)
+                            : responseParser.ParseFrom(responseBytes);
+                    }
+                    catch (InvalidProtocolBufferException ex)
+                    {
+                        throw new InvalidDataException("Steam returned an invalid protobuf response.", ex);
+                    }
                     return new SteamProtocolResponse<TResponse>
                     {
                         Result = result,
@@ -201,6 +232,44 @@ namespace SteamAuth
             return Int32.TryParse(value, out int result)
                 ? result
                 : response.IsSuccessStatusCode ? 1 : 0;
+        }
+
+        private static bool IsValidRouteSegment(string value)
+        {
+            return value.All(character =>
+                character == '_' ||
+                (character >= 'A' && character <= 'Z') ||
+                (character >= 'a' && character <= 'z') ||
+                (character >= '0' && character <= '9'));
+        }
+
+        private static async Task<byte[]> ReadResponseBodyAsync(
+            HttpContent content,
+            CancellationToken timeoutToken,
+            CancellationToken callerToken)
+        {
+            try
+            {
+                using (Stream responseStream = await content.ReadAsStreamAsync().ConfigureAwait(false))
+                using (MemoryStream responseBody = new MemoryStream())
+                {
+                    byte[] buffer = new byte[81920];
+                    int bytesRead;
+                    int totalBytes = 0;
+                    while ((bytesRead = await responseStream.ReadAsync(buffer, 0, buffer.Length, timeoutToken).ConfigureAwait(false)) > 0)
+                    {
+                        if (bytesRead > MaximumResponseBodyBytes - totalBytes)
+                            throw new InvalidDataException("Steam returned a protobuf response that is larger than the supported size limit.");
+                        responseBody.Write(buffer, 0, bytesRead);
+                        totalBytes += bytesRead;
+                    }
+                    return responseBody.ToArray();
+                }
+            }
+            catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("The Steam request timed out.");
+            }
         }
 
         private static string GetHeaderValue(HttpResponseMessage response, string name)

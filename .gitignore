@@ -573,7 +573,6 @@ project_setup_and_issues.md
 *.keys
 # Local AI-agent workspace, instructions, notes, and reusable skills
 .dev_scratch/
-/tests/
 .agents/
 .codex/
 .agent/

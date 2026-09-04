@@ -45,9 +45,11 @@ namespace SteamAuth
 
         public static async Task<long> GetSteamTimeAsync(CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (Volatile.Read(ref _aligned) == 0 && CanAttemptAlignment())
                 await AlignTimeAsync(cancellationToken);
 
+            cancellationToken.ThrowIfCancellationRequested();
             return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Volatile.Read(ref _timeDifference);
         }
 

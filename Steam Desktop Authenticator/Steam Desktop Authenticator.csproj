@@ -5,6 +5,9 @@
     <RootNamespace>Steam_Desktop_Authenticator</RootNamespace>
     <ApplicationRevision>0</ApplicationRevision>
     <ApplicationVersion>1.2.0.0</ApplicationVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
     <UseApplicationTrust>false</UseApplicationTrust>
     <BootstrapperEnabled>true</BootstrapperEnabled>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
@@ -36,11 +39,11 @@
     </Content>
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="CommandLineParser" Version="2.9.1" />
-    <PackageReference Include="libphonenumber-csharp" Version="9.0.37" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
-    <PackageReference Include="SteamKit2" Version="3.4.0" />
-    <PackageReference Include="ZXing.Net" Version="0.16.11" />
-    <PackageReference Include="ZXing.Net.Bindings.Windows.Compatibility" Version="0.16.16" />
+    <PackageReference Include="CommandLineParser" />
+    <PackageReference Include="libphonenumber-csharp" />
+    <PackageReference Include="Microsoft.Web.WebView2" />
+    <PackageReference Include="SteamKit2" />
+    <PackageReference Include="ZXing.Net" />
+    <PackageReference Include="ZXing.Net.Bindings.Windows.Compatibility" />
   </ItemGroup>
 </Project>

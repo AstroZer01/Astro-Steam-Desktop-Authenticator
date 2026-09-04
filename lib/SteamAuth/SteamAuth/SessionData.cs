@@ -1,15 +1,22 @@
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using SteamAuth.Protocol;
 using System;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Runtime.CompilerServices;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SteamAuth
 {
     public class SessionData
     {
+        private const int MaximumTokenLength = 16 * 1024;
+        private const int MaximumTokenComponentLength = 8 * 1024;
         private readonly IAuthenticatorProtocolTransport protocolTransport;
 
         public SessionData()
@@ -36,7 +43,7 @@ namespace SteamAuth
         /// <param name="allowRenewal">Allow getting a new refresh token as well. If one is returned, this.RefreshToken will be overwritten. You must save this new token!</param>
         /// <returns></returns>
         /// <exception cref="Exception"></exception>
-        public async Task RefreshAccessToken(bool allowRenewal = false)
+        public async Task RefreshAccessToken(bool allowRenewal = false, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(this.RefreshToken))
                 throw new Exception("Refresh token is empty");
@@ -56,7 +63,8 @@ namespace SteamAuth
                         RenewalType = allowRenewal ? ETokenRenewalType.KEtokenRenewalTypeAllow : ETokenRenewalType.KEtokenRenewalTypeNone
                     },
                     AccessToken,
-                    CAuthentication_AccessToken_GenerateForApp_Response.Parser);
+                    CAuthentication_AccessToken_GenerateForApp_Response.Parser,
+                    cancellationToken: cancellationToken);
                 if (response == null || response.Result != 1 || response.Body == null || String.IsNullOrWhiteSpace(response.Body.AccessToken))
                 {
                     string detail = response != null && (response.Result == 84 || response.Result == 87)
@@ -70,6 +78,10 @@ namespace SteamAuth
                 AccessToken = response.Body.AccessToken;
                 if (!String.IsNullOrEmpty(response.Body.RefreshToken))
                     RefreshToken = response.Body.RefreshToken;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -127,19 +139,56 @@ namespace SteamAuth
         /// <returns></returns>
         private long GetTokenExpirationTime(string token)
         {
+            if (String.IsNullOrWhiteSpace(token))
+                return 0;
+            if (token.Length > MaximumTokenLength)
+                return 0;
+
             string[] tokenComponents = token.Split('.');
-            // Fix up base64url to normal base64
-            string base64 = tokenComponents[1].Replace('-', '+').Replace('_', '/');
+            if (tokenComponents.Length != 3 || tokenComponents.Any(String.IsNullOrWhiteSpace) ||
+                tokenComponents.Any(component => component.Length > MaximumTokenComponentLength))
+                return 0;
 
-            if (base64.Length % 4 != 0)
+            try
             {
-                base64 += new string('=', 4 - base64.Length % 4);
+                // Fix up base64url to normal base64.
+                string payloadComponent = tokenComponents[1];
+                if (payloadComponent.Any(character => !Char.IsLetterOrDigit(character) && character != '-' && character != '_'))
+                    return 0;
+
+                string base64 = payloadComponent.Replace('-', '+').Replace('_', '/');
+                if (base64.Length % 4 == 1)
+                    return 0;
+
+                if (base64.Length % 4 != 0)
+                    base64 += new string('=', 4 - base64.Length % 4);
+
+                byte[] payloadBytes = Convert.FromBase64String(base64);
+                JObject payload;
+                using (StringReader stringReader = new StringReader(new UTF8Encoding(false, true).GetString(payloadBytes)))
+                using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                {
+                    payload = JObject.Load(jsonReader);
+                }
+                JToken expirationToken = payload["exp"];
+                return expirationToken?.Type == JTokenType.Integer &&
+                    Int64.TryParse(expirationToken.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out long expiration) &&
+                    expiration > 0
+                    ? expiration
+                    : 0;
             }
-
-            byte[] payloadBytes = Convert.FromBase64String(base64);
-            SteamAccessToken jwt = JsonConvert.DeserializeObject<SteamAccessToken>(System.Text.Encoding.UTF8.GetString(payloadBytes));
-
-            return jwt.exp;
+            catch (FormatException)
+            {
+                return 0;
+            }
+            catch (JsonException)
+            {
+                return 0;
+            }
+            catch (DecoderFallbackException)
+            {
+                return 0;
+            }
         }
 
         public CookieContainer GetCookies()
@@ -180,11 +229,6 @@ namespace SteamAuth
             if (digits % 2 == 0)
                 return result;
             return result.Substring(0, digits);
-        }
-
-        private class SteamAccessToken
-        {
-            public long exp { get; set; }
         }
 
     }

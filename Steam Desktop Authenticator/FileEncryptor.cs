@@ -21,6 +21,7 @@ namespace Steam_Desktop_Authenticator
         private const int SALT_LENGTH = 8;
         private const int KEY_SIZE_BYTES = 32;
         private const int IV_LENGTH = 16;
+        private const int AES_BLOCK_SIZE_BYTES = 16;
 
         /// <summary>
         /// Returns an 8-byte cryptographically random salt in base64 encoding
@@ -74,6 +75,27 @@ namespace Steam_Desktop_Authenticator
         }
 
         /// <summary>
+        /// Checks whether an encoded value has the non-empty, block-aligned shape
+        /// required by AES-CBC before it is accepted as encrypted account data.
+        /// This does not prove that the passkey or PKCS#7 padding is valid.
+        /// </summary>
+        public static bool IsValidCiphertext(string encryptedData)
+        {
+            if (String.IsNullOrWhiteSpace(encryptedData))
+                return false;
+
+            try
+            {
+                byte[] cipherText = Convert.FromBase64String(encryptedData);
+                return cipherText.Length > 0 && cipherText.Length % AES_BLOCK_SIZE_BYTES == 0;
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Tries to decrypt and return data given an encrypted base64 encoded string. Must use the same
         /// password, salt, IV, and ciphertext that was used during the original encryption of the data.
         /// </summary>
@@ -100,6 +122,9 @@ namespace Steam_Desktop_Authenticator
             {
                 throw new ArgumentException("Encrypted data is empty");
             }
+
+            if (!IsValidCiphertext(encryptedData))
+                return null;
 
             byte[] cipherText = Convert.FromBase64String(encryptedData);
             byte[] key = GetEncryptionKey(password, passwordSalt);

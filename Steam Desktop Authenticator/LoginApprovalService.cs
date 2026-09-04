@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Steam_Desktop_Authenticator
@@ -68,6 +69,9 @@ namespace Steam_Desktop_Authenticator
     internal sealed class LoginApprovalService
     {
         private static readonly TimeSpan RequestDetailsCacheLifetime = TimeSpan.FromSeconds(30);
+        private const int MaximumPendingLoginRequests = 1000;
+        private const int MaximumLoginTextLength = 256;
+        private const int MaximumGeolocationLength = 512;
         private readonly Func<SteamGuardAccount, bool> persistAccount;
         private readonly IAuthenticatorProtocolTransport protocolTransport;
 
@@ -84,18 +88,23 @@ namespace Steam_Desktop_Authenticator
 
         public async Task<LoginApprovalFetchResult> FetchPendingRequestsAsync(
             SteamGuardAccount account,
-            IReadOnlyDictionary<ulong, PendingLoginRequest> knownRequests = null)
+            IReadOnlyDictionary<ulong, PendingLoginRequest> knownRequests = null,
+            CancellationToken cancellationToken = default)
         {
             var result = new LoginApprovalFetchResult();
             try
             {
-                result.Requests.AddRange(await FetchPendingRequestsCoreAsync(account, false, knownRequests));
+                result.Requests.AddRange(await FetchPendingRequestsCoreAsync(account, false, knownRequests, cancellationToken));
             }
             catch (LoginApprovalException ex) when (ex.Kind == LoginApprovalErrorKind.Unauthorized)
             {
                 try
                 {
-                    result.Requests.AddRange(await FetchPendingRequestsCoreAsync(account, true, knownRequests));
+                    result.Requests.AddRange(await FetchPendingRequestsCoreAsync(account, true, knownRequests, cancellationToken));
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (LoginApprovalException retryException)
                 {
@@ -109,6 +118,10 @@ namespace Steam_Desktop_Authenticator
                     result.ErrorKind = LoginApprovalErrorKind.Unknown;
                     result.ErrorMessage = "Steam could not load pending login requests.";
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (LoginApprovalException ex)
             {
@@ -128,21 +141,31 @@ namespace Steam_Desktop_Authenticator
         private async Task<List<PendingLoginRequest>> FetchPendingRequestsCoreAsync(
             SteamGuardAccount account,
             bool forceRefresh,
-            IReadOnlyDictionary<ulong, PendingLoginRequest> knownRequests)
+            IReadOnlyDictionary<ulong, PendingLoginRequest> knownRequests,
+            CancellationToken cancellationToken)
         {
-            await EnsureAccessTokenAsync(account, forceRefresh);
+            await EnsureAccessTokenAsync(account, forceRefresh, cancellationToken);
             SteamProtocolResponse<CAuthentication_GetAuthSessionsForAccount_Response> sessionsResponse = await SendAsync(
                 account,
                 "GetAuthSessionsForAccount",
                 new CAuthentication_GetAuthSessionsForAccount_Request(),
-                CAuthentication_GetAuthSessionsForAccount_Response.Parser);
+                CAuthentication_GetAuthSessionsForAccount_Response.Parser,
+                cancellationToken: cancellationToken);
             ThrowIfSteamFailed(sessionsResponse);
             if (sessionsResponse.Body == null)
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned an invalid pending login request response.");
+            if (sessionsResponse.Body.ClientIds.Count > MaximumPendingLoginRequests)
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned too many pending login requests.");
 
             var requests = new List<PendingLoginRequest>();
+            var clientIds = new HashSet<ulong>();
             foreach (ulong clientId in sessionsResponse.Body.ClientIds)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (clientId == 0)
+                    throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned an invalid pending login request identifier.");
+                if (!clientIds.Add(clientId))
+                    continue;
                 if (knownRequests != null && knownRequests.TryGetValue(clientId, out PendingLoginRequest existingRequest) &&
                     DateTime.UtcNow - existingRequest.FetchedAtUtc < RequestDetailsCacheLifetime)
                 {
@@ -151,7 +174,7 @@ namespace Steam_Desktop_Authenticator
                 }
                 try
                 {
-                    var request = await FetchRequestDetailsAsync(account, clientId);
+                    var request = await FetchRequestDetailsAsync(account, clientId, cancellationToken);
                     if (request != null)
                         requests.Add(request);
                 }
@@ -166,21 +189,36 @@ namespace Steam_Desktop_Authenticator
         public async Task<LoginApprovalActionResult> RespondAsync(
             SteamGuardAccount account,
             PendingLoginRequest request,
-            LoginApprovalDecision decision)
+            LoginApprovalDecision decision,
+            CancellationToken cancellationToken = default)
         {
             try
             {
-                await EnsureAccessTokenAsync(account, false);
-                await SubmitDecisionAsync(account, request, decision);
+                if (account?.Session == null || account.Session.SteamID == 0 || request == null ||
+                    request.ClientId == 0 || request.SteamId != account.Session.SteamID ||
+                    !Enum.IsDefined(typeof(LoginApprovalDecision), decision))
+                {
+                    throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The login request is invalid or belongs to another account.");
+                }
+                await EnsureAccessTokenAsync(account, false, cancellationToken);
+                await SubmitDecisionAsync(account, request, decision, cancellationToken);
                 return new LoginApprovalActionResult() { Succeeded = true };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (LoginApprovalException ex) when (ex.Kind == LoginApprovalErrorKind.Unauthorized)
             {
                 try
                 {
-                    await EnsureAccessTokenAsync(account, true);
-                    await SubmitDecisionAsync(account, request, decision);
+                    await EnsureAccessTokenAsync(account, true, cancellationToken);
+                    await SubmitDecisionAsync(account, request, decision, cancellationToken);
                     return new LoginApprovalActionResult() { Succeeded = true };
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (LoginApprovalException retryException)
                 {
@@ -205,18 +243,21 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private async Task<PendingLoginRequest> FetchRequestDetailsAsync(SteamGuardAccount account, ulong clientId)
+        private async Task<PendingLoginRequest> FetchRequestDetailsAsync(SteamGuardAccount account, ulong clientId, CancellationToken cancellationToken)
         {
             SteamProtocolResponse<CAuthentication_GetAuthSessionInfo_Response> response = await SendAsync(
                 account,
                 "GetAuthSessionInfo",
                 new CAuthentication_GetAuthSessionInfo_Request { ClientId = clientId },
-                CAuthentication_GetAuthSessionInfo_Response.Parser);
+                CAuthentication_GetAuthSessionInfo_Response.Parser,
+                cancellationToken: cancellationToken);
             ThrowIfSteamFailed(response);
 
             CAuthentication_GetAuthSessionInfo_Response details = response.Body;
             if (details == null)
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned an invalid login request response.");
+            if (details.Version < 0 || details.Version > UInt16.MaxValue)
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned an invalid login request version.");
 
             return new PendingLoginRequest()
             {
@@ -225,13 +266,13 @@ namespace Steam_Desktop_Authenticator
                 SteamId = account.Session.SteamID,
                 ClientId = clientId,
                 Version = details.Version > 0 ? details.Version : 1,
-                IPAddress = details.Ip ?? String.Empty,
-                Geolocation = details.Geoloc ?? String.Empty,
-                City = details.City ?? String.Empty,
-                State = details.State ?? String.Empty,
-                Country = details.Country ?? String.Empty,
+                IPAddress = ValidateResponseText(details.Ip, MaximumLoginTextLength, "IP address"),
+                Geolocation = ValidateResponseText(details.Geoloc, MaximumGeolocationLength, "geolocation"),
+                City = ValidateResponseText(details.City, MaximumLoginTextLength, "city"),
+                State = ValidateResponseText(details.State, MaximumLoginTextLength, "state"),
+                Country = ValidateResponseText(details.Country, MaximumLoginTextLength, "country"),
                 Platform = PlatformName((int)details.PlatformType),
-                DeviceName = details.DeviceFriendlyName ?? String.Empty,
+                DeviceName = ValidateResponseText(details.DeviceFriendlyName, MaximumLoginTextLength, "device name"),
                 RequestedPersistence = PersistenceName((int)details.RequestedPersistence),
                 SecurityHistory = SecurityHistoryName((int)details.LoginHistory),
                 LocationMismatch = details.RequestorLocationMismatch,
@@ -242,9 +283,15 @@ namespace Steam_Desktop_Authenticator
         private async Task SubmitDecisionAsync(
             SteamGuardAccount account,
             PendingLoginRequest request,
-            LoginApprovalDecision decision)
+            LoginApprovalDecision decision,
+            CancellationToken cancellationToken)
         {
+            if (account?.Session == null || account.Session.SteamID == 0 || request == null ||
+                request.ClientId == 0 || request.SteamId != account.Session.SteamID)
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The login request is invalid or belongs to another account.");
             int version = request.Version > 0 ? request.Version : 1;
+            if (version > UInt16.MaxValue)
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The login request version is invalid.");
             byte[] signature = BuildMobileConfirmationSignature(account.SharedSecret, (ushort)version, request.ClientId, account.Session.SteamID);
             SteamProtocolResponse<CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response> response = await SendAsync(
                 account,
@@ -258,12 +305,14 @@ namespace Steam_Desktop_Authenticator
                     Confirm = decision == LoginApprovalDecision.ApprovePersistent,
                     Persistence = ESessionPersistence.KEsessionPersistencePersistent
                 },
-                CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response.Parser);
+                CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response.Parser,
+                cancellationToken: cancellationToken);
             ThrowIfSteamFailed(response);
         }
 
-        private async Task EnsureAccessTokenAsync(SteamGuardAccount account, bool forceRefresh)
+        private async Task EnsureAccessTokenAsync(SteamGuardAccount account, bool forceRefresh, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (account?.Session == null || account.Session.IsRefreshTokenExpired())
                 throw new LoginApprovalException(LoginApprovalErrorKind.SessionExpired, "The account session has expired. Log in again to review login requests.");
 
@@ -271,9 +320,13 @@ namespace Steam_Desktop_Authenticator
             {
                 try
                 {
-                    await account.Session.RefreshAccessToken();
+                    await account.Session.RefreshAccessToken(false, cancellationToken);
                     if (!persistAccount(account))
                         throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam refreshed the session, but Astro SDA could not save it securely.");
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (LoginApprovalException)
                 {
@@ -291,13 +344,14 @@ namespace Steam_Desktop_Authenticator
             string method,
             TRequest request,
             MessageParser<TResponse> responseParser,
-            SteamProtocolRequestMethod requestMethod = SteamProtocolRequestMethod.Post)
+            SteamProtocolRequestMethod requestMethod = SteamProtocolRequestMethod.Post,
+            CancellationToken cancellationToken = default)
             where TRequest : class, IMessage<TRequest>
             where TResponse : class, IMessage<TResponse>
         {
             try
             {
-                return await protocolTransport.SendAsync("IAuthenticationService", method, request, account.Session.AccessToken, responseParser, requestMethod);
+                return await protocolTransport.SendAsync("IAuthenticationService", method, request, account.Session.AccessToken, responseParser, requestMethod, cancellationToken);
             }
             catch (SteamWebRequestException exception) when (
                 exception.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
@@ -318,6 +372,10 @@ namespace Steam_Desktop_Authenticator
             {
                 DiagnosticErrorLogger.Log("Login approval transport", exception, "A login approval request timed out.");
                 throw CreateNetworkException("Steam did not respond in time.");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (TaskCanceledException)
             {
@@ -345,7 +403,9 @@ namespace Steam_Desktop_Authenticator
 
         internal static byte[] BuildMobileConfirmationSignature(string sharedSecret, ushort version, ulong clientId, ulong steamId)
         {
-            if (String.IsNullOrWhiteSpace(sharedSecret))
+            if (clientId == 0 || steamId == 0)
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The login request contains an invalid identity.");
+            if (String.IsNullOrWhiteSpace(sharedSecret) || sharedSecret.Length > 4096)
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The account does not contain a shared authenticator secret.");
 
             byte[] data = new byte[18];
@@ -354,10 +414,34 @@ namespace Steam_Desktop_Authenticator
             WriteUInt64LittleEndian(data, 2, clientId);
             WriteUInt64LittleEndian(data, 10, steamId);
 
-            using (var hmac = new HMACSHA256(Convert.FromBase64String(Regex.Unescape(sharedSecret))))
+            byte[] sharedSecretBytes;
+            try
+            {
+                sharedSecretBytes = Convert.FromBase64String(Regex.Unescape(sharedSecret));
+            }
+            catch (FormatException ex)
+            {
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The account contains an invalid shared authenticator secret.", ex);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The account contains an invalid shared authenticator secret.", ex);
+            }
+            if (sharedSecretBytes.Length == 0 || sharedSecretBytes.Length > 64)
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The account contains an invalid shared authenticator secret.");
+
+            using (var hmac = new HMACSHA256(sharedSecretBytes))
             {
                 return hmac.ComputeHash(data);
             }
+        }
+
+        private static string ValidateResponseText(string value, int maximumLength, string fieldName)
+        {
+            value = value ?? String.Empty;
+            if (value.Length > maximumLength)
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam returned an oversized login request " + fieldName + ".");
+            return value;
         }
 
         private static void WriteUInt64LittleEndian(byte[] target, int offset, ulong value)
@@ -434,6 +518,11 @@ namespace Steam_Desktop_Authenticator
             public LoginApprovalErrorKind Kind { get; }
 
             public LoginApprovalException(LoginApprovalErrorKind kind, string message) : base(message)
+            {
+                Kind = kind;
+            }
+
+            public LoginApprovalException(LoginApprovalErrorKind kind, string message, Exception innerException) : base(message, innerException)
             {
                 Kind = kind;
             }

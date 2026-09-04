@@ -59,7 +59,7 @@ namespace Steam_Desktop_Authenticator
             else
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                deviceCode = await account.GenerateSteamGuardCodeAsync();
+                deviceCode = await account.GenerateSteamGuardCodeAsync(cancellationToken);
                 deviceCodesGenerated++;
             }
 

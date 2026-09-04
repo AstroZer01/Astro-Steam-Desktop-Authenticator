@@ -158,6 +158,15 @@ namespace Steam_Desktop_Authenticator
             {
                 man = Manifest.GetManifest();
             }
+            catch (ManifestRecoveryException)
+            {
+                AstroMessageBox.Show(
+                    "Astro SDA could not safely recover its account data. No account data was loaded. Resolve any locked or unavailable account files, then restart the application.",
+                    "Astro Steam Desktop Assistant",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
             catch (ManifestParseException)
             {
                 // Manifest file was corrupted, generate a new one.
