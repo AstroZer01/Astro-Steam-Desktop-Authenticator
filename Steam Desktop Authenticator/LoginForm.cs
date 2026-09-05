@@ -485,6 +485,7 @@ namespace Steam_Desktop_Authenticator
                     // object whenever that persistence step does not succeed.
                     account.Session = previousSession;
                     account.FullyEnrolled = previousFullyEnrolled;
+                    ResetLoginButton(cancellationToken);
                     return;
                 }
                 RefreshSucceeded = true;
