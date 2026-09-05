@@ -25,10 +25,40 @@ jobs:
       contents: read
       checks: write
     steps:
+      - name: Recover stale Pullfrog temp directories
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Pullfrog temp is disk-backed under the runner's own temp root.
+          # Only remove directories older than six hours and only when no
+          # process has an open file below them. This recovers from cancelled
+          # jobs, runner restarts, and hard failures where an always() cleanup
+          # step could not run.
+          shopt -s nullglob
+          for temp_dir in "${RUNNER_TEMP}"/pullfrog-*; do
+            [[ -d "$temp_dir" ]] || continue
+            [[ "$temp_dir" == "${RUNNER_TEMP}"/pullfrog-* ]] || continue
+
+            if [[ "$(find "$temp_dir" -maxdepth 0 -mmin +360 -print -quit)" != "$temp_dir" ]]; then
+              continue
+            fi
+
+            if lsof -t +D "$temp_dir" >/dev/null 2>&1; then
+              echo "Keeping in-use stale Pullfrog temp directory: $temp_dir"
+              continue
+            fi
+
+            rm -rf -- "$temp_dir"
+            echo "Removed stale Pullfrog temp directory: $temp_dir"
+          done
+
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
+
       - name: Mask runner-local paths
         shell: bash
         run: |
@@ -42,18 +72,18 @@ jobs:
               printf '::add-mask::%s\n' "$value"
             fi
           done
+
       - name: Prepare isolated Pullfrog temp directory
         shell: bash
         run: |
           set -euo pipefail
-          # Pullfrog's restricted OpenCode profile allows /tmp/* for action
-          # scratch files. Keep this child run-specific without exposing a
-          # machine-specific filesystem path.
-          temp_dir="/tmp/pullfrog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Use the runner's disk-backed temp root instead of /tmp, which is a
+          # shared 2.5 GB tmpfs in this WSL installation.
+          temp_dir="${RUNNER_TEMP}/pullfrog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p -- "$temp_dir"
           chmod 700 -- "$temp_dir"
-          # Hide the run-specific scratch prefix in action-owned logs too.
           printf '::add-mask::%s\n' "$temp_dir"
+
       # Pullfrog dispatches a JSON envelope through inputs.prompt. Add the
       # route-only instructions without wrapping or corrupting that envelope;
       # the PR event and standing-instruction handles must survive unchanged.
@@ -93,9 +123,6 @@ jobs:
               payload.model = "openai/gpt-5.6-luna";
               payload.modelExplicit = true;
               payload.effort = "max";
-              // The route pass is a silent Task-mode classifier. Avoid the
-              // expensive Review-mode summary/lens fan-out and any progress
-              // comment; the final conditional action owns publication.
               payload.generateSummary = false;
               payload.event = { ...(payload.event ?? {}), silent: true };
               payload.prompt = routeInstructions + "\n\n" + payload.prompt;
@@ -112,8 +139,6 @@ jobs:
           );
           NODE
 
-      # The route pass is read-only and always runs on Luna Max. It returns the
-      # only value used to choose the final reviewer below.
       - name: Route review (Luna Max)
         id: route
         uses: pullfrog/pullfrog@v0
@@ -127,9 +152,7 @@ jobs:
           progress_comments: disabled
           output_schema: '{"type":"object","properties":{"route":{"type":"string","enum":["luna","sol"]},"selected_role":{"type":"string","enum":["reviewer_luna","review_deep"]},"task_type":{"type":"string","enum":["review"]},"logic_change":{"type":"string"},"risk":{"type":"string"},"ambiguity":{"type":"string"},"reason":{"type":"string"},"confidence":{"type":"string","enum":["high","medium","low"]},"verification_difficulty":{"type":"string"},"scope":{"type":"string"}},"required":["route","selected_role","task_type","logic_change","risk","ambiguity","reason","confidence","verification_difficulty","scope"],"additionalProperties":false}'
         env:
-          TMPDIR: /tmp/pullfrog-${{ github.run_id }}-${{ github.run_attempt }}
-          # The classifier reads the raw diff and targeted paths itself; skip
-          # Pullfrog's supplemental impact artifact to keep this pass bounded.
+          TMPDIR: ${{ runner.temp }}/pullfrog-${{ github.run_id }}-${{ github.run_attempt }}
           PULLFROG_DISABLE_CHANGE_IMPACT: "1"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -142,8 +165,6 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
 
-      # Fail closed if the route output is missing or malformed; never silently
-      # pay for a Sol review because a model returned an unexpected shape.
       - name: Validate review route
         id: validate_route
         shell: bash
@@ -212,8 +233,6 @@ jobs:
           console.log(`ROUTE RECORD: ${JSON.stringify(record)}`);
           NODE
 
-      # Override model and effort inside the preserved Pullfrog envelope. The
-      # action gives envelope values precedence over ordinary `with:` inputs.
       - name: Prepare final review payloads
         id: prepare_final
         shell: bash
@@ -288,7 +307,7 @@ jobs:
           push: disabled
           shell: restricted
         env:
-          TMPDIR: /tmp/pullfrog-${{ github.run_id }}-${{ github.run_attempt }}
+          TMPDIR: ${{ runner.temp }}/pullfrog-${{ github.run_id }}-${{ github.run_attempt }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -311,7 +330,7 @@ jobs:
           push: disabled
           shell: restricted
         env:
-          TMPDIR: /tmp/pullfrog-${{ github.run_id }}-${{ github.run_attempt }}
+          TMPDIR: ${{ runner.temp }}/pullfrog-${{ github.run_id }}-${{ github.run_attempt }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -323,8 +342,6 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
 
-      # Self-hosted runners reuse their workspaces. Always remove checkout and
-      # agent-generated build artifacts after this review, even on failure.
       - name: Clean self-hosted workspace
         if: ${{ always() }}
         working-directory: ${{ github.workspace }}
@@ -332,80 +349,40 @@ jobs:
           git reset --hard HEAD
           git clean -ffdx
 
-      # The Pullfrog action can leave disk-backed temp directories behind on
-      # this self-hosted WSL runner. Each run owns one isolated directory, so
-      # cleanup cannot remove another concurrent action's temp files.
       - name: Clean completed Pullfrog temp directory
         if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
 
-          temp_dir="/tmp/pullfrog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cleanup_log="${RUNNER_TEMP:?RUNNER_TEMP is required}/pullfrog-temp-cleanup-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-unknown}.log"
+          temp_dir="${RUNNER_TEMP}/pullfrog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          expected_prefix="${RUNNER_TEMP}/pullfrog-"
 
           # Only the exact directory created for this run may be removed.
-          expected_temp="/tmp/pullfrog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          if [[ "$temp_dir" != "$expected_temp" ]]; then
+          [[ "$temp_dir" == "$expected_prefix"* ]] || {
             echo "Refusing to clean unexpected temp directory: $temp_dir"
             exit 1
+          }
+
+          if [[ ! -d "$temp_dir" ]]; then
+            echo "Pullfrog temp directory already absent: $temp_dir"
+            exit 0
           fi
 
-          nohup setsid bash -c '
-            set -euo pipefail
-            temp_dir="$1"
-            expected_temp="$2"
-
-            if [[ "$temp_dir" != "$expected_temp" ]]; then
-              echo "Refusing to clean unexpected temp directory: $temp_dir"
-              exit 1
-            fi
-
-            directory_in_use() {
-              local dir="$1"
-              local lsof_output=""
-              local proc_dir fd target
-
-              if command -v lsof >/dev/null 2>&1; then
-                lsof_output="$(lsof -t +D "$dir" 2>/dev/null || true)"
-                if [[ -n "$lsof_output" ]]; then
-                  return 0
-                fi
-              fi
-
-              # Fallback for runners without lsof. Check current working
-              # directories and open descriptors without logging process env.
-              for proc_dir in /proc/[0-9]*; do
-                for fd in "$proc_dir/cwd" "$proc_dir/root" "$proc_dir/fd/"*; do
-                  [[ -L "$fd" ]] || continue
-                  target="$(readlink "$fd" 2>/dev/null || true)"
-                  case "$target" in
-                    "$dir"|"$dir"/*) return 0 ;;
-                  esac
-                done
-              done
-              return 1
-            }
-
-            if [[ ! -d "$temp_dir" ]]; then
+          # The cleanup is deliberately synchronous. Detached processes are
+          # reaped by the Actions runner when the job ends, which was leaving
+          # these directories behind. Wait briefly for any child to release
+          # the directory, then remove it before this job exits.
+          for attempt in {1..60}; do
+            if ! lsof -t +D "$temp_dir" >/dev/null 2>&1; then
+              rm -rf -- "$temp_dir"
+              echo "Removed completed Pullfrog temp directory: $temp_dir"
               exit 0
             fi
 
-            # An orphaned child may still be using the directory after the
-            # action step returns. Wait for it, then fail closed after an hour.
-            deadline=$((SECONDS + 3600))
-            while directory_in_use "$temp_dir"; do
-              if (( SECONDS >= deadline )); then
-                echo "Skipping in-use Pullfrog temp directory: $temp_dir"
-                exit 0
-              fi
-              sleep 10
-            done
+            echo "Pullfrog temp directory is still in use; waiting (attempt $attempt/60)."
+            sleep 5
+          done
 
-            if [[ -d "$temp_dir" ]]; then
-              rm -rf -- "$temp_dir"
-              echo "Removed completed Pullfrog temp directory: $temp_dir"
-            fi
-          ' cleanup "$temp_dir" "$expected_temp" >"$cleanup_log" 2>&1 < /dev/null &
-          disown || true
-          echo "Scheduled Pullfrog temp cleanup; progress will be logged to $cleanup_log."
+          echo "Pullfrog temp directory remains in use after five minutes: $temp_dir"
+          exit 1
