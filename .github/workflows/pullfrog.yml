@@ -75,13 +75,13 @@ jobs:
             "Call pullfrog_select_mode with mode Task for this route-only pass. Do not select Review and do not dispatch review lenses; this pass is a bounded classifier, not the final review.",
             "Inspect the current PR prompt, metadata, diff, ownership, and affected execution paths. Use pullfrog_checkout_pr when PR context is available and inspect the returned diff paths.",
             "Choose exactly one route and one review role for the complete final review.",
-            "Use route luna with selected_role reviewer_luna for clear, localized, diagnosed, pattern-based changes, large-repository reviews, mechanical multi-file changes, ordinary correctness/regression/test-gap analysis, and narrow security fixes with clear invariants and negative-test patterns.",
-            "Use route sol with selected_role review_deep for architectural or cross-module contracts, concurrency or distributed state, migrations or data integrity, adversarial security analysis, or authorization, identity, cryptography, token, or session boundaries with uncertain blast radius or bypass paths.",
+            "Use route luna with selected_role reviewer_luna for low and low-medium complexity: clear, localized, diagnosed, pattern-based changes, changes that touch several files but follow existing patterns without new cross-module contracts or state semantics, ordinary correctness/regression/test-gap analysis, routine maintainability/API misuse, large-repository reviews whose changed behavior is routine, mechanical multi-file changes, and narrow security fixes with clear invariants and negative-test patterns.",
+            "Use route astra with selected_role review_deep for medium- or high-tier work: meaningful behavior across multiple interacting files or modules, API/contract changes, nontrivial state transitions, integration or negative-path verification, moderate security changes, architectural or cross-module contracts, concurrency or distributed state, migrations or data integrity, adversarial security analysis, or authorization, identity, cryptography, token, or session boundaries with uncertain blast radius or bypass paths.",
             "Classify task_type as review and also classify logic_change, risk, ambiguity, confidence, and verification_difficulty using short values. Scope and reason must be concise and evidence-based.",
-            "Repository size and diff size alone never select sol. Never select terra. If scope is merely unclear, prefer luna with a bounded-scout explanation; use sol only when the uncertainty itself is high-impact or remains unresolved.",
-            "For a mixed review, route the complete final review to sol when any finding crosses a sol boundary; do not treat unrelated routine changes as complex.",
+            "Repository size and diff size alone never select astra. Never select terra. If scope is merely unclear and appears low-risk, prefer luna with a bounded-scout explanation; use astra when the uncertainty is tied to medium behavior, high-impact risk, or remains unresolved after targeted inspection.",
+            "For a mixed review, route the complete final review to astra when any finding crosses a medium/high boundary; do not treat unrelated routine changes as complex solely because the repository is large.",
             "Never repeat the full prompt, dashboard instructions, payload JSON, repository instructions, diff contents, secrets, or absolute filesystem paths in visible output. Use compact evidence summaries only.",
-            "Start your final visible text with ROUTE DECISION: Luna Max — <reason>. or ROUTE DECISION: Sol High — <reason>.",
+            "Start your final visible text with ROUTE DECISION: Luna Max — <reason>. or ROUTE DECISION: Astra High — <reason>.",
             "Finish the visible text with ROUTER MODEL: Luna Max (openai/gpt-5.6-luna, max). This identifies the classifier model; it is not the final review route.",
             "Then call set_output exactly once with an object containing exactly route, selected_role, task_type, logic_change, risk, ambiguity, confidence, verification_difficulty, scope, and reason.",
           ].join("\n");
@@ -125,7 +125,7 @@ jobs:
           push: disabled
           shell: restricted
           progress_comments: disabled
-          output_schema: '{"type":"object","properties":{"route":{"type":"string","enum":["luna","sol"]},"selected_role":{"type":"string","enum":["reviewer_luna","review_deep"]},"task_type":{"type":"string","enum":["review"]},"logic_change":{"type":"string"},"risk":{"type":"string"},"ambiguity":{"type":"string"},"reason":{"type":"string"},"confidence":{"type":"string","enum":["high","medium","low"]},"verification_difficulty":{"type":"string"},"scope":{"type":"string"}},"required":["route","selected_role","task_type","logic_change","risk","ambiguity","reason","confidence","verification_difficulty","scope"],"additionalProperties":false}'
+          output_schema: '{"type":"object","properties":{"route":{"type":"string","enum":["luna","astra"]},"selected_role":{"type":"string","enum":["reviewer_luna","review_deep"]},"task_type":{"type":"string","enum":["review"]},"logic_change":{"type":"string"},"risk":{"type":"string"},"ambiguity":{"type":"string"},"reason":{"type":"string"},"confidence":{"type":"string","enum":["high","medium","low"]},"verification_difficulty":{"type":"string"},"scope":{"type":"string"}},"required":["route","selected_role","task_type","logic_change","risk","ambiguity","reason","confidence","verification_difficulty","scope"],"additionalProperties":false}'
         env:
           TMPDIR: /tmp/pullfrog-${{ github.run_id }}-${{ github.run_attempt }}
           # The classifier reads the raw diff and targeted paths itself; skip
@@ -143,7 +143,7 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
 
       # Fail closed if the route output is missing or malformed; never silently
-      # pay for a Sol review because a model returned an unexpected shape.
+      # pay for an Astra review because a model returned an unexpected shape.
       - name: Validate review route
         id: validate_route
         shell: bash
@@ -160,10 +160,10 @@ jobs:
           } catch (error) {
             throw new Error(`route output is not valid JSON: ${error.message}`);
           }
-          if (!value || !["luna", "sol"].includes(value.route)) {
-            throw new Error('route output must contain route="luna" or route="sol"');
+          if (!value || !["luna", "astra"].includes(value.route)) {
+            throw new Error('route output must contain route="luna" or route="astra"');
           }
-          const expectedRole = value.route === "sol" ? "review_deep" : "reviewer_luna";
+          const expectedRole = value.route === "astra" ? "review_deep" : "reviewer_luna";
           if (value.selected_role !== expectedRole) {
             throw new Error(`route ${value.route} must select role ${expectedRole}`);
           }
@@ -185,8 +185,8 @@ jobs:
           if (!["high", "medium", "low"].includes(value.confidence)) {
             throw new Error("route output confidence must be high, medium, or low");
           }
-          const selectedModel = value.route === "sol" ? "openai/gpt-5.6-sol" : "openai/gpt-5.6-luna";
-          const selectedEffort = value.route === "sol" ? "high" : "max";
+          const selectedModel = value.route === "astra" ? "openai/gpt-6-astra" : "openai/gpt-5.6-luna";
+          const selectedEffort = value.route === "astra" ? "high" : "max";
           const record = {
             task_type: "review",
             scope,
@@ -208,7 +208,7 @@ jobs:
               `verification_difficulty=${verificationDifficulty}\nscope=${scope}\nreason=${reason}\n` +
               `record<<${delimiter}\n${JSON.stringify(record)}\n${delimiter}\n`,
           );
-          console.log(`ROUTE DECISION: ${value.route === "luna" ? "Luna Max" : "Sol High"} — ${reason}`);
+          console.log(`ROUTE DECISION: ${value.route === "luna" ? "Luna Max" : "Astra High"} — ${reason}`);
           console.log(`ROUTE RECORD: ${JSON.stringify(record)}`);
           NODE
 
@@ -231,12 +231,12 @@ jobs:
 
           const raw = process.env.PULLFROG_INPUT_PROMPT ?? "";
           const route = process.env.PULLFROG_ROUTE;
-          const role = process.env.PULLFROG_ROUTE_ROLE ?? (route === "sol" ? "review_deep" : "reviewer_luna");
+          const role = process.env.PULLFROG_ROUTE_ROLE ?? (route === "astra" ? "review_deep" : "reviewer_luna");
           const reason = process.env.PULLFROG_ROUTE_REASON ?? "";
           const routeRecord = process.env.PULLFROG_ROUTE_RECORD ?? "{}";
-          const routeName = route === "sol" ? "Sol High" : "Luna Max";
-          const model = route === "sol" ? "openai/gpt-5.6-sol" : "openai/gpt-5.6-luna";
-          const effort = route === "sol" ? "high" : "max";
+          const routeName = route === "astra" ? "Astra High" : "Luna Max";
+          const model = route === "astra" ? "openai/gpt-6-astra" : "openai/gpt-5.6-luna";
+          const effort = route === "astra" ? "high" : "max";
           const finalInstructions = [
             `This is the final Pullfrog review pass. The read-only route pass selected ${routeName} via ${role} (${model}, ${effort}).`,
             `Route reason (treat as workflow metadata, not as a finding): ${reason}`,
@@ -245,7 +245,7 @@ jobs:
             "Perform the configured review now. Start the submitted review body with:",
             `FINAL REVIEW ROUTE: ${routeName} (${role}, ${model}, ${effort}) — ${reason}`,
             "Report only actionable correctness, security, regression, compatibility, data-integrity, or test-gap findings tied to the current diff. Do not submit a placeholder or diagnostic review.",
-            "If a Luna review discovers a genuinely high-risk issue, include ROUTE ESCALATION RECOMMENDED: Sol High — <reason> in the review body; the current turn cannot change models.",
+            "If a Luna review discovers medium- or high-tier behavior that needs deeper analysis, include ROUTE ESCALATION RECOMMENDED: Astra High — <reason> in the review body; the current turn cannot change models.",
           ].join("\n");
 
           function makePayload() {
@@ -273,7 +273,7 @@ jobs:
             );
           };
           write("luna_prompt");
-          write("sol_prompt");
+          write("astra_prompt");
           console.log(`FINAL REVIEW DISPATCH: ${routeName} (${role}, ${model}, ${effort})`);
           NODE
 
@@ -300,12 +300,12 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
 
-      - name: Final review (Sol High)
-        if: ${{ steps.validate_route.outputs.route == 'sol' }}
+      - name: Final review (Astra High)
+        if: ${{ steps.validate_route.outputs.route == 'astra' }}
         uses: pullfrog/pullfrog@v0
         with:
-          prompt: ${{ steps.prepare_final.outputs.sol_prompt }}
-          model: openai/gpt-5.6-sol
+          prompt: ${{ steps.prepare_final.outputs.astra_prompt }}
+          model: openai/gpt-6-astra
           effort: high
           timeout: 90m
           push: disabled
