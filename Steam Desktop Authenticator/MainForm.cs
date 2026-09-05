@@ -196,6 +196,31 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private async Task<bool> RunTradeConfirmationActionWithRefreshRetryAsync(
+            SteamGuardAccount account,
+            Func<Task<bool>> action,
+            CancellationToken cancellationToken)
+        {
+            if (account?.Session == null)
+                throw new SessionUnavailableException(account?.AccountName);
+
+            if (account.Session.IsAccessTokenExpired())
+                await RefreshAndPersistAccessTokenAsync(account, cancellationToken);
+
+            try
+            {
+                return await action();
+            }
+            catch (Exception exception) when (IsTradeConfirmationTokenFailure(exception))
+            {
+                // Steam can reject an access token before its local JWT expiry.
+                // Refresh once and retry the same confirmation action before the
+                // coordinator classifies the session as requiring reauthentication.
+                await RefreshAndPersistAccessTokenAsync(account, cancellationToken);
+                return await action();
+            }
+        }
+
         private Task<Confirmation[]> FetchTradeConfirmationsForPageAsync(SteamGuardAccount account, CancellationToken cancellationToken = default)
         {
             return FetchTradeConfirmationsAsync(account, TimeSpan.FromSeconds(1), 2, cancellationToken);
@@ -395,11 +420,8 @@ namespace Steam_Desktop_Authenticator
             return false;
         }
 
-        private static bool ShouldDeferTradeConfirmationFailure(Exception exception, bool hasRetry)
+        private static bool IsTradeConfirmationTokenFailure(Exception exception)
         {
-            if (!hasRetry)
-                return false;
-
             for (Exception current = exception; current != null; current = current.InnerException)
             {
                 if (current is SteamGuardAccount.WGTokenInvalidException || current is SteamGuardAccount.WGTokenExpiredException)
@@ -407,6 +429,11 @@ namespace Steam_Desktop_Authenticator
             }
 
             return false;
+        }
+
+        private static bool ShouldDeferTradeConfirmationFailure(Exception exception, bool hasRetry)
+        {
+            return hasRetry && IsTradeConfirmationTokenFailure(exception);
         }
 
         public MainForm()
@@ -1670,12 +1697,12 @@ namespace Steam_Desktop_Authenticator
 
                 if (autoAcceptConfirmations.Count > 0)
                 {
-                    bool accepted = await RunAvailableSteamAccountOperationAsync(account, async () =>
-                    {
-                        if (account.Session.IsAccessTokenExpired())
-                            await RefreshAndPersistAccessTokenAsync(account, lifetimeCancellationSource.Token);
-                        return await account.AcceptMultipleConfirmations(autoAcceptConfirmations.ToArray(), lifetimeCancellationSource.Token);
-                    }, lifetimeCancellationSource.Token);
+                    bool accepted = await RunAvailableSteamAccountOperationAsync(account, () =>
+                        RunTradeConfirmationActionWithRefreshRetryAsync(
+                            account,
+                            () => account.AcceptMultipleConfirmations(autoAcceptConfirmations.ToArray(), lifetimeCancellationSource.Token),
+                            lifetimeCancellationSource.Token),
+                        lifetimeCancellationSource.Token);
                     if (!accepted)
                         throw new InvalidOperationException("Steam did not accept the automatic confirmation action. It will remain pending for a later scan.");
                 }
@@ -2056,6 +2083,14 @@ namespace Steam_Desktop_Authenticator
         {
             return account != null && loadedAccounts != null &&
                 loadedAccounts.Any(candidate => Object.ReferenceEquals(candidate, account));
+        }
+
+        private static SteamGuardAccount FindLoadedAccountBySteamId(SteamGuardAccount[] loadedAccounts, ulong steamId)
+        {
+            if (loadedAccounts == null || steamId == 0)
+                return null;
+
+            return loadedAccounts.FirstOrDefault(account => account?.Session?.SteamID == steamId);
         }
 
         private SteamGuardAccount FindAccountBySelectionKey(string selectionKey)
@@ -2909,6 +2944,7 @@ namespace Steam_Desktop_Authenticator
             allAccounts = manifest.GetAllAccounts(passKey);
             var activeSteamIds = new HashSet<ulong>(allAccounts.Where(account => account.Session != null).Select(account => account.Session.SteamID));
             var activeAccountNames = new HashSet<string>(allAccounts.Select(account => account.AccountName), StringComparer.Ordinal);
+            RebindTradeConfirmationCache();
             foreach (ulong steamId in pendingTradeConfirmationCounts.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
                 pendingTradeConfirmationCounts.Remove(steamId);
             foreach (ulong steamId in loginMonitorSchedules.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
@@ -2920,13 +2956,6 @@ namespace Steam_Desktop_Authenticator
             }
             foreach (string accountName in unavailableLoginAccounts.Keys.Where(accountName => !activeAccountNames.Contains(accountName)).ToArray())
                 unavailableLoginAccounts.Remove(accountName);
-            foreach (string confirmationKey in loadedTradeConfirmations
-                .Where(entry => entry.Value.Account?.Session == null || !activeSteamIds.Contains(entry.Value.Account.Session.SteamID))
-                .Select(entry => entry.Key)
-                .ToArray())
-            {
-                loadedTradeConfirmations.Remove(confirmationKey);
-            }
             UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
 
             if (allAccounts.Length > 0)
@@ -2980,6 +3009,27 @@ namespace Steam_Desktop_Authenticator
                 string jsonAccounts = JsonConvert.SerializeObject(accounts);
                 _ = ExecuteScriptSafelyAsync($"updateAccountList({jsonAccounts})", "Account list UI");
                 _ = ExecuteScriptSafelyAsync($"updateEncryptionState({manifest.Encrypted.ToString().ToLowerInvariant()}, {hasAccounts.ToString().ToLowerInvariant()})", "Encryption state UI");
+            }
+        }
+
+        private void RebindTradeConfirmationCache()
+        {
+            foreach (string confirmationKey in loadedTradeConfirmations.Keys.ToArray())
+            {
+                if (!TryParseTradeConfirmationKey(confirmationKey, out ulong steamId))
+                {
+                    loadedTradeConfirmations.Remove(confirmationKey);
+                    continue;
+                }
+
+                SteamGuardAccount currentAccount = FindLoadedAccountBySteamId(allAccounts, steamId);
+                if (currentAccount == null)
+                {
+                    loadedTradeConfirmations.Remove(confirmationKey);
+                    continue;
+                }
+
+                loadedTradeConfirmations[confirmationKey].Account = currentAccount;
             }
         }
 
@@ -4045,7 +4095,7 @@ namespace Steam_Desktop_Authenticator
 
         private async Task RespondToTradeConfirmationAsync(string confirmationKey, bool accept)
         {
-            if (!TryParseTradeConfirmationKey(confirmationKey, out _))
+            if (!TryParseTradeConfirmationKey(confirmationKey, out ulong steamId))
                 return;
             if (IsTradeActionRecentlyCompleted(confirmationKey))
             {
@@ -4082,17 +4132,22 @@ namespace Steam_Desktop_Authenticator
                 if (!loadedTradeConfirmations.TryGetValue(confirmationKey, out LoadedTradeConfirmation entry))
                     throw new InvalidOperationException("This confirmation is no longer available. Refresh the list and try again.");
 
+                SteamGuardAccount account = FindLoadedAccountBySteamId(allAccounts, steamId);
+                if (account == null)
+                    throw new InvalidOperationException("This account is no longer available. Refresh the account list and try again.");
+                entry.Account = account;
+
                 await confirmationsSemaphore.WaitAsync(lifetimeCancellationSource.Token);
                 try
                 {
-                    bool steamAcceptedAction = await RunAvailableSteamAccountOperationAsync(entry.Account, async () =>
-                    {
-                        if (entry.Account.Session.IsAccessTokenExpired())
-                            await RefreshAndPersistAccessTokenAsync(entry.Account, lifetimeCancellationSource.Token);
-                        return accept
-                            ? await entry.Account.AcceptConfirmation(entry.Confirmation, lifetimeCancellationSource.Token)
-                            : await entry.Account.DenyConfirmation(entry.Confirmation, lifetimeCancellationSource.Token);
-                    }, lifetimeCancellationSource.Token);
+                    bool steamAcceptedAction = await RunAvailableSteamAccountOperationAsync(account, () =>
+                        RunTradeConfirmationActionWithRefreshRetryAsync(
+                            account,
+                            () => accept
+                                ? account.AcceptConfirmation(entry.Confirmation, lifetimeCancellationSource.Token)
+                                : account.DenyConfirmation(entry.Confirmation, lifetimeCancellationSource.Token),
+                            lifetimeCancellationSource.Token),
+                        lifetimeCancellationSource.Token);
                     if (!steamAcceptedAction)
                         throw new InvalidOperationException("Steam did not accept that confirmation action. The confirmation remains pending.");
                     actionSucceeded = true;

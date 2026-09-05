@@ -75,6 +75,24 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void TradeConfirmationActionsRecognizeRefreshableTokenFailures()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("IsTradeConfirmationTokenFailure", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            Assert.True((bool)method.Invoke(null, new object[] { new SteamGuardAccount.WGTokenInvalidException() }));
+            Assert.True((bool)method.Invoke(null, new object[] { new SteamGuardAccount.WGTokenExpiredException() }));
+            Assert.True((bool)method.Invoke(null, new object[]
+            {
+                new Exception("confirmation request failed", new SteamGuardAccount.WGTokenInvalidException())
+            }));
+            Assert.False((bool)method.Invoke(null, new object[]
+            {
+                new SteamSessionException(SteamSessionFailureKind.InvalidSession, "refresh token rejected")
+            }));
+        }
+
+        [Fact]
         public void MainForm_RejectsAccountObjectsFromEarlierReload()
         {
             MethodInfo method = typeof(MainForm).GetMethod("IsCurrentAccountGeneration", BindingFlags.Static | BindingFlags.NonPublic);
@@ -85,6 +103,28 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             Assert.True((bool)method.Invoke(null, new object[] { staleAccount, new[] { staleAccount } }));
             Assert.False((bool)method.Invoke(null, new object[] { staleAccount, new[] { currentAccount } }));
+        }
+
+        [Fact]
+        public void MainForm_ResolvesCurrentAccountBySteamIdAfterReload()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("FindLoadedAccountBySteamId", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            SteamGuardAccount staleAccount = new SteamGuardAccount
+            {
+                AccountName = "stale",
+                Session = new SessionData { SteamID = 76561198000000001 }
+            };
+            SteamGuardAccount currentAccount = new SteamGuardAccount
+            {
+                AccountName = "current",
+                Session = new SessionData { SteamID = 76561198000000001 }
+            };
+
+            object resolved = method.Invoke(null, new object[] { new[] { currentAccount }, 76561198000000001UL });
+            Assert.Same(currentAccount, resolved);
+            Assert.Null(method.Invoke(null, new object[] { new[] { currentAccount }, 76561198000000002UL }));
         }
     }
 }
