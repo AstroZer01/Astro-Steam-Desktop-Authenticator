@@ -158,14 +158,17 @@ namespace Steam_Desktop_Authenticator
             SessionData sessionAtOperationStart = null;
             return RunSteamAccountOperationAsync(account, async () =>
             {
-                sessionAtOperationStart = account?.Session;
-                if (!IsCurrentAccountGeneration(account, allAccounts))
-                    throw new StaleAccountGenerationException(account?.AccountName);
-                // Check after acquiring the per-account lock. An operation that is
-                // already on the wire may finish, but work queued behind it is
-                // discarded as soon as another call invalidates the session.
-                if (!IsSessionAvailableForAccountOperations(account))
-                    throw new SessionUnavailableException(account?.AccountName);
+                lock (accountGenerationLock)
+                {
+                    sessionAtOperationStart = account?.Session;
+                    if (!IsCurrentAccountGeneration(account, allAccounts))
+                        throw new StaleAccountGenerationException(account?.AccountName);
+                    // Check after acquiring the per-account lock. An operation that is
+                    // already on the wire may finish, but work queued behind it is
+                    // discarded as soon as another call invalidates the session.
+                    if (!IsSessionAvailableForAccountOperations(account))
+                        throw new SessionUnavailableException(account?.AccountName);
+                }
                 T result = await operation();
                 onResult?.Invoke(result);
                 return result;
@@ -182,11 +185,11 @@ namespace Steam_Desktop_Authenticator
             SessionData session = account?.Session ?? throw new SessionUnavailableException(account?.AccountName);
             string previousAccessToken = session.AccessToken;
             string previousRefreshToken = session.RefreshToken;
-            long storageRevisionAtStart = manifest?.StorageRevision ?? 0;
+            long accountStorageRevisionAtStart = manifest?.GetAccountStorageRevision(session.SteamID) ?? 0;
             try
             {
                 await session.RefreshAccessToken(false, cancellationToken);
-                if (!PersistLoginSession(account, session, storageRevisionAtStart))
+                if (!PersistLoginSession(account, session, accountStorageRevisionAtStart))
                     throw new IOException("Steam refreshed the session, but Astro SDA could not save it securely.");
             }
             catch
@@ -2148,6 +2151,14 @@ namespace Steam_Desktop_Authenticator
             SessionData expectedSession,
             SteamGuardAccount[] loadedAccounts)
         {
+            return CanUseAccountGeneration(account, expectedSession, loadedAccounts);
+        }
+
+        private static bool CanUseAccountGeneration(
+            SteamGuardAccount account,
+            SessionData expectedSession,
+            SteamGuardAccount[] loadedAccounts)
+        {
             return IsCurrentAccountGeneration(account, loadedAccounts) &&
                 (expectedSession == null || Object.ReferenceEquals(account.Session, expectedSession));
         }
@@ -2189,53 +2200,62 @@ namespace Steam_Desktop_Authenticator
             if (account == null)
                 return;
 
-            lock (sessionStateLock)
+            // A failed operation may complete after the account list has been
+            // reloaded. Do not let that stale completion mark the replacement
+            // account generation as unavailable.
+            lock (accountGenerationLock)
             {
-                SessionData currentSession = account.Session;
-                if (currentSession == null || currentSession.SteamID == 0 ||
-                    (expectedSession != null && !Object.ReferenceEquals(currentSession, expectedSession)))
+                if (!CanUseAccountGeneration(account, expectedSession, allAccounts))
                     return;
 
-                ulong steamId = currentSession.SteamID;
-
-                sessionRenewalRequired.Add(steamId);
-                loginMonitorSchedules.Remove(steamId);
-                loginMonitoringAccountIndex = 0;
-                tradeMonitoringAccountIndex = 0;
-                unavailableLoginAccounts.Remove(account.AccountName);
-                notifiedUnavailableLoginAccounts.Remove(account.AccountName);
-                foreach (string requestKey in pendingLoginRequests.Keys
-                    .Where(key => key.StartsWith(steamId.ToString(CultureInfo.InvariantCulture) + ":", StringComparison.Ordinal))
-                    .ToArray())
+                lock (sessionStateLock)
                 {
-                    pendingLoginRequests.Remove(requestKey);
-                    PruneLoginRequestBookkeeping(requestKey);
-                }
+                    SessionData currentSession = account.Session;
+                    if (currentSession == null || currentSession.SteamID == 0 ||
+                        (expectedSession != null && !Object.ReferenceEquals(currentSession, expectedSession)))
+                        return;
 
-                if (manifest != null && !manifest.IsSessionMarkedForRenewal(steamId))
-                {
-                    StorageResult stateResult = manifest.SetSessionNeedsRenewal(steamId, true);
-                    if (!stateResult.Succeeded)
+                    ulong steamId = currentSession.SteamID;
+
+                    sessionRenewalRequired.Add(steamId);
+                    loginMonitorSchedules.Remove(steamId);
+                    loginMonitoringAccountIndex = 0;
+                    tradeMonitoringAccountIndex = 0;
+                    unavailableLoginAccounts.Remove(account.AccountName);
+                    notifiedUnavailableLoginAccounts.Remove(account.AccountName);
+                    foreach (string requestKey in pendingLoginRequests.Keys
+                        .Where(key => key.StartsWith(steamId.ToString(CultureInfo.InvariantCulture) + ":", StringComparison.Ordinal))
+                        .ToArray())
                     {
-                        DiagnosticErrorLogger.Log("Session recovery", stateResult.Exception, "The account's unavailable session state could not be persisted.");
+                        pendingLoginRequests.Remove(requestKey);
+                        PruneLoginRequestBookkeeping(requestKey);
                     }
-                }
 
-                InvalidateTradeConfirmationCache(account);
-                if (currentAccount?.Session?.SteamID == steamId)
-                {
-                    btnLoginViaQr.Enabled = false;
-                    menuDeactivateAuthenticator.Enabled = false;
-                }
-                if (GetCoreWebView2IfAvailable() != null)
-                {
-                    TryBeginInvoke(() =>
+                    if (manifest != null && !manifest.IsSessionMarkedForRenewal(steamId))
                     {
-                        // Resolve the current selection when the queued refresh runs,
-                        // in case the user selected another account in the meantime.
-                        loadAccountsList();
-                        _ = PublishCachedLoginActionsAsync();
-                    });
+                        StorageResult stateResult = manifest.SetSessionNeedsRenewal(steamId, true);
+                        if (!stateResult.Succeeded)
+                        {
+                            DiagnosticErrorLogger.Log("Session recovery", stateResult.Exception, "The account's unavailable session state could not be persisted.");
+                        }
+                    }
+
+                    InvalidateTradeConfirmationCache(account);
+                    if (currentAccount?.Session?.SteamID == steamId)
+                    {
+                        btnLoginViaQr.Enabled = false;
+                        menuDeactivateAuthenticator.Enabled = false;
+                    }
+                    if (GetCoreWebView2IfAvailable() != null)
+                    {
+                        TryBeginInvoke(() =>
+                        {
+                            // Resolve the current selection when the queued refresh runs,
+                            // in case the user selected another account in the meantime.
+                            loadAccountsList();
+                            _ = PublishCachedLoginActionsAsync();
+                        });
+                    }
                 }
             }
         }

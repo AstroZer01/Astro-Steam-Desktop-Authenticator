@@ -93,6 +93,10 @@ namespace Steam_Desktop_Authenticator
         private static Manifest _manifest { get; set; }
         private static readonly object storageLock = new object();
         private long storageRevision;
+        // Refresh persistence only needs to reject changes to the account it
+        // captured. A manifest-wide revision would make an unrelated account
+        // update abort an otherwise safe refresh.
+        private readonly Dictionary<ulong, long> accountStorageRevisions = new Dictionary<ulong, long>();
         private const string StorageJournalFilename = ".asda-storage-transaction.json";
         private const string SettingsBackupFilename = ".manifest.settings.bak";
         private const string StorageBackupFilenamePrefix = ".manifest.";
@@ -119,6 +123,15 @@ namespace Steam_Desktop_Authenticator
                 lock (storageLock)
                     return storageRevision;
             }
+        }
+
+        public long GetAccountStorageRevision(ulong steamId)
+        {
+            if (steamId == 0)
+                return 0;
+
+            lock (storageLock)
+                return GetAccountStorageRevisionLocked(steamId);
         }
 
         public sealed class UnmanagedMaFileCandidate
@@ -962,10 +975,10 @@ namespace Steam_Desktop_Authenticator
         {
             lock (storageLock)
             {
-                if (expectedStorageRevision.HasValue && expectedStorageRevision.Value != storageRevision)
-                    return StorageResult.Failure(StorageFailureKind.Validation, "The account data changed while the session was being refreshed.");
                 if (account == null || account.Session == null || account.Session.SteamID == 0)
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account data is incomplete and could not be saved.");
+                if (expectedStorageRevision.HasValue && expectedStorageRevision.Value != GetAccountStorageRevisionLocked(account.Session.SteamID))
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The account data changed while the session was being refreshed.");
                 if (encrypt && String.IsNullOrEmpty(passKey))
                     return StorageResult.Failure(StorageFailureKind.Validation, "An encryption passkey is required to save this account.");
                 if (!encrypt && this.Encrypted)
@@ -1135,9 +1148,51 @@ namespace Steam_Desktop_Authenticator
 
         private void CopyStorageStateFrom(Manifest source)
         {
+            Dictionary<ulong, ManifestEntry> previousEntries = GetManifestEntriesBySteamId(Entries);
+            Dictionary<ulong, ManifestEntry> nextEntries = GetManifestEntriesBySteamId(source?.Entries);
+            foreach (ulong steamId in previousEntries.Keys.Concat(nextEntries.Keys).Distinct().ToArray())
+            {
+                previousEntries.TryGetValue(steamId, out ManifestEntry previousEntry);
+                nextEntries.TryGetValue(steamId, out ManifestEntry nextEntry);
+                if (AreManifestEntriesEquivalent(previousEntry, nextEntry))
+                    continue;
+
+                if (nextEntry == null)
+                    accountStorageRevisions.Remove(steamId);
+                else
+                    accountStorageRevisions[steamId] = GetAccountStorageRevisionLocked(steamId) + 1;
+            }
+
             Entries = source.Entries;
             Encrypted = source.Encrypted;
             storageRevision++;
+        }
+
+        private long GetAccountStorageRevisionLocked(ulong steamId)
+        {
+            return accountStorageRevisions.TryGetValue(steamId, out long revision) ? revision : 0;
+        }
+
+        private static Dictionary<ulong, ManifestEntry> GetManifestEntriesBySteamId(IEnumerable<ManifestEntry> entries)
+        {
+            Dictionary<ulong, ManifestEntry> result = new Dictionary<ulong, ManifestEntry>();
+            foreach (ManifestEntry entry in entries ?? Enumerable.Empty<ManifestEntry>())
+            {
+                if (entry != null && entry.SteamID != 0)
+                    result[entry.SteamID] = entry;
+            }
+            return result;
+        }
+
+        private static bool AreManifestEntriesEquivalent(ManifestEntry first, ManifestEntry second)
+        {
+            return first == null
+                ? second == null
+                : second != null && first.SteamID == second.SteamID &&
+                    String.Equals(first.IV, second.IV, StringComparison.Ordinal) &&
+                    String.Equals(first.Salt, second.Salt, StringComparison.Ordinal) &&
+                    String.Equals(first.Filename, second.Filename, StringComparison.Ordinal) &&
+                    first.SessionNeedsRenewal == second.SessionNeedsRenewal;
         }
 
         private void CopySettingsInto(Manifest destination)
@@ -1537,7 +1592,7 @@ namespace Steam_Desktop_Authenticator
 
         private static bool IsValidAutomaticImportAccount(SteamGuardAccount account)
         {
-            return account?.Session != null && account.Session.SteamID != 0 &&
+            return account != null && account.FullyEnrolled && account.Session != null && account.Session.SteamID != 0 &&
                 !String.IsNullOrWhiteSpace(account.AccountName) && account.AccountName.Length <= MaximumAccountNameLength &&
                 IsValidAuthenticatorSecret(account.SharedSecret) &&
                 IsValidAuthenticatorSecret(account.IdentitySecret) &&

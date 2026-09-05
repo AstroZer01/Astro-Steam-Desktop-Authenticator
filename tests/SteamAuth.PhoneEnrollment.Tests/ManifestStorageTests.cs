@@ -63,7 +63,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Manifest manifest = Manifest.GenerateNewManifest(false);
             SteamGuardAccount account = CreateAccount();
             Assert.True(manifest.SaveAccount(account, false).Succeeded);
-            long refreshRevision = manifest.StorageRevision;
+            long refreshRevision = manifest.GetAccountStorageRevision(account.Session.SteamID);
 
             Assert.True(manifest.RemoveAccount(account));
 
@@ -72,11 +72,38 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Equal(StorageFailureKind.Validation, staleResult.FailureKind);
             Assert.Empty(manifest.Entries);
 
-            long currentRevision = manifest.StorageRevision;
+            long currentRevision = manifest.GetAccountStorageRevision(account.Session.SteamID);
             StorageResult recreateResult = manifest.SaveAccount(account, false, null, currentRevision, allowCreate: false);
             Assert.False(recreateResult.Succeeded);
             Assert.Equal(StorageFailureKind.Validation, recreateResult.FailureKind);
             Assert.Empty(manifest.Entries);
+        }
+
+        [Fact]
+        public void SaveAccount_AllowsRefreshAfterUnrelatedAccountChange()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount firstAccount = CreateAccount(76561198000000000UL);
+            SteamGuardAccount secondAccount = CreateAccount(76561198000000001UL);
+            Assert.True(manifest.SaveAccount(firstAccount, false).Succeeded);
+            Assert.True(manifest.SaveAccount(secondAccount, false).Succeeded);
+
+            long firstAccountRevision = manifest.GetAccountStorageRevision(firstAccount.Session.SteamID);
+            secondAccount.Session.AccessToken = "updated-second-access-token";
+            Assert.True(manifest.SaveAccount(secondAccount, false).Succeeded);
+
+            firstAccount.Session.AccessToken = "updated-first-access-token";
+            StorageResult refreshResult = manifest.SaveAccount(
+                firstAccount,
+                false,
+                null,
+                firstAccountRevision,
+                allowCreate: false);
+
+            Assert.True(refreshResult.Succeeded);
+            Assert.Equal(2, manifest.Entries.Count);
+            Assert.Equal("updated-first-access-token", Assert.Single(manifest.GetAllAccounts(), account => account.Session.SteamID == firstAccount.Session.SteamID).Session.AccessToken);
+            Assert.Equal("updated-second-access-token", Assert.Single(manifest.GetAllAccounts(), account => account.Session.SteamID == secondAccount.Session.SteamID).Session.AccessToken);
         }
 
         [Fact]
@@ -198,6 +225,22 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             Assert.Empty(manifest.FindUnmanagedMaFiles());
             Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+        }
+
+        [Fact]
+        public void StartupImport_IgnoresAccountsWithIncompleteEnrollment()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "incomplete-enrollment.maFile";
+            SteamGuardAccount account = CreateAccount();
+            account.FullyEnrolled = false;
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+            Assert.Empty(manifest.Entries);
         }
 
         [Theory]
@@ -695,7 +738,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 IdentitySecret = Convert.ToBase64String(new byte[20]),
                 DeviceID = "android:storage-test",
                 Session = new SessionData { SteamID = steamId, AccessToken = "test-access-token" },
-                AccountName = "storage-test"
+                AccountName = "storage-test",
+                FullyEnrolled = true
             };
         }
 
