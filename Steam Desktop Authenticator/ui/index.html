@@ -467,7 +467,7 @@
 
     function updateQrLoginButton() {
         const button = document.getElementById('btn-login-qr');
-        const hasAccounts = allAccs.some(account => !account.sessionExpired);
+        const hasAccounts = allAccs.some(account => !account.sessionExpired && !account.needsRenewal);
         button.disabled = qrScanWaiting || !hasAccounts || currentAccExpired;
 
         if (qrScanWaiting) {
@@ -555,7 +555,8 @@
         allAccs = accounts;
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         
-        const usableAccounts = accounts.filter(account => !account.sessionExpired && account.steamId);
+        const usableAccounts = accounts.filter(account =>
+            !account.sessionExpired && !account.needsRenewal && account.steamId);
         let hasAccounts = accounts.length > 0;
         let btnCopy = document.getElementById('btn-copy');
         
@@ -610,6 +611,7 @@
         container.innerHTML = "";
         allAccs.forEach(acc => {
             if (filterText && !acc.name.toLowerCase().includes(filterText)) return;
+            const sessionExpired = Boolean(acc.sessionExpired || acc.needsRenewal);
             const row = document.createElement('div');
             if (acc.steamId === currentAccSteamId || (!acc.steamId && acc.name === currentAcc)) {
                 row.className = "bg-primary-container/20 text-white px-3 py-2 border-l-2 border-primary font-bold";
@@ -621,24 +623,28 @@
             accountButton.type = 'button';
             accountButton.className = "min-w-0 flex-1 border-0 bg-transparent p-0 text-left text-inherit cursor-pointer";
             const name = document.createElement('span');
-            name.className = "block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ellipsis" + (acc.sessionExpired ? " text-[#ffb4ab]" : "");
-            name.textContent = acc.sessionExpired ? acc.name + " (expired session)" : acc.name;
+            name.className = "block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ellipsis" + (sessionExpired ? " text-[#ffb4ab]" : "");
+            name.textContent = sessionExpired ? acc.name + " (expired session)" : acc.name;
             accountButton.appendChild(name);
             accountButton.onclick = () => { window.chrome.webview.postMessage({ action: 'switch_account', accountName: acc.name, steamId: acc.steamId }); };
 
-            if (acc.sessionExpired) {
-                const renewButton = document.createElement('button');
-                renewButton.type = 'button';
-                renewButton.className = "shrink-0 rounded p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors";
-                renewButton.title = "Renew session";
-                renewButton.setAttribute('aria-label', "Renew session");
-                renewButton.innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5.5"/><path d="M20 4v7h-7"/></svg>';
-                renewButton.onclick = event => {
-                    event.stopPropagation();
-                    window.chrome.webview.postMessage({ action: 'refresh_login_account', steamId: acc.steamId });
-                };
-                row.appendChild(renewButton);
-            }
+            const accountActions = document.createElement('div');
+            accountActions.className = "shrink-0 flex items-center gap-1";
+            const renewButton = document.createElement('button');
+            renewButton.type = 'button';
+            renewButton.disabled = !sessionExpired || !acc.steamId;
+            renewButton.className = sessionExpired && acc.steamId
+                ? "shrink-0 rounded p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
+                : "shrink-0 rounded p-1 text-on-surface-variant opacity-70 cursor-not-allowed transition-colors";
+            renewButton.title = "Renew session";
+            renewButton.setAttribute('aria-label', "Renew session");
+            renewButton.innerHTML = '<svg class="ui-icon renew-session-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 0 0-13.66-5.66L4 8"/><path d="M4 4v4h4"/><path d="M4 12a8 8 0 0 0 13.66 5.66L20 16"/><path d="M20 20v-4h-4"/></svg>';
+            renewButton.onclick = event => {
+                if (renewButton.disabled) return;
+                event.stopPropagation();
+                window.chrome.webview.postMessage({ action: 'refresh_login_account', steamId: acc.steamId });
+            };
+            accountActions.appendChild(renewButton);
 
             const removeButton = document.createElement('button');
             removeButton.className = "shrink-0 rounded p-1 text-on-surface-variant hover:bg-error-container/30 hover:text-error transition-colors";
@@ -649,8 +655,9 @@
                 event.stopPropagation();
                 openRemoveAccountModal(acc);
             };
+            accountActions.appendChild(removeButton);
             row.appendChild(accountButton);
-            row.appendChild(removeButton);
+            row.appendChild(accountActions);
             container.appendChild(row);
         });
     }
