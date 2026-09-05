@@ -2097,23 +2097,25 @@ namespace Steam_Desktop_Authenticator
             if (manifest == null)
                 return false;
 
+            StorageResult saveResult;
             lock (accountGenerationLock)
             {
                 if (!CanPersistAccountGeneration(account, expectedSession, allAccounts))
                     throw new StaleAccountGenerationException(account?.AccountName);
 
-                StorageResult saveResult = manifest.SaveAccount(
+                saveResult = manifest.SaveAccount(
                     account,
                     manifest.Encrypted,
                     passKey,
                     expectedStorageRevision,
                     allowCreate: false);
-                if (!saveResult.Succeeded)
-                    DiagnosticErrorLogger.Log("Authenticator storage", saveResult.Exception, "The updated Steam login session could not be saved.");
-                else if (account?.Session != null && !account.Session.IsRefreshTokenExpired())
-                    ClearSessionRecoveryState(account);
-                return saveResult.Succeeded;
             }
+
+            if (!saveResult.Succeeded)
+                DiagnosticErrorLogger.Log("Authenticator storage", saveResult.Exception, "The updated Steam login session could not be saved.");
+            else if (account?.Session != null && !account.Session.IsRefreshTokenExpired())
+                ClearSessionRecoveryState(account);
+            return saveResult.Succeeded;
         }
 
         private bool IsSessionRenewalRequired(SteamGuardAccount account)
@@ -3006,9 +3008,9 @@ namespace Steam_Desktop_Authenticator
             trayAccountList.Items.Clear();
             trayAccountList.SelectedIndex = -1;
 
-            SteamGuardAccount[] loadedAccounts = manifest.GetAllAccounts(passKey);
             lock (accountGenerationLock)
             {
+                SteamGuardAccount[] loadedAccounts = manifest.GetAllAccounts(passKey);
                 allAccounts = loadedAccounts;
                 var activeSteamIds = new HashSet<ulong>(allAccounts.Where(account => account.Session != null).Select(account => account.Session.SteamID));
                 var activeAccountNames = new HashSet<string>(allAccounts.Select(account => account.AccountName), StringComparer.Ordinal);

@@ -58,6 +58,28 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void SaveAccount_RejectsStaleRefreshAndDoesNotRecreateRemovedAccount()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = CreateAccount();
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+            long refreshRevision = manifest.StorageRevision;
+
+            Assert.True(manifest.RemoveAccount(account));
+
+            StorageResult staleResult = manifest.SaveAccount(account, false, null, refreshRevision, allowCreate: false);
+            Assert.False(staleResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, staleResult.FailureKind);
+            Assert.Empty(manifest.Entries);
+
+            long currentRevision = manifest.StorageRevision;
+            StorageResult recreateResult = manifest.SaveAccount(account, false, null, currentRevision, allowCreate: false);
+            Assert.False(recreateResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, recreateResult.FailureKind);
+            Assert.Empty(manifest.Entries);
+        }
+
+        [Fact]
         public void NormalizeAccountFilenames_MigratesExistingGuidReference()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
