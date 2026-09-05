@@ -74,7 +74,7 @@ namespace SteamAuth
                         ? response.ErrorMessage
                         : "Steam returned result " + result + ".";
                     throw new SteamSessionException(
-                        SteamSessionFailureClassifier.ClassifyResult(result, expiredResultInvalidatesSession: true),
+                        SteamSessionFailureClassifier.ClassifyRefreshResult(result),
                         detail,
                         result);
                 }

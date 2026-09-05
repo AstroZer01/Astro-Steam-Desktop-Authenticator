@@ -372,8 +372,8 @@ namespace Steam_Desktop_Authenticator
             {
                 if (current is SteamGuardAccount.WGTokenInvalidException || current is SteamGuardAccount.WGTokenExpiredException)
                     return true;
-                if (current is SteamSessionException sessionException && sessionException.Kind == SteamSessionFailureKind.InvalidSession)
-                    return true;
+                if (current is SteamSessionException sessionException)
+                    return sessionException.Kind == SteamSessionFailureKind.InvalidSession;
                 if (current is SteamWebRequestException steamWebException &&
                     steamWebException.StatusCode == HttpStatusCode.Unauthorized)
                     return true;
@@ -381,6 +381,9 @@ namespace Steam_Desktop_Authenticator
                     httpResponse.StatusCode == HttpStatusCode.Unauthorized)
                     return true;
 
+            }
+            for (Exception current = exception; current != null; current = current.InnerException)
+            {
                 string message = current.Message ?? String.Empty;
                 if (message.IndexOf("Needs Authentication", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("not logged in", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -596,12 +599,12 @@ namespace Steam_Desktop_Authenticator
                     continue;
 
                 DialogResult choice = AstroMessageBox.ShowWithCustomButtons(
-                    "The session for " + startupAccount.AccountName + " was lost. Renew the session to continue using this account, remove the account, or do this later.",
+                    "The session for " + startupAccount.AccountName + " was lost. Renew the session to continue using this account, remove it from this app (Steam Guard will remain enabled), or do this later.",
                     "Session renewal required",
                     MessageBoxButtons.YesNoCancel,
                     MessageBoxIcon.Warning,
                     "Renew session",
-                    "Remove",
+                    "Remove from app",
                     "Later");
 
                 if (choice == DialogResult.Yes)
@@ -615,32 +618,13 @@ namespace Steam_Desktop_Authenticator
 
                 if (choice == DialogResult.No)
                 {
-                    await PromptStartupAccountRemovalAsync(startupAccount);
+                    await RemoveManagedAccountAsync(steamId, startupAccount.AccountName, "remove");
                     loadAccountsList();
                     continue;
                 }
 
                 startupDeferredSessionRenewals.Add(steamId);
             }
-        }
-
-        private async Task PromptStartupAccountRemovalAsync(SteamGuardAccount account)
-        {
-            if (account?.Session == null)
-                return;
-
-            DialogResult removalChoice = AstroMessageBox.ShowWithCustomButtons(
-                "Choose how to remove " + account.AccountName + ". Removing from the app keeps Steam Guard enabled. Unlinking also starts the existing Steam Guard removal flow.",
-                "Remove account",
-                MessageBoxButtons.YesNoCancel,
-                MessageBoxIcon.Warning,
-                "Remove from app",
-                "Unlink Steam Guard",
-                "Cancel");
-            if (removalChoice == DialogResult.Yes)
-                await RemoveManagedAccountAsync(account.Session.SteamID, account.AccountName, "remove");
-            else if (removalChoice == DialogResult.No)
-                await RemoveManagedAccountAsync(account.Session.SteamID, account.AccountName, "unlink");
         }
 
         // Custom progress bar that replaces the standard one
@@ -2105,10 +2089,11 @@ namespace Steam_Desktop_Authenticator
             }
             if (GetCoreWebView2IfAvailable() != null)
             {
-                ulong selectedSteamId = steamId;
                 TryBeginInvoke(() =>
                 {
-                    loadAccountsList(selectedSteamId);
+                    // Resolve the current selection when the queued refresh runs,
+                    // in case the user selected another account in the meantime.
+                    loadAccountsList();
                     _ = PublishCachedLoginActionsAsync();
                 });
             }
@@ -2160,8 +2145,10 @@ namespace Steam_Desktop_Authenticator
             {
                 if (current is SessionUnavailableException)
                     return true;
-                if (current is SteamSessionException sessionException && sessionException.Kind == SteamSessionFailureKind.InvalidSession)
-                    return true;
+                // Structured endpoint classification takes precedence over error
+                // text, which can describe a denied action rather than credentials.
+                if (current is SteamSessionException sessionException)
+                    return sessionException.Kind == SteamSessionFailureKind.InvalidSession;
                 if (current is SteamWebRequestException steamWebException &&
                     steamWebException.StatusCode == HttpStatusCode.Unauthorized)
                     return true;

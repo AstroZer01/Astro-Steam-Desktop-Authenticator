@@ -44,11 +44,10 @@ namespace SteamAuth
         {
             switch (result)
             {
-                // Invalid password, access denied, not logged on, revoked,
+                // Invalid password, not logged on, revoked,
                 // logon replaced, account disabled/denied/locked/deleted, and
                 // invalid cached credentials all make the saved session unusable.
                 case 5:
-                case 15:
                 case 21:
                 case 26:
                 case 34:
@@ -96,6 +95,15 @@ namespace SteamAuth
             if (IsTransientResult(result))
                 return SteamSessionFailureKind.Transient;
             return SteamSessionFailureKind.Other;
+        }
+
+        public static SteamSessionFailureKind ClassifyRefreshResult(int result)
+        {
+            // AccessDenied rejects the saved credential only at the token-refresh
+            // endpoint. Action endpoints can deny an operation on a valid session.
+            return result == 15
+                ? SteamSessionFailureKind.InvalidSession
+                : ClassifyResult(result, expiredResultInvalidatesSession: true);
         }
     }
 }
