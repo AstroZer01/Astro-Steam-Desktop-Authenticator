@@ -73,5 +73,18 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False((bool)method.Invoke(null, new object[] { staleAccessToken, false }));
             Assert.False((bool)method.Invoke(null, new object[] { rejectedRefreshToken, true }));
         }
+
+        [Fact]
+        public void MainForm_RejectsAccountObjectsFromEarlierReload()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("IsCurrentAccountGeneration", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            SteamGuardAccount staleAccount = new SteamGuardAccount { AccountName = "stale" };
+            SteamGuardAccount currentAccount = new SteamGuardAccount { AccountName = "current" };
+
+            Assert.True((bool)method.Invoke(null, new object[] { staleAccount, new[] { staleAccount } }));
+            Assert.False((bool)method.Invoke(null, new object[] { staleAccount, new[] { currentAccount } }));
+        }
     }
 }

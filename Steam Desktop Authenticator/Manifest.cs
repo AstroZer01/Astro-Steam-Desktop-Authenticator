@@ -101,6 +101,7 @@ namespace Steam_Desktop_Authenticator
         private const int MaximumAuthenticatorSecretTextLength = 4096;
         private const int MaximumAuthenticatorSecretBytes = 64;
         private const int MaximumDeviceIdLength = 256;
+        private const int MaximumAccountNameLength = 256;
         private const int MaximumManifestEntries = 1000;
         private static readonly JsonSerializerSettings storageJsonSettings = new JsonSerializerSettings
         {
@@ -1515,6 +1516,7 @@ namespace Steam_Desktop_Authenticator
         private static bool IsValidAutomaticImportAccount(SteamGuardAccount account)
         {
             return account?.Session != null && account.Session.SteamID != 0 &&
+                !String.IsNullOrWhiteSpace(account.AccountName) && account.AccountName.Length <= MaximumAccountNameLength &&
                 IsValidAuthenticatorSecret(account.SharedSecret) &&
                 IsValidAuthenticatorSecret(account.IdentitySecret) &&
                 !String.IsNullOrWhiteSpace(account.DeviceID) &&

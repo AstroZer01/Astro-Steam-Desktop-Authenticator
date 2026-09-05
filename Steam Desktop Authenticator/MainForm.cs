@@ -130,10 +130,18 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private sealed class SessionUnavailableException : InvalidOperationException
+        private class SessionUnavailableException : InvalidOperationException
         {
             public SessionUnavailableException(string accountName)
                 : base("The session for " + (String.IsNullOrWhiteSpace(accountName) ? "this account" : accountName) + " is unavailable. Renew it before using Steam account services.")
+            {
+            }
+        }
+
+        private sealed class StaleAccountGenerationException : SessionUnavailableException
+        {
+            public StaleAccountGenerationException(string accountName)
+                : base(accountName)
             {
             }
         }
@@ -150,6 +158,8 @@ namespace Steam_Desktop_Authenticator
             return RunSteamAccountOperationAsync(account, async () =>
             {
                 sessionAtOperationStart = account?.Session;
+                if (!IsCurrentAccountGeneration(account, allAccounts))
+                    throw new StaleAccountGenerationException(account?.AccountName);
                 // Check after acquiring the per-account lock. An operation that is
                 // already on the wire may finish, but work queued behind it is
                 // discarded as soon as another call invalidates the session.
@@ -2042,6 +2052,12 @@ namespace Steam_Desktop_Authenticator
             return account?.Session != null && !IsSessionRenewalRequired(account);
         }
 
+        private static bool IsCurrentAccountGeneration(SteamGuardAccount account, SteamGuardAccount[] loadedAccounts)
+        {
+            return account != null && loadedAccounts != null &&
+                loadedAccounts.Any(candidate => Object.ReferenceEquals(candidate, account));
+        }
+
         private SteamGuardAccount FindAccountBySelectionKey(string selectionKey)
         {
             if (String.IsNullOrWhiteSpace(selectionKey) || selectionKey == "all" || allAccounts == null)
@@ -2167,6 +2183,8 @@ namespace Steam_Desktop_Authenticator
         {
             for (Exception current = exception; current != null; current = current.InnerException)
             {
+                if (current is StaleAccountGenerationException)
+                    return false;
                 if (current is SessionUnavailableException)
                     return true;
                 // Structured endpoint classification takes precedence over error

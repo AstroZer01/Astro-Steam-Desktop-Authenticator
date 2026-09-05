@@ -521,8 +521,8 @@
             if (loginSelect) loginSelect.value = 'all';
         } else {
             const hasOption = select => Array.from(select.options).some(option => option.value === currentAccSteamId);
-            if (tradeSelect && hasOption(tradeSelect)) tradeSelect.value = currentAccSteamId;
-            if (loginSelect && hasOption(loginSelect)) loginSelect.value = currentAccSteamId;
+            if (tradeSelect && tradeSelect.value !== 'all' && hasOption(tradeSelect)) tradeSelect.value = currentAccSteamId;
+            if (loginSelect && loginSelect.value !== 'all' && hasOption(loginSelect)) loginSelect.value = currentAccSteamId;
         }
         renderLoginActions();
         if (selectionChanged && currentAccExpired) {

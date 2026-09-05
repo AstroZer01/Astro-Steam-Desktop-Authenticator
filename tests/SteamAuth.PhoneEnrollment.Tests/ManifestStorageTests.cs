@@ -178,6 +178,41 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
         }
 
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public void StartupImport_IgnoresAccountsWithMissingNames(string accountName)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "missing-account-name.maFile";
+            SteamGuardAccount account = CreateAccount();
+            account.AccountName = accountName;
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+            Assert.Empty(manifest.Entries);
+        }
+
+        [Fact]
+        public void StartupImport_IgnoresOversizedAccountNames()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "oversized-account-name.maFile";
+            SteamGuardAccount account = CreateAccount();
+            account.AccountName = new string('x', 257);
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+            Assert.Empty(manifest.Entries);
+        }
+
         [Fact]
         public void StartupImport_RevalidatesAuthenticatorDataBeforeCommit()
         {
