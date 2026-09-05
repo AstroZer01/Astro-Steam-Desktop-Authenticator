@@ -117,7 +117,16 @@ namespace SteamAuth
 
                 if (response == null || response.Result != 1 || response.Body == null || !response.Body.Success)
                 {
-                    if (response != null && (response.Result == 84 || response.Result == 87))
+                    int result = response?.Result ?? 0;
+                    SteamSessionFailureKind failureKind = SteamSessionFailureClassifier.ClassifyResult(result, expiredResultInvalidatesSession: true);
+                    if (failureKind == SteamSessionFailureKind.InvalidSession)
+                    {
+                        throw new SteamSessionException(
+                            SteamSessionFailureKind.InvalidSession,
+                            "Steam rejected the saved account session while removing Steam Guard.",
+                            result);
+                    }
+                    if (SteamSessionFailureClassifier.IsRateLimitedResult(result))
                         LastAuthenticatorOperationError = "Steam is rate limiting Steam Guard removal. Wait a while before trying again.";
                     else if (response != null && response.Result == 1 && response.Body != null && !response.Body.Success)
                         LastAuthenticatorOperationError = "Steam did not confirm Steam Guard removal. Please try again later.";
@@ -134,6 +143,18 @@ namespace SteamAuth
             catch (OperationCanceledException)
             {
                 throw;
+            }
+            catch (SteamSessionException)
+            {
+                throw;
+            }
+            catch (SteamWebRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                throw new SteamSessionException(
+                    SteamSessionFailureKind.InvalidSession,
+                    "Steam rejected the saved account session while removing Steam Guard.",
+                    0,
+                    ex);
             }
             catch (Exception ex)
             {
@@ -196,7 +217,18 @@ namespace SteamAuth
                     Session.AccessToken,
                     CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response.Parser,
                     cancellationToken: cancellationToken);
-                return (response?.Result ?? 0).ToString();
+                int result = response?.Result ?? 0;
+                if (result != 1)
+                {
+                    string detail = response != null && !String.IsNullOrWhiteSpace(response.ErrorMessage)
+                        ? response.ErrorMessage
+                        : "Steam rejected the QR login approval with result " + result + ".";
+                    throw new SteamSessionException(
+                        SteamSessionFailureClassifier.ClassifyResult(result),
+                        detail,
+                        result);
+                }
+                return result.ToString();
             }
         }
 
@@ -328,6 +360,8 @@ namespace SteamAuth
             try
             {
                 SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response, steamResponseJsonSettings);
+                if (confResponse?.NeedAuthentication == true)
+                    throw new WGTokenInvalidException();
                 return confResponse?.Success ?? false;
             }
             catch (JsonException)
@@ -361,6 +395,8 @@ namespace SteamAuth
             try
             {
                 SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response, steamResponseJsonSettings);
+                if (confResponse?.NeedAuthentication == true)
+                    throw new WGTokenInvalidException();
                 return confResponse?.Success ?? false;
             }
             catch (JsonException)
@@ -508,16 +544,25 @@ namespace SteamAuth
 
         public class WGTokenInvalidException : Exception
         {
+            public WGTokenInvalidException() : base("Steam needs authentication for this account session.")
+            {
+            }
         }
 
         public class WGTokenExpiredException : Exception
         {
+            public WGTokenExpiredException() : base("The Steam account session token expired.")
+            {
+            }
         }
 
         private class SendConfirmationResponse
         {
             [JsonProperty("success")]
             public bool Success { get; set; }
+
+            [JsonProperty("needauth")]
+            public bool NeedAuthentication { get; set; }
         }
 
         private class ConfirmationDetailsResponse

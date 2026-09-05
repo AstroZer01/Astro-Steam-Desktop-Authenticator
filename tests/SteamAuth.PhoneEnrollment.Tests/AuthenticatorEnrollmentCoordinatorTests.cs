@@ -462,6 +462,96 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Theory]
+        [InlineData(5)]
+        [InlineData(15)]
+        [InlineData(21)]
+        [InlineData(26)]
+        [InlineData(27)]
+        [InlineData(34)]
+        [InlineData(43)]
+        [InlineData(63)]
+        [InlineData(73)]
+        [InlineData(114)]
+        [InlineData(126)]
+        public async Task RefreshAccessToken_ClassifiesRevokedOrRejectedSessions(int steamResult)
+        {
+            FakeTransport transport = new FakeTransport(Response(
+                steamResult,
+                (CAuthentication_AccessToken_GenerateForApp_Response)null));
+            SessionData session = new SessionData(transport)
+            {
+                SteamID = 76561198000000000,
+                AccessToken = "current-access-token",
+                RefreshToken = CreateUnexpiredToken()
+            };
+
+            SteamSessionException exception = await Assert.ThrowsAsync<SteamSessionException>(() => session.RefreshAccessToken());
+
+            Assert.Equal(SteamSessionFailureKind.InvalidSession, exception.Kind);
+            Assert.Equal(steamResult, exception.Result);
+            Assert.Equal("current-access-token", session.AccessToken);
+        }
+
+        [Theory]
+        [InlineData(84, SteamSessionFailureKind.RateLimited)]
+        [InlineData(87, SteamSessionFailureKind.RateLimited)]
+        [InlineData(2, SteamSessionFailureKind.Transient)]
+        [InlineData(10, SteamSessionFailureKind.Transient)]
+        [InlineData(20, SteamSessionFailureKind.Transient)]
+        [InlineData(48, SteamSessionFailureKind.Transient)]
+        [InlineData(55, SteamSessionFailureKind.Transient)]
+        [InlineData(99, SteamSessionFailureKind.Other)]
+        public async Task RefreshAccessToken_DoesNotClassifyTemporaryOrUnknownFailuresAsInvalidSessions(
+            int steamResult,
+            SteamSessionFailureKind expectedKind)
+        {
+            FakeTransport transport = new FakeTransport(Response(
+                steamResult,
+                (CAuthentication_AccessToken_GenerateForApp_Response)null));
+            SessionData session = new SessionData(transport)
+            {
+                SteamID = 76561198000000000,
+                AccessToken = "current-access-token",
+                RefreshToken = CreateUnexpiredToken()
+            };
+
+            SteamSessionException exception = await Assert.ThrowsAsync<SteamSessionException>(() => session.RefreshAccessToken());
+
+            Assert.Equal(expectedKind, exception.Kind);
+            Assert.NotEqual(SteamSessionFailureKind.InvalidSession, exception.Kind);
+            Assert.Equal(steamResult, exception.Result);
+        }
+
+        [Fact]
+        public void SessionFailureClassifier_DoesNotTreatAnExpiredRequestAsAGeneralSessionRevocation()
+        {
+            Assert.Equal(SteamSessionFailureKind.Other, SteamSessionFailureClassifier.ClassifyResult(27));
+            Assert.Equal(
+                SteamSessionFailureKind.InvalidSession,
+                SteamSessionFailureClassifier.ClassifyResult(27, expiredResultInvalidatesSession: true));
+        }
+
+        [Fact]
+        public async Task RefreshAccessToken_PreservesHttpAuthenticationFailureForTheCaller()
+        {
+            SteamWebRequestException authenticationFailure = new SteamWebRequestException(
+                "Steam returned HTTP 401.",
+                System.Net.HttpStatusCode.Unauthorized,
+                new System.Net.WebHeaderCollection());
+            SessionData session = new SessionData(new FakeTransport(authenticationFailure))
+            {
+                SteamID = 76561198000000000,
+                AccessToken = "current-access-token",
+                RefreshToken = CreateUnexpiredToken()
+            };
+
+            Exception exception = await Assert.ThrowsAsync<Exception>(() => session.RefreshAccessToken());
+
+            Assert.Same(authenticationFailure, exception.InnerException);
+            Assert.Equal("current-access-token", session.AccessToken);
+        }
+
+        [Theory]
         [InlineData("not-a-token")]
         [InlineData("a.b.c")]
         [InlineData("a.!!!!.c")]

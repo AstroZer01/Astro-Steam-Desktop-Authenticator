@@ -1,0 +1,181 @@
+using Steam_Desktop_Authenticator;
+using System;
+using System.Net;
+using System.Reflection;
+using Xunit;
+
+namespace SteamAuth.PhoneEnrollment.Tests
+{
+    public sealed class SteamSessionFailureTests
+    {
+        [Fact]
+        public void AccessDenied_IsCredentialInvalidOnlyDuringRefresh()
+        {
+            Assert.False(SteamSessionFailureClassifier.IsInvalidSessionResult(15));
+            Assert.Equal(SteamSessionFailureKind.Other, SteamSessionFailureClassifier.ClassifyResult(15));
+            // Removal treats Expired as session-invalid, but AccessDenied is still local.
+            Assert.Equal(SteamSessionFailureKind.Other,
+                SteamSessionFailureClassifier.ClassifyResult(15, expiredResultInvalidatesSession: true));
+            Assert.Equal(SteamSessionFailureKind.InvalidSession,
+                SteamSessionFailureClassifier.ClassifyRefreshResult(15));
+        }
+
+        [Theory]
+        [InlineData(5)]
+        [InlineData(21)]
+        [InlineData(26)]
+        [InlineData(34)]
+        [InlineData(43)]
+        [InlineData(63)]
+        [InlineData(73)]
+        [InlineData(114)]
+        [InlineData(126)]
+        public void DefinitiveSessionResults_RemainInvalidForActionsAndRefresh(int result)
+        {
+            Assert.True(SteamSessionFailureClassifier.IsInvalidSessionResult(result));
+            Assert.Equal(SteamSessionFailureKind.InvalidSession, SteamSessionFailureClassifier.ClassifyResult(result));
+            Assert.Equal(SteamSessionFailureKind.InvalidSession, SteamSessionFailureClassifier.ClassifyRefreshResult(result));
+        }
+
+        [Theory]
+        [InlineData("IsDefinitiveSessionFailure", false)]
+        [InlineData("IsDefinitiveSessionFailure", true)]
+        [InlineData("IsTradeAuthenticationFailure", false)]
+        [InlineData("IsTradeAuthenticationFailure", true)]
+        public void MainForm_UsesStructuredContextInsteadOfActionErrorText(string methodName, bool wrapped)
+        {
+            MethodInfo method = typeof(MainForm).GetMethod(methodName, BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            const string message = "401: invalid token; authorization expired";
+            Exception actionFailure = new SteamSessionException(SteamSessionFailureClassifier.ClassifyResult(15), message, 15);
+            Exception refreshFailure = new SteamSessionException(SteamSessionFailureClassifier.ClassifyRefreshResult(15), message, 15);
+            if (wrapped)
+            {
+                actionFailure = new Exception(message, actionFailure);
+                refreshFailure = new Exception(message, refreshFailure);
+            }
+
+            Assert.False((bool)method.Invoke(null, new object[] { actionFailure }));
+            Assert.True((bool)method.Invoke(null, new object[] { refreshFailure }));
+        }
+
+        [Fact]
+        public void TradeConfirmationTokenFailureIsDeferredOnlyWhenRetryRemains()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("ShouldDeferTradeConfirmationFailure", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            Exception staleAccessToken = new SteamGuardAccount.WGTokenInvalidException();
+            Exception wrappedStaleAccessToken = new Exception("confirmation request failed", staleAccessToken);
+            Exception rejectedRefreshToken = new SteamSessionException(SteamSessionFailureKind.InvalidSession, "refresh token rejected");
+
+            Assert.True((bool)method.Invoke(null, new object[] { staleAccessToken, true }));
+            Assert.True((bool)method.Invoke(null, new object[] { wrappedStaleAccessToken, true }));
+            Assert.False((bool)method.Invoke(null, new object[] { staleAccessToken, false }));
+            Assert.False((bool)method.Invoke(null, new object[] { rejectedRefreshToken, true }));
+        }
+
+        [Fact]
+        public void TradeConfirmationActionsRecognizeRefreshableTokenFailures()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("IsTradeConfirmationTokenFailure", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            Assert.True((bool)method.Invoke(null, new object[] { new SteamGuardAccount.WGTokenInvalidException() }));
+            Assert.True((bool)method.Invoke(null, new object[] { new SteamGuardAccount.WGTokenExpiredException() }));
+            Assert.True((bool)method.Invoke(null, new object[]
+            {
+                new Exception("confirmation request failed", new SteamGuardAccount.WGTokenInvalidException())
+            }));
+            Assert.False((bool)method.Invoke(null, new object[]
+            {
+                new SteamSessionException(SteamSessionFailureKind.InvalidSession, "refresh token rejected")
+            }));
+        }
+
+        [Fact]
+        public void MainForm_OnlyRetriesTransportUnauthorizedAsAccessTokenFailure()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("IsRecoverableAccessTokenFailure", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            Exception unauthorized = new SteamWebRequestException(
+                "Steam returned HTTP 401.",
+                HttpStatusCode.Unauthorized,
+                new WebHeaderCollection());
+            Exception wrappedUnauthorized = new SteamSessionException(
+                SteamSessionFailureKind.InvalidSession,
+                "Steam rejected the saved account session.",
+                0,
+                unauthorized);
+            Exception forbidden = new SteamWebRequestException(
+                "Steam returned HTTP 403.",
+                HttpStatusCode.Forbidden,
+                new WebHeaderCollection());
+
+            Assert.True((bool)method.Invoke(null, new object[] { unauthorized }));
+            Assert.True((bool)method.Invoke(null, new object[] { wrappedUnauthorized }));
+            Assert.False((bool)method.Invoke(null, new object[] { forbidden }));
+        }
+
+        [Fact]
+        public void MainForm_RejectsAccountObjectsFromEarlierReload()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("IsCurrentAccountGeneration", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            SteamGuardAccount staleAccount = new SteamGuardAccount { AccountName = "stale" };
+            SteamGuardAccount currentAccount = new SteamGuardAccount { AccountName = "current" };
+
+            Assert.True((bool)method.Invoke(null, new object[] { staleAccount, new[] { staleAccount } }));
+            Assert.False((bool)method.Invoke(null, new object[] { staleAccount, new[] { currentAccount } }));
+        }
+
+        [Fact]
+        public void MainForm_ResolvesCurrentAccountBySteamIdAfterReload()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("FindLoadedAccountBySteamId", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            SteamGuardAccount staleAccount = new SteamGuardAccount
+            {
+                AccountName = "stale",
+                Session = new SessionData { SteamID = 76561198000000001 }
+            };
+            SteamGuardAccount currentAccount = new SteamGuardAccount
+            {
+                AccountName = "current",
+                Session = new SessionData { SteamID = 76561198000000001 }
+            };
+
+            object resolved = method.Invoke(null, new object[] { new[] { currentAccount }, 76561198000000001UL });
+            Assert.Same(currentAccount, resolved);
+            Assert.Null(method.Invoke(null, new object[] { new[] { currentAccount }, 76561198000000002UL }));
+        }
+
+        [Fact]
+        public void MainForm_RejectsStaleSessionAtPersistenceBoundary()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("CanPersistAccountGeneration", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            SessionData currentSession = new SessionData { SteamID = 76561198000000001 };
+            SteamGuardAccount currentAccount = new SteamGuardAccount
+            {
+                AccountName = "current",
+                Session = currentSession
+            };
+            SteamGuardAccount replacementAccount = new SteamGuardAccount
+            {
+                AccountName = "replacement",
+                Session = new SessionData { SteamID = currentSession.SteamID }
+            };
+            SessionData replacedSession = new SessionData { SteamID = currentSession.SteamID };
+
+            Assert.True((bool)method.Invoke(null, new object[] { currentAccount, currentSession, new[] { currentAccount } }));
+            Assert.False((bool)method.Invoke(null, new object[] { currentAccount, currentSession, new[] { replacementAccount } }));
+            currentAccount.Session = replacedSession;
+            Assert.False((bool)method.Invoke(null, new object[] { currentAccount, currentSession, new[] { currentAccount } }));
+        }
+    }
+}

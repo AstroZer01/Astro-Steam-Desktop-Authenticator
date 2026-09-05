@@ -318,25 +318,107 @@ namespace Steam_Desktop_Authenticator
 
             if (forceRefresh || account.Session.IsAccessTokenExpired())
             {
+                string previousAccessToken = account.Session.AccessToken;
+                string previousRefreshToken = account.Session.RefreshToken;
                 try
                 {
                     await account.Session.RefreshAccessToken(false, cancellationToken);
                     if (!persistAccount(account))
+                    {
+                        RestoreSessionTokens(account.Session, previousAccessToken, previousRefreshToken);
                         throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam refreshed the session, but Astro SDA could not save it securely.");
+                    }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
+                    RestoreSessionTokens(account.Session, previousAccessToken, previousRefreshToken);
                     throw;
                 }
                 catch (LoginApprovalException)
                 {
                     throw;
                 }
-                catch (Exception)
+                catch (Exception ex) when (IsDefinitiveRefreshFailure(ex))
                 {
-                    throw new LoginApprovalException(LoginApprovalErrorKind.SessionExpired, "Steam could not refresh this account session. Log in again and retry.");
+                    RestoreSessionTokens(account.Session, previousAccessToken, previousRefreshToken);
+                    throw new LoginApprovalException(
+                        LoginApprovalErrorKind.SessionExpired,
+                        "Steam rejected this saved account session. Log in again and retry.",
+                        ex);
+                }
+                catch (Exception ex) when (IsTransientRefreshFailure(ex))
+                {
+                    RestoreSessionTokens(account.Session, previousAccessToken, previousRefreshToken);
+                    throw new LoginApprovalException(
+                        IsRefreshRateLimited(ex) ? LoginApprovalErrorKind.RateLimited : LoginApprovalErrorKind.Network,
+                        IsRefreshRateLimited(ex)
+                            ? "Steam is rate limiting login-action session refreshes. Try again shortly."
+                            : "Steam could not be reached while refreshing the login-action session.",
+                        ex);
+                }
+                catch (Exception ex)
+                {
+                    RestoreSessionTokens(account.Session, previousAccessToken, previousRefreshToken);
+                    throw new LoginApprovalException(
+                        LoginApprovalErrorKind.Unknown,
+                        "Steam could not refresh this account session. Try again later.",
+                        ex);
                 }
             }
+        }
+
+        private static void RestoreSessionTokens(SessionData session, string accessToken, string refreshToken)
+        {
+            if (session == null)
+                return;
+            session.AccessToken = accessToken;
+            session.RefreshToken = refreshToken;
+        }
+
+        private static bool IsDefinitiveRefreshFailure(Exception exception)
+        {
+            for (Exception current = exception; current != null; current = current.InnerException)
+            {
+                if (current is SteamSessionException sessionException && sessionException.Kind == SteamSessionFailureKind.InvalidSession)
+                    return true;
+                if (current is SteamWebRequestException steamWebException &&
+                    steamWebException.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool IsRefreshRateLimited(Exception exception)
+        {
+            for (Exception current = exception; current != null; current = current.InnerException)
+            {
+                if (current is SteamSessionException sessionException && sessionException.Kind == SteamSessionFailureKind.RateLimited)
+                    return true;
+                string message = current.Message ?? String.Empty;
+                if (message.IndexOf("rate limit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("result 84", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("result 87", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool IsTransientRefreshFailure(Exception exception)
+        {
+            if (IsRefreshRateLimited(exception))
+                return true;
+            for (Exception current = exception; current != null; current = current.InnerException)
+            {
+                if (current is SteamSessionException sessionException &&
+                    (sessionException.Kind == SteamSessionFailureKind.RateLimited || sessionException.Kind == SteamSessionFailureKind.Transient))
+                    return true;
+                if (current is SteamWebRequestException steamWebException &&
+                    (steamWebException.StatusCode == System.Net.HttpStatusCode.Unauthorized || steamWebException.StatusCode == System.Net.HttpStatusCode.Forbidden))
+                    continue;
+                if (current is System.Net.Http.HttpRequestException || current is TimeoutException || current is TaskCanceledException)
+                    return true;
+            }
+            return false;
         }
 
         private async Task<SteamProtocolResponse<TResponse>> SendAsync<TRequest, TResponse>(
@@ -353,11 +435,13 @@ namespace Steam_Desktop_Authenticator
             {
                 return await protocolTransport.SendAsync("IAuthenticationService", method, request, account.Session.AccessToken, responseParser, requestMethod, cancellationToken);
             }
-            catch (SteamWebRequestException exception) when (
-                exception.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
-                exception.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            catch (SteamWebRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.Unauthorized)
             {
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unauthorized, "Steam rejected this account session. Log in again and retry.");
+            }
+            catch (SteamWebRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam refused this login action for the current account.");
             }
             catch (SteamWebRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
             {
@@ -391,7 +475,7 @@ namespace Steam_Desktop_Authenticator
 
             int result = response?.Result ?? 0;
             string message = response?.ErrorMessage;
-            if (result == 15 || result == 21)
+            if (SteamSessionFailureClassifier.IsInvalidSessionResult(result))
                 throw new LoginApprovalException(LoginApprovalErrorKind.Unauthorized, "Steam authorization expired.");
             if (result == 27 || result == 29)
                 throw new LoginApprovalException(LoginApprovalErrorKind.ExpiredOrDuplicate, "This login request has already expired or was already handled.");

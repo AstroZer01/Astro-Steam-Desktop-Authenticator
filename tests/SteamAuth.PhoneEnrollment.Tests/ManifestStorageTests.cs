@@ -45,6 +45,297 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void SaveAccount_LeavesOnlyTheCanonicalFilename()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            Assert.Equal(Manifest.GetCanonicalMaFileFilename(76561198000000000UL), manifest.Entries.Single().Filename);
+            Assert.True(File.Exists(Path.Combine(maDirectory, manifest.Entries.Single().Filename)));
+            Assert.Single(Directory.EnumerateFiles(maDirectory, "*.maFile"));
+        }
+
+        [Fact]
+        public void SaveAccount_RejectsStaleRefreshAndDoesNotRecreateRemovedAccount()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = CreateAccount();
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+            long refreshRevision = manifest.GetAccountStorageRevision(account.Session.SteamID);
+
+            Assert.True(manifest.RemoveAccount(account));
+
+            StorageResult staleResult = manifest.SaveAccount(account, false, null, refreshRevision, allowCreate: false);
+            Assert.False(staleResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, staleResult.FailureKind);
+            Assert.Empty(manifest.Entries);
+
+            long currentRevision = manifest.GetAccountStorageRevision(account.Session.SteamID);
+            StorageResult recreateResult = manifest.SaveAccount(account, false, null, currentRevision, allowCreate: false);
+            Assert.False(recreateResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, recreateResult.FailureKind);
+            Assert.Empty(manifest.Entries);
+        }
+
+        [Fact]
+        public void SaveAccount_AllowsRefreshAfterUnrelatedAccountChange()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount firstAccount = CreateAccount(76561198000000000UL);
+            SteamGuardAccount secondAccount = CreateAccount(76561198000000001UL);
+            Assert.True(manifest.SaveAccount(firstAccount, false).Succeeded);
+            Assert.True(manifest.SaveAccount(secondAccount, false).Succeeded);
+
+            long firstAccountRevision = manifest.GetAccountStorageRevision(firstAccount.Session.SteamID);
+            secondAccount.Session.AccessToken = "updated-second-access-token";
+            Assert.True(manifest.SaveAccount(secondAccount, false).Succeeded);
+
+            firstAccount.Session.AccessToken = "updated-first-access-token";
+            StorageResult refreshResult = manifest.SaveAccount(
+                firstAccount,
+                false,
+                null,
+                firstAccountRevision,
+                allowCreate: false);
+
+            Assert.True(refreshResult.Succeeded);
+            Assert.Equal(2, manifest.Entries.Count);
+            Assert.Equal("updated-first-access-token", Assert.Single(manifest.GetAllAccounts(), account => account.Session.SteamID == firstAccount.Session.SteamID).Session.AccessToken);
+            Assert.Equal("updated-second-access-token", Assert.Single(manifest.GetAllAccounts(), account => account.Session.SteamID == secondAccount.Session.SteamID).Session.AccessToken);
+        }
+
+        [Fact]
+        public void NormalizeAccountFilenames_MigratesExistingGuidReference()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string canonicalFilename = Manifest.GetCanonicalMaFileFilename(76561198000000000UL);
+            string guidFilename = "76561198000000000.e170cb3692b3434c930def2e89e981ae.maFile";
+            File.Move(Path.Combine(maDirectory, canonicalFilename), Path.Combine(maDirectory, guidFilename));
+            JObject manifestJson = JObject.Parse(File.ReadAllText(Path.Combine(maDirectory, "manifest.json")));
+            manifestJson["entries"][0]["filename"] = guidFilename;
+            File.WriteAllText(Path.Combine(maDirectory, "manifest.json"), manifestJson.ToString(Formatting.None));
+
+            Manifest reloaded = Manifest.GetManifest(true);
+
+            Assert.Equal(canonicalFilename, Assert.Single(reloaded.Entries).Filename);
+            Assert.True(File.Exists(Path.Combine(maDirectory, canonicalFilename)));
+            Assert.False(File.Exists(Path.Combine(maDirectory, guidFilename)));
+        }
+
+        [Fact]
+        public void NormalizeAccountFilenames_DoesNotOverwriteCanonicalCollision()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string canonicalFilename = Manifest.GetCanonicalMaFileFilename(76561198000000000UL);
+            string guidFilename = "76561198000000000.collision.maFile";
+            string originalContents = File.ReadAllText(Path.Combine(maDirectory, canonicalFilename));
+            File.Move(Path.Combine(maDirectory, canonicalFilename), Path.Combine(maDirectory, guidFilename));
+            File.WriteAllText(Path.Combine(maDirectory, canonicalFilename), JsonConvert.SerializeObject(CreateAccount(76561198000000001UL)));
+            JObject manifestJson = JObject.Parse(File.ReadAllText(Path.Combine(maDirectory, "manifest.json")));
+            manifestJson["entries"][0]["filename"] = guidFilename;
+            File.WriteAllText(Path.Combine(maDirectory, "manifest.json"), manifestJson.ToString(Formatting.None));
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.True(reloaded.NormalizeAccountFilenames().Succeeded);
+
+            Assert.Equal(guidFilename, Assert.Single(reloaded.Entries).Filename);
+            Assert.Equal(76561198000000001UL, JsonConvert.DeserializeObject<SteamGuardAccount>(File.ReadAllText(Path.Combine(maDirectory, canonicalFilename))).Session.SteamID);
+            Assert.Equal(originalContents, File.ReadAllText(Path.Combine(maDirectory, guidFilename)));
+        }
+
+        [Fact]
+        public void StartupImport_AcceptsExpiredSessionAndDeletesSourceAfterCommit()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "new-account.maFile";
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(CreateAccount()));
+
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Single(candidates);
+            Assert.True(manifest.ImportUnmanagedMaFiles(candidates).Succeeded);
+
+            Assert.False(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+            Assert.Equal(Manifest.GetCanonicalMaFileFilename(76561198000000000UL), Assert.Single(manifest.Entries).Filename);
+            Assert.True(manifest.IsSessionMarkedForRenewal(76561198000000000UL));
+        }
+
+        [Fact]
+        public void StartupImport_BulkValidationFailureLeavesEverySourceUntouched()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string firstFilename = "first.maFile";
+            string secondFilename = "second.maFile";
+            File.WriteAllText(Path.Combine(maDirectory, firstFilename), JsonConvert.SerializeObject(CreateAccount(76561198000000000UL)));
+            File.WriteAllText(Path.Combine(maDirectory, secondFilename), JsonConvert.SerializeObject(CreateAccount(76561198000000001UL)));
+
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Equal(2, candidates.Count);
+            File.WriteAllText(Path.Combine(maDirectory, secondFilename), JsonConvert.SerializeObject(CreateAccount(76561198000000002UL)));
+
+            StorageResult result = manifest.ImportUnmanagedMaFiles(candidates);
+
+            Assert.False(result.Succeeded);
+            Assert.Empty(manifest.Entries);
+            Assert.True(File.Exists(Path.Combine(maDirectory, firstFilename)));
+            Assert.True(File.Exists(Path.Combine(maDirectory, secondFilename)));
+        }
+
+        [Fact]
+        public void StartupImport_IgnoresMissingSessionAndEncryptedCandidates()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            File.WriteAllText(Path.Combine(maDirectory, "missing-session.maFile"), JsonConvert.SerializeObject(new SteamGuardAccount { AccountName = "manual-only" }));
+            string salt = FileEncryptor.GetRandomSalt();
+            string iv = FileEncryptor.GetInitializationVector();
+            File.WriteAllText(Path.Combine(maDirectory, "encrypted.maFile"), FileEncryptor.EncryptData("secret", salt, iv, JsonConvert.SerializeObject(CreateAccount())));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+        }
+
+        [Theory]
+        [InlineData("shared")]
+        [InlineData("identity")]
+        [InlineData("device")]
+        public void StartupImport_IgnoresAccountsWithIncompleteAuthenticatorData(string invalidField)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "incomplete-authenticator.maFile";
+            SteamGuardAccount account = CreateAccount();
+            if (invalidField == "shared")
+                account.SharedSecret = "not-base64";
+            else if (invalidField == "identity")
+                account.IdentitySecret = null;
+            else
+                account.DeviceID = null;
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+        }
+
+        [Fact]
+        public void StartupImport_IgnoresAccountsWithIncompleteEnrollment()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "incomplete-enrollment.maFile";
+            SteamGuardAccount account = CreateAccount();
+            account.FullyEnrolled = false;
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+            Assert.Empty(manifest.Entries);
+        }
+
+        [Theory]
+        [InlineData("shared")]
+        [InlineData("identity")]
+        public void StartupImport_IgnoresAuthenticatorSecretsWithWrongLength(string invalidField)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "short-authenticator-secret.maFile";
+            SteamGuardAccount account = CreateAccount();
+            if (invalidField == "shared")
+                account.SharedSecret = Convert.ToBase64String(new byte[1]);
+            else
+                account.IdentitySecret = Convert.ToBase64String(new byte[1]);
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+            Assert.Empty(manifest.Entries);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public void StartupImport_IgnoresAccountsWithMissingNames(string accountName)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "missing-account-name.maFile";
+            SteamGuardAccount account = CreateAccount();
+            account.AccountName = accountName;
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+            Assert.Empty(manifest.Entries);
+        }
+
+        [Fact]
+        public void StartupImport_IgnoresOversizedAccountNames()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "oversized-account-name.maFile";
+            SteamGuardAccount account = CreateAccount();
+            account.AccountName = new string('x', 257);
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+            Assert.Empty(manifest.Entries);
+        }
+
+        [Fact]
+        public void StartupImport_RevalidatesAuthenticatorDataBeforeCommit()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "changed-authenticator.maFile";
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(CreateAccount()));
+
+            Manifest.UnmanagedMaFileCandidate candidate = Assert.Single(manifest.FindUnmanagedMaFiles());
+            SteamGuardAccount changedAccount = CreateAccount();
+            changedAccount.IdentitySecret = "not-base64";
+            string changedContents = JsonConvert.SerializeObject(changedAccount);
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), changedContents);
+            candidate.ContentHash = ComputeContentHash(changedContents);
+
+            StorageResult result = manifest.ImportUnmanagedMaFiles(new[] { candidate });
+
+            Assert.False(result.Succeeded);
+            Assert.Empty(manifest.Entries);
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+        }
+
+        [Fact]
+        public void SessionRenewalState_PersistsAndCanBeCleared()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+
+            Assert.True(manifest.SetSessionNeedsRenewal(76561198000000000UL, false).Succeeded);
+            Assert.True(manifest.SetSessionNeedsRenewal(76561198000000000UL, true).Succeeded);
+            Assert.True(Manifest.GetManifest(true).IsSessionMarkedForRenewal(76561198000000000UL));
+            Assert.True(manifest.SetSessionNeedsRenewal(76561198000000000UL, false).Succeeded);
+            Assert.False(Manifest.GetManifest(true).IsSessionMarkedForRenewal(76561198000000000UL));
+        }
+
+        [Fact]
         public void ChangeEncryptionKey_StagesEveryAccountAndPreservesReloadability()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
@@ -58,6 +349,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(reloaded.Encrypted);
             SteamGuardAccount reloadedAccount = Assert.Single(reloaded.GetAllAccounts("test-passkey"));
             Assert.Equal(account.Session.SteamID, reloadedAccount.Session.SteamID);
+            Assert.Equal(Manifest.GetCanonicalMaFileFilename(account.Session.SteamID), Assert.Single(reloaded.Entries).Filename);
         }
 
         [Fact]
@@ -442,9 +734,19 @@ namespace SteamAuth.PhoneEnrollment.Tests
         {
             return new SteamGuardAccount
             {
+                SharedSecret = Convert.ToBase64String(new byte[20]),
+                IdentitySecret = Convert.ToBase64String(new byte[20]),
+                DeviceID = "android:storage-test",
                 Session = new SessionData { SteamID = steamId, AccessToken = "test-access-token" },
-                AccountName = "storage-test"
+                AccountName = "storage-test",
+                FullyEnrolled = true
             };
+        }
+
+        private static string ComputeContentHash(string contents)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+                return Convert.ToBase64String(sha256.ComputeHash(new UTF8Encoding(false).GetBytes(contents)));
         }
 
         private static void WriteJournal(
