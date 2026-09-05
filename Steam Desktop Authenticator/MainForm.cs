@@ -144,7 +144,7 @@ namespace Steam_Desktop_Authenticator
             return steamAccountOperationCoordinator.RunAsync(steamId, operation, onFailure, cancellationToken);
         }
 
-        private Task<T> RunAvailableSteamAccountOperationAsync<T>(SteamGuardAccount account, Func<Task<T>> operation, CancellationToken cancellationToken = default, Action<T> onResult = null)
+        private Task<T> RunAvailableSteamAccountOperationAsync<T>(SteamGuardAccount account, Func<Task<T>> operation, CancellationToken cancellationToken = default, Action<T> onResult = null, Func<Exception, bool> shouldDeferFailureMarking = null)
         {
             SessionData sessionAtOperationStart = null;
             return RunSteamAccountOperationAsync(account, async () =>
@@ -160,7 +160,8 @@ namespace Steam_Desktop_Authenticator
                 return result;
             }, cancellationToken, exception =>
             {
-                if (!(exception is SessionUnavailableException) && IsDefinitiveSessionFailure(exception))
+                if (!(exception is SessionUnavailableException) && IsDefinitiveSessionFailure(exception) &&
+                    !(shouldDeferFailureMarking?.Invoke(exception) ?? false))
                     MarkSessionRenewalRequired(account, exception.Message, sessionAtOperationStart);
             });
         }
@@ -239,7 +240,7 @@ namespace Steam_Desktop_Authenticator
                             refreshAccessTokenBeforeRetry = false;
                         }
                         return await account.FetchConfirmationsAsync(cancellationToken);
-                    }, cancellationToken);
+                    }, cancellationToken, null, exception => ShouldDeferTradeConfirmationFailure(exception, attempt < retryCount));
                 }
                 catch (Exception ex) when (IsRateLimitedResponse(ex))
                 {
@@ -381,6 +382,20 @@ namespace Steam_Desktop_Authenticator
                     message.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0)
                     return true;
             }
+            return false;
+        }
+
+        private static bool ShouldDeferTradeConfirmationFailure(Exception exception, bool hasRetry)
+        {
+            if (!hasRetry)
+                return false;
+
+            for (Exception current = exception; current != null; current = current.InnerException)
+            {
+                if (current is SteamGuardAccount.WGTokenInvalidException || current is SteamGuardAccount.WGTokenExpiredException)
+                    return true;
+            }
+
             return false;
         }
 

@@ -57,5 +57,21 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False((bool)method.Invoke(null, new object[] { actionFailure }));
             Assert.True((bool)method.Invoke(null, new object[] { refreshFailure }));
         }
+
+        [Fact]
+        public void TradeConfirmationTokenFailureIsDeferredOnlyWhenRetryRemains()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("ShouldDeferTradeConfirmationFailure", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            Exception staleAccessToken = new SteamGuardAccount.WGTokenInvalidException();
+            Exception wrappedStaleAccessToken = new Exception("confirmation request failed", staleAccessToken);
+            Exception rejectedRefreshToken = new SteamSessionException(SteamSessionFailureKind.InvalidSession, "refresh token rejected");
+
+            Assert.True((bool)method.Invoke(null, new object[] { staleAccessToken, true }));
+            Assert.True((bool)method.Invoke(null, new object[] { wrappedStaleAccessToken, true }));
+            Assert.False((bool)method.Invoke(null, new object[] { staleAccessToken, false }));
+            Assert.False((bool)method.Invoke(null, new object[] { rejectedRefreshToken, true }));
+        }
     }
 }
