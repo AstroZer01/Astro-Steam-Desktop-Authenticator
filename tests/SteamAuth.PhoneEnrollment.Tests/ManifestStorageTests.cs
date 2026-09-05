@@ -179,6 +179,27 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Theory]
+        [InlineData("shared")]
+        [InlineData("identity")]
+        public void StartupImport_IgnoresAuthenticatorSecretsWithWrongLength(string invalidField)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string sourceFilename = "short-authenticator-secret.maFile";
+            SteamGuardAccount account = CreateAccount();
+            if (invalidField == "shared")
+                account.SharedSecret = Convert.ToBase64String(new byte[1]);
+            else
+                account.IdentitySecret = Convert.ToBase64String(new byte[1]);
+            File.WriteAllText(Path.Combine(maDirectory, sourceFilename), JsonConvert.SerializeObject(account));
+
+            Assert.Empty(manifest.FindUnmanagedMaFiles());
+            Assert.True(File.Exists(Path.Combine(maDirectory, sourceFilename)));
+            Assert.Empty(manifest.Entries);
+        }
+
+        [Theory]
         [InlineData(null)]
         [InlineData("")]
         [InlineData("   ")]

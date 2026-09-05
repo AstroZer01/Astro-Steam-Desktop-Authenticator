@@ -92,6 +92,7 @@ namespace Steam_Desktop_Authenticator
 
         private static Manifest _manifest { get; set; }
         private static readonly object storageLock = new object();
+        private long storageRevision;
         private const string StorageJournalFilename = ".asda-storage-transaction.json";
         private const string SettingsBackupFilename = ".manifest.settings.bak";
         private const string StorageBackupFilenamePrefix = ".manifest.";
@@ -99,6 +100,7 @@ namespace Steam_Desktop_Authenticator
         private const long MaximumManifestFileSizeBytes = 4 * 1024 * 1024;
         private const long MaximumAccountFileSizeBytes = 4 * 1024 * 1024;
         private const int MaximumAuthenticatorSecretTextLength = 4096;
+        private const int ExpectedAuthenticatorSecretBytes = 20;
         private const int MaximumAuthenticatorSecretBytes = 64;
         private const int MaximumDeviceIdLength = 256;
         private const int MaximumAccountNameLength = 256;
@@ -108,6 +110,16 @@ namespace Steam_Desktop_Authenticator
             MaxDepth = 32,
             DateParseHandling = DateParseHandling.None
         };
+
+        [JsonIgnore]
+        public long StorageRevision
+        {
+            get
+            {
+                lock (storageLock)
+                    return storageRevision;
+            }
+        }
 
         public sealed class UnmanagedMaFileCandidate
         {
@@ -941,10 +953,17 @@ namespace Steam_Desktop_Authenticator
             return matchingEntries.Count == 1 ? matchingEntries[0] : null;
         }
 
-        public StorageResult SaveAccount(SteamGuardAccount account, bool encrypt, string passKey = null)
+        public StorageResult SaveAccount(
+            SteamGuardAccount account,
+            bool encrypt,
+            string passKey = null,
+            long? expectedStorageRevision = null,
+            bool allowCreate = true)
         {
             lock (storageLock)
             {
+                if (expectedStorageRevision.HasValue && expectedStorageRevision.Value != storageRevision)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The account data changed while the session was being refreshed.");
                 if (account == null || account.Session == null || account.Session.SteamID == 0)
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account data is incomplete and could not be saved.");
                 if (encrypt && String.IsNullOrEmpty(passKey))
@@ -974,6 +993,8 @@ namespace Steam_Desktop_Authenticator
 
                 Manifest stagedManifest = CloneForStorage();
                 ManifestEntry previousEntry = stagedManifest.Entries.FirstOrDefault(entry => entry.SteamID == account.Session.SteamID);
+                if (previousEntry == null && !allowCreate)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The account is no longer managed by this authenticator.");
                 string filename = account.Session.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
                 ManifestEntry newEntry = new ManifestEntry()
                 {
@@ -1116,6 +1137,7 @@ namespace Steam_Desktop_Authenticator
         {
             Entries = source.Entries;
             Encrypted = source.Encrypted;
+            storageRevision++;
         }
 
         private void CopySettingsInto(Manifest destination)
@@ -1531,7 +1553,7 @@ namespace Steam_Desktop_Authenticator
             try
             {
                 byte[] decoded = Convert.FromBase64String(value);
-                return decoded.Length > 0 && decoded.Length <= MaximumAuthenticatorSecretBytes;
+                return decoded.Length == ExpectedAuthenticatorSecretBytes;
             }
             catch (FormatException)
             {

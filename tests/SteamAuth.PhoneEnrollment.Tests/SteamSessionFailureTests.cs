@@ -1,5 +1,6 @@
 using Steam_Desktop_Authenticator;
 using System;
+using System.Net;
 using System.Reflection;
 using Xunit;
 
@@ -93,6 +94,31 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void MainForm_OnlyRetriesTransportUnauthorizedAsAccessTokenFailure()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("IsRecoverableAccessTokenFailure", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            Exception unauthorized = new SteamWebRequestException(
+                "Steam returned HTTP 401.",
+                HttpStatusCode.Unauthorized,
+                new WebHeaderCollection());
+            Exception wrappedUnauthorized = new SteamSessionException(
+                SteamSessionFailureKind.InvalidSession,
+                "Steam rejected the saved account session.",
+                0,
+                unauthorized);
+            Exception forbidden = new SteamWebRequestException(
+                "Steam returned HTTP 403.",
+                HttpStatusCode.Forbidden,
+                new WebHeaderCollection());
+
+            Assert.True((bool)method.Invoke(null, new object[] { unauthorized }));
+            Assert.True((bool)method.Invoke(null, new object[] { wrappedUnauthorized }));
+            Assert.False((bool)method.Invoke(null, new object[] { forbidden }));
+        }
+
+        [Fact]
         public void MainForm_RejectsAccountObjectsFromEarlierReload()
         {
             MethodInfo method = typeof(MainForm).GetMethod("IsCurrentAccountGeneration", BindingFlags.Static | BindingFlags.NonPublic);
@@ -125,6 +151,31 @@ namespace SteamAuth.PhoneEnrollment.Tests
             object resolved = method.Invoke(null, new object[] { new[] { currentAccount }, 76561198000000001UL });
             Assert.Same(currentAccount, resolved);
             Assert.Null(method.Invoke(null, new object[] { new[] { currentAccount }, 76561198000000002UL }));
+        }
+
+        [Fact]
+        public void MainForm_RejectsStaleSessionAtPersistenceBoundary()
+        {
+            MethodInfo method = typeof(MainForm).GetMethod("CanPersistAccountGeneration", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+
+            SessionData currentSession = new SessionData { SteamID = 76561198000000001 };
+            SteamGuardAccount currentAccount = new SteamGuardAccount
+            {
+                AccountName = "current",
+                Session = currentSession
+            };
+            SteamGuardAccount replacementAccount = new SteamGuardAccount
+            {
+                AccountName = "replacement",
+                Session = new SessionData { SteamID = currentSession.SteamID }
+            };
+            SessionData replacedSession = new SessionData { SteamID = currentSession.SteamID };
+
+            Assert.True((bool)method.Invoke(null, new object[] { currentAccount, currentSession, new[] { currentAccount } }));
+            Assert.False((bool)method.Invoke(null, new object[] { currentAccount, currentSession, new[] { replacementAccount } }));
+            currentAccount.Session = replacedSession;
+            Assert.False((bool)method.Invoke(null, new object[] { currentAccount, currentSession, new[] { currentAccount } }));
         }
     }
 }
