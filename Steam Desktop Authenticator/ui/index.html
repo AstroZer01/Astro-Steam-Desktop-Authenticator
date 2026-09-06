@@ -505,7 +505,8 @@
     let currentAccExpired = false;
     function updateToken(token) { 
         let el = document.getElementById('login-token-text');
-        if (el.innerText !== token) el.innerText = token;
+        const displayToken = typeof token === 'string' && token.length > 0 ? token : '-----';
+        if (el.innerText !== displayToken) el.innerText = displayToken;
     }
     function updateCurrentAccount(accName, sessionExpired = false, steamId = "") {
         const selectionChanged = currentAccSteamId !== (steamId || "") || currentAccExpired !== !!sessionExpired;
@@ -525,6 +526,7 @@
             if (loginSelect && loginSelect.value !== 'all' && hasOption(loginSelect)) loginSelect.value = currentAccSteamId;
         }
         renderLoginActions();
+        updateQrLoginButton();
         if (selectionChanged && currentAccExpired) {
             window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: 'all' });
             window.chrome.webview.postMessage({ action: 'load_login_actions' });
@@ -552,12 +554,17 @@
 
     let allAccs = [];
     function updateAccountList(accounts) {
-        allAccs = accounts;
+        allAccs = (Array.isArray(accounts) ? accounts : []).slice().sort((left, right) => {
+            const leftExpired = Boolean(left && (left.sessionExpired || left.needsRenewal));
+            const rightExpired = Boolean(right && (right.sessionExpired || right.needsRenewal));
+            if (leftExpired !== rightExpired) return leftExpired ? -1 : 1;
+            return String(left && left.name || '').localeCompare(String(right && right.name || ''), undefined, { sensitivity: 'base' });
+        });
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         
-        const usableAccounts = accounts.filter(account =>
+        const usableAccounts = allAccs.filter(account =>
             !account.sessionExpired && !account.needsRenewal && account.steamId);
-        let hasAccounts = accounts.length > 0;
+        let hasAccounts = allAccs.length > 0;
         let btnCopy = document.getElementById('btn-copy');
         
         let disabledStyle = "bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm transition-colors";
