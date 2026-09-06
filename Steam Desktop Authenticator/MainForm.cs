@@ -2993,6 +2993,32 @@ namespace Steam_Desktop_Authenticator
             });
         }
 
+        private async Task RefreshLoginAccountFromWebAsync(ulong steamId)
+        {
+            try
+            {
+                SteamGuardAccount account = allAccounts?.FirstOrDefault(item => item?.Session?.SteamID == steamId);
+                if (account == null)
+                    return;
+
+                await PromptRefreshLoginAsync(account);
+                loadAccountsList(steamId);
+            }
+            catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+            {
+                // The form is closing; cancellation is expected.
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Session renewal", ex, "The account session renewal command failed.");
+                AstroMessageBox.Show(
+                    "The account session could not be renewed. The existing account data was kept. Try again or restart Astro SDA.",
+                    "Session renewal",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
         /// <summary>
         /// Load UI with the current account info, this is run every second
         /// </summary>
@@ -4159,12 +4185,12 @@ namespace Steam_Desktop_Authenticator
                     !ulong.TryParse(steamIdText, NumberStyles.None, CultureInfo.InvariantCulture, out ulong steamId) ||
                     steamId == 0)
                     return;
-                SteamGuardAccount account = allAccounts?.FirstOrDefault(item => item.Session?.SteamID == steamId);
-                if (account != null)
-                {
-                    await PromptRefreshLoginAsync(account);
-                    loadAccountsList(steamId);
-                }
+                // Do not open a modal WebView form while handling the current
+                // WebView2 message callback. The nested callback can prevent the
+                // secondary WebView2 instance from completing navigation and leave
+                // the refresh dialog on its loading screen. Queue the modal work
+                // after this callback has returned, like the other form actions.
+                TryBeginInvoke(() => _ = RefreshLoginAccountFromWebAsync(steamId));
             }
             else if (action == "accept_trade" || action == "reject_trade")
             {

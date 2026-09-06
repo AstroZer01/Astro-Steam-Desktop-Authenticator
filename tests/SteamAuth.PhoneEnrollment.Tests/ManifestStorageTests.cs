@@ -45,6 +45,47 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void GetAllAccounts_RetainsAccountWhenRefreshTokenIsExpiredOrRevoked()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = CreateAccount();
+            account.Session.RefreshToken = "revoked-refresh-token";
+
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            SteamGuardAccount reloadedAccount = Assert.Single(reloaded.GetAllAccounts());
+
+            Assert.Equal(account.Session.SteamID, reloadedAccount.Session.SteamID);
+            Assert.Equal("revoked-refresh-token", reloadedAccount.Session.RefreshToken);
+            Assert.True(reloadedAccount.Session.IsRefreshTokenExpired());
+        }
+
+        [Fact]
+        public void SetSessionNeedsRenewal_RetainsManifestEntryAndMaFile()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = CreateAccount();
+
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string maFilename = Manifest.GetCanonicalMaFileFilename(account.Session.SteamID);
+            string maFilePath = Path.Combine(maDirectory, maFilename);
+
+            StorageResult renewalResult = manifest.SetSessionNeedsRenewal(account.Session.SteamID, true);
+
+            Assert.True(renewalResult.Succeeded);
+            Assert.Contains(manifest.Entries, entry => entry.SteamID == account.Session.SteamID);
+            Assert.Equal(maFilename, Assert.Single(manifest.Entries, entry => entry.SteamID == account.Session.SteamID).Filename);
+            Assert.True(File.Exists(maFilePath));
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.True(reloaded.IsSessionMarkedForRenewal(account.Session.SteamID));
+            Assert.Equal(account.Session.SteamID, Assert.Single(reloaded.GetAllAccounts()).Session.SteamID);
+            Assert.True(File.Exists(maFilePath));
+        }
+
+        [Fact]
         public void SaveAccount_LeavesOnlyTheCanonicalFilename()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
