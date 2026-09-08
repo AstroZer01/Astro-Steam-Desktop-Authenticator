@@ -3407,14 +3407,13 @@ namespace Steam_Desktop_Authenticator
             if (manifest == null)
                 return;
 
-            StorageResult saveResult = manifest.SaveSettingsWithResult(staged => staged.CheckForUpdates = false);
+            StorageResult saveResult = updatePreferenceRevision.DisableStartupUpdateChecks(manifest);
             if (!saveResult.Succeeded)
             {
                 DiagnosticErrorLogger.Log("Application update settings", saveResult.Exception, "The automatic update preference could not be saved.");
                 return;
             }
 
-            updatePreferenceRevision.RecordSuccessfulDisable();
             _ = ExecuteScriptSafelyAsync("setCheckForUpdates(false);", "Update setting UI");
         }
 
@@ -3928,20 +3927,17 @@ namespace Steam_Desktop_Authenticator
                 if (proxyConfiguration.Enabled)
                     proxySaveSource.Token.ThrowIfCancellationRequested();
 
-                StorageResult saveResult = manifest.SaveSettingsWithResult(staged =>
+                StorageResult saveResult = updatePreferenceRevision.SaveSettingsWithResult(
+                    manifest,
+                    checkForUpdates,
+                    updatePreferenceRevisionAtSaveStart,
+                    staged =>
                 {
                     staged.TradeConfirmationCustomIntervalEnabled = tradeConfirmationCustomIntervalEnabled;
                     staged.TradeConfirmationCheckInterval = tradeConfirmationCheckInterval;
                     staged.AutoConfirmMarketTransactions = autoConfirmMarket;
                     staged.AutoConfirmTrades = autoConfirmTrades;
                     staged.MinimizeToTray = minimizeToTray;
-                    // An activation-triggered disable can complete while proxy validation
-                    // is awaiting. Preserve the current manifest value in that case so a
-                    // stale WebView payload cannot overwrite the explicit updater choice.
-                    staged.CheckForUpdates = updatePreferenceRevision.MergeCheckForUpdatesPreference(
-                        checkForUpdates,
-                        staged.CheckForUpdates,
-                        updatePreferenceRevisionAtSaveStart);
                     staged.DiagnosticErrorLoggingEnabled = diagnosticLogging;
                     staged.LoginActionMonitoringEnabled = loginMonitoring;
                     staged.LoginActionMode = newLoginActionMode;

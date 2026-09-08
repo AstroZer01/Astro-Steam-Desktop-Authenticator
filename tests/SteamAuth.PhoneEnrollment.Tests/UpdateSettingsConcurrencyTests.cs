@@ -1,13 +1,24 @@
 using Steam_Desktop_Authenticator;
 using System;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
 namespace SteamAuth.PhoneEnrollment.Tests
 {
-    public sealed class UpdateSettingsConcurrencyTests
+    [Collection("Manifest storage")]
+    public sealed class UpdateSettingsConcurrencyTests : IDisposable
     {
+        private readonly string dataDirectory = Path.Combine(Path.GetTempPath(), "asda-update-settings-tests", Guid.NewGuid().ToString("N"));
+        private readonly string previousDataDirectory;
+
+        public UpdateSettingsConcurrencyTests()
+        {
+            previousDataDirectory = Environment.GetEnvironmentVariable("ASDA_DATA_DIRECTORY");
+            Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", dataDirectory);
+        }
+
         [Fact]
         public void ActivationAndStartupShareOneInitialUpdateCheckRegistration()
         {
@@ -51,34 +62,43 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [Fact]
         public async Task SettingsSavePausedDuringProxyValidation_PreservesUpdaterDisable()
         {
-            bool persistedCheckForUpdates = true;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
             UpdatePreferenceRevisionTracker tracker = new UpdatePreferenceRevisionTracker();
             TaskCompletionSource<bool> proxyValidationStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             TaskCompletionSource<bool> releaseSettingsSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             long saveStartRevision = tracker.CaptureForSettingsSave();
 
-            Task<bool> settingsSave = CompleteSettingsSaveAfterProxyValidationAsync();
+            Task<StorageResult> settingsSave = CompleteSettingsSaveAfterProxyValidationAsync();
             await proxyValidationStarted.Task;
 
-            Volatile.Write(ref persistedCheckForUpdates, false);
-            tracker.RecordSuccessfulDisable();
+            StorageResult disableResult = tracker.DisableStartupUpdateChecks(manifest);
+            Assert.True(disableResult.Succeeded, disableResult.UserMessage);
+            Assert.False(manifest.CheckForUpdates);
             releaseSettingsSave.SetResult(true);
 
-            Assert.False(await settingsSave);
-            Assert.False(Volatile.Read(ref persistedCheckForUpdates));
+            StorageResult settingsResult = await settingsSave;
+            Assert.True(settingsResult.Succeeded, settingsResult.UserMessage);
+            Assert.False(manifest.CheckForUpdates);
+            Assert.False(Manifest.GetManifest(true).CheckForUpdates);
 
-            async Task<bool> CompleteSettingsSaveAfterProxyValidationAsync()
+            async Task<StorageResult> CompleteSettingsSaveAfterProxyValidationAsync()
             {
                 proxyValidationStarted.SetResult(true);
                 await releaseSettingsSave.Task;
 
-                bool mergedValue = tracker.MergeCheckForUpdatesPreference(
+                return tracker.SaveSettingsWithResult(
+                    manifest,
                     requestedValue: true,
-                    currentValue: Volatile.Read(ref persistedCheckForUpdates),
-                    saveStartRevision);
-                Volatile.Write(ref persistedCheckForUpdates, mergedValue);
-                return mergedValue;
+                    saveStartRevision,
+                    _ => { });
             }
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);
+            if (Directory.Exists(dataDirectory))
+                Directory.Delete(dataDirectory, true);
         }
     }
 }
