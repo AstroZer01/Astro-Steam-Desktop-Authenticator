@@ -94,7 +94,7 @@ namespace Steam_Desktop_Authenticator
         private bool allowExitAfterSettingsSave;
         private bool exitAfterSettingsSaveRequested;
         private bool settingsSaveInProgress;
-        private long updatePreferenceRevision;
+        private readonly UpdatePreferenceRevisionTracker updatePreferenceRevision = new UpdatePreferenceRevisionTracker();
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -819,7 +819,7 @@ namespace Steam_Desktop_Authenticator
             BringToFront();
 
             if (checkForUpdates)
-                _ = CheckForUpdatesAsync(true);
+                StartUpdateCheckFromActivation();
         }
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
@@ -3243,11 +3243,33 @@ namespace Steam_Desktop_Authenticator
 
         private void StartStartupUpdateCheck()
         {
-            if (startupUpdateCheckStarted || manifest == null)
+            if (manifest == null)
                 return;
 
-            startupUpdateCheckStarted = true;
+            TryStartStartupUpdateCheck(ref startupUpdateCheckStarted, () => _ = CheckForUpdatesAsync(true));
+        }
+
+        private void StartUpdateCheckFromActivation()
+        {
+            if (manifest == null)
+                return;
+
+            if (TryStartStartupUpdateCheck(ref startupUpdateCheckStarted, () => _ = CheckForUpdatesAsync(true)))
+                return;
+
             _ = CheckForUpdatesAsync(true);
+        }
+
+        internal static bool TryStartStartupUpdateCheck(ref bool startupUpdateCheckStarted, Action startCheck)
+        {
+            if (startCheck == null)
+                throw new ArgumentNullException(nameof(startCheck));
+            if (startupUpdateCheckStarted)
+                return false;
+
+            startupUpdateCheckStarted = true;
+            startCheck();
+            return true;
         }
 
         // Logic for version checking
@@ -3392,7 +3414,7 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            Interlocked.Increment(ref updatePreferenceRevision);
+            updatePreferenceRevision.RecordSuccessfulDisable();
             _ = ExecuteScriptSafelyAsync("setCheckForUpdates(false);", "Update setting UI");
         }
 
@@ -3801,7 +3823,7 @@ namespace Steam_Desktop_Authenticator
                 return;
 
             settingsSaveInProgress = true;
-            long updatePreferenceRevisionAtSaveStart = Volatile.Read(ref updatePreferenceRevision);
+            long updatePreferenceRevisionAtSaveStart = updatePreferenceRevision.CaptureForSettingsSave();
             string saveContext = (string)payload["saveContext"] ?? String.Empty;
             CancellationTokenSource proxySaveSource = null;
             try
@@ -3916,11 +3938,10 @@ namespace Steam_Desktop_Authenticator
                     // An activation-triggered disable can complete while proxy validation
                     // is awaiting. Preserve the current manifest value in that case so a
                     // stale WebView payload cannot overwrite the explicit updater choice.
-                    staged.CheckForUpdates = MergeCheckForUpdatesPreference(
+                    staged.CheckForUpdates = updatePreferenceRevision.MergeCheckForUpdatesPreference(
                         checkForUpdates,
                         staged.CheckForUpdates,
-                        updatePreferenceRevisionAtSaveStart,
-                        Volatile.Read(ref updatePreferenceRevision));
+                        updatePreferenceRevisionAtSaveStart);
                     staged.DiagnosticErrorLoggingEnabled = diagnosticLogging;
                     staged.LoginActionMonitoringEnabled = loginMonitoring;
                     staged.LoginActionMode = newLoginActionMode;
@@ -3973,15 +3994,6 @@ namespace Steam_Desktop_Authenticator
                 CompleteProxyOperation(proxySaveSource);
                 settingsSaveInProgress = false;
             }
-        }
-
-        internal static bool MergeCheckForUpdatesPreference(
-            bool requestedValue,
-            bool currentValue,
-            long saveStartRevision,
-            long currentRevision)
-        {
-            return saveStartRevision == currentRevision ? requestedValue : currentValue;
         }
 
         private static bool IsTrustedUpdateUrl(string value)
