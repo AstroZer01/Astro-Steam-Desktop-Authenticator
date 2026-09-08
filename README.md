@@ -22,6 +22,10 @@
 </p>
 
 <p align="center">
+  Using Astro Steam Desktop Authenticator? Give the project a ⭐ Star and Watch the repo for releases and important updates.
+</p>
+
+<p align="center">
   <img src="github-banner.jpg" alt="Astro Steam Desktop Authenticator" />
 </p>
 
@@ -40,14 +44,13 @@ All credit for the original design and implementation goes to Jessecar96 and the
 - **Proxy Support** — Use proxy when communicating with steam.
 - **Desktop notifications** — receive Windows notifications for pending trade confirmations and login requests, with navigation back to the relevant view.
 
-## Version 1.2.0 Highlights
+## Version 1.3.0 Highlights
 
-- **Phone-free Steam Guard setup** - Add an authenticator without a phone number when Steam allows it, with clear email and SMS guidance when verification is required.
-- **Smoother account setup** - Improved phone verification, recovery-code downloads, and account-management controls.
-- **More reliable Steam actions** - Better handling for login approvals, trade confirmations, session refreshes, and temporary Steam errors.
-- **Safer updates** - Portable releases preserve your existing accounts and settings when you update.
+- **Reliable session recovery** - Renew expired Steam sessions without losing the account or its maFile.
+- **Safer account storage** - Stronger import, storage, and recovery safeguards help protect account data.
+- **Smoother multi-account use** - A cleaner scrollable account list and more dependable trade confirmations and login approvals.
 
-For a complete list of changes, see the [1.2.0 release notes](https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/tag/1.2.0).
+For a complete list of changes, see the [1.3.0 release notes](https://github.com/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/tag/1.3.0).
 
 ## Build from Source on Windows
 
