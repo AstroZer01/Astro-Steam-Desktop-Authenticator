@@ -94,6 +94,7 @@ namespace Steam_Desktop_Authenticator
         private bool allowExitAfterSettingsSave;
         private bool exitAfterSettingsSaveRequested;
         private bool settingsSaveInProgress;
+        private long updatePreferenceRevision;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -3391,6 +3392,7 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
+            Interlocked.Increment(ref updatePreferenceRevision);
             _ = ExecuteScriptSafelyAsync("setCheckForUpdates(false);", "Update setting UI");
         }
 
@@ -3799,6 +3801,7 @@ namespace Steam_Desktop_Authenticator
                 return;
 
             settingsSaveInProgress = true;
+            long updatePreferenceRevisionAtSaveStart = Volatile.Read(ref updatePreferenceRevision);
             string saveContext = (string)payload["saveContext"] ?? String.Empty;
             CancellationTokenSource proxySaveSource = null;
             try
@@ -3910,7 +3913,14 @@ namespace Steam_Desktop_Authenticator
                     staged.AutoConfirmMarketTransactions = autoConfirmMarket;
                     staged.AutoConfirmTrades = autoConfirmTrades;
                     staged.MinimizeToTray = minimizeToTray;
-                    staged.CheckForUpdates = checkForUpdates;
+                    // An activation-triggered disable can complete while proxy validation
+                    // is awaiting. Preserve the current manifest value in that case so a
+                    // stale WebView payload cannot overwrite the explicit updater choice.
+                    staged.CheckForUpdates = MergeCheckForUpdatesPreference(
+                        checkForUpdates,
+                        staged.CheckForUpdates,
+                        updatePreferenceRevisionAtSaveStart,
+                        Volatile.Read(ref updatePreferenceRevision));
                     staged.DiagnosticErrorLoggingEnabled = diagnosticLogging;
                     staged.LoginActionMonitoringEnabled = loginMonitoring;
                     staged.LoginActionMode = newLoginActionMode;
@@ -3963,6 +3973,15 @@ namespace Steam_Desktop_Authenticator
                 CompleteProxyOperation(proxySaveSource);
                 settingsSaveInProgress = false;
             }
+        }
+
+        internal static bool MergeCheckForUpdatesPreference(
+            bool requestedValue,
+            bool currentValue,
+            long saveStartRevision,
+            long currentRevision)
+        {
+            return saveStartRevision == currentRevision ? requestedValue : currentValue;
         }
 
         private static bool IsTrustedUpdateUrl(string value)
