@@ -296,6 +296,19 @@
                     </div>
                     <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6">
                         <div class="flex items-start gap-3">
+                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="check-for-updates" type="checkbox"/>
+                            <div>
+                                <label class="text-on-surface" for="check-for-updates">Check for updates on launch</label>
+                                <p class="text-sm text-on-surface-variant mt-1">Looks for a newer Astro SDA release when the app starts. You can always check manually below.</p>
+                            </div>
+                        </div>
+                        <div class="pl-8 mt-2 space-y-2">
+                            <button id="btn-check-for-updates" type="button" class="w-full rounded-lg border border-primary/30 py-2 text-sm font-semibold text-primary hover:bg-primary/10 transition-colors">Check for updates</button>
+                            <p id="update-check-status" class="hidden text-sm" role="status" aria-live="polite"></p>
+                        </div>
+                    </div>
+                    <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6">
+                        <div class="flex items-start gap-3">
                             <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="diagnostic-error-logging-enabled" type="checkbox"/>
                             <div>
                                 <label class="text-on-surface" for="diagnostic-error-logging-enabled">Enable diagnostic error logging</label>
@@ -1260,7 +1273,7 @@
     // Settings Actions
     const saveBoundSettingIds = [
         'trade-confirmation-custom-interval-enabled', 'trade-confirmation-check-interval',
-        'auto-confirm-market', 'auto-confirm-trades', 'close-to-tray',
+        'auto-confirm-market', 'auto-confirm-trades', 'close-to-tray', 'check-for-updates',
         'diagnostic-error-logging-enabled', 'login-action-monitoring-enabled',
         'login-action-mode', 'login-action-auto-allow-ip-enabled',
         'login-action-auto-allow-current-device-ip', 'login-action-auto-allow-ip',
@@ -1277,6 +1290,7 @@
             autoConfirmMarket: document.getElementById('auto-confirm-market').checked,
             autoConfirmTrades: document.getElementById('auto-confirm-trades').checked,
             minimizeToTray: document.getElementById('close-to-tray').checked,
+            checkForUpdates: document.getElementById('check-for-updates').checked,
             diagnosticErrorLoggingEnabled: document.getElementById('diagnostic-error-logging-enabled').checked,
             loginActionMonitoringEnabled: document.getElementById('login-action-monitoring-enabled').checked,
             loginActionMode: document.getElementById('login-action-mode').value,
@@ -1346,6 +1360,22 @@
         status.innerText = result && result.message ? result.message : 'Proxy test failed.';
         status.className = 'text-sm ' + (result && result.succeeded ? 'text-secondary' : 'text-error');
     }
+
+    function updateCheckState(checking, message, tone) {
+        const button = document.getElementById('btn-check-for-updates');
+        const status = document.getElementById('update-check-status');
+        if (!button || !status) return;
+        button.disabled = !!checking;
+        button.innerText = checking ? 'Checking…' : 'Check for updates';
+        status.innerText = message || '';
+        status.className = 'text-sm ' + (tone === 'error' ? 'text-error' : tone === 'success' ? 'text-secondary' : 'text-on-surface-variant');
+        status.classList.toggle('hidden', !message);
+    }
+
+    document.getElementById('btn-check-for-updates').addEventListener('click', () => {
+        updateCheckState(true, 'Checking for updates…', 'info');
+        window.chrome.webview.postMessage({ action: 'check_for_updates' });
+    });
 
     const proxyPassword = document.getElementById('proxy-pass');
     const clearProxyPassword = document.getElementById('proxy-clear-password');
@@ -1436,6 +1466,7 @@
         document.getElementById('auto-confirm-market').checked = settings.autoConfirmMarket;
         document.getElementById('auto-confirm-trades').checked = settings.autoConfirmTrades;
         document.getElementById('close-to-tray').checked = settings.minimizeToTray;
+        document.getElementById('check-for-updates').checked = settings.checkForUpdates !== false;
         document.getElementById('diagnostic-error-logging-enabled').checked = !!settings.diagnosticErrorLoggingEnabled;
         document.getElementById('login-action-monitoring-enabled').checked = settings.loginActionMonitoringEnabled;
         document.getElementById('login-action-mode').value = settings.loginActionMode || 'manual';

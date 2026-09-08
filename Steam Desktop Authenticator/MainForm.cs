@@ -88,6 +88,7 @@ namespace Steam_Desktop_Authenticator
         private bool backgroundServicesStarted;
         private bool startupAccountMaintenanceCompleted;
         private bool startupAccountMaintenanceFinished;
+        private bool startupUpdateCheckStarted;
         private bool settingsDirty;
         private bool explicitExitRequested;
         private bool allowExitAfterSettingsSave;
@@ -577,6 +578,8 @@ namespace Steam_Desktop_Authenticator
             if (backgroundServicesEligible)
                 StartBackgroundServicesAfterUiReady();
 
+            StartStartupUpdateCheck();
+
             if (startSilent)
             {
                 this.WindowState = FormWindowState.Minimized;
@@ -797,14 +800,14 @@ namespace Steam_Desktop_Authenticator
         {
             if (m.Msg == Program.RestoreExistingInstanceMessage)
             {
-                TryBeginInvoke(RestoreWindowFromActivation);
+                TryBeginInvoke(() => RestoreWindowFromActivation(true));
                 return;
             }
 
             base.WndProc(ref m);
         }
 
-        private void RestoreWindowFromActivation()
+        private void RestoreWindowFromActivation(bool checkForUpdates = false)
         {
             if (IsDisposed)
                 return;
@@ -813,6 +816,9 @@ namespace Steam_Desktop_Authenticator
             WindowState = FormWindowState.Normal;
             Activate();
             BringToFront();
+
+            if (checkForUpdates)
+                _ = CheckForUpdatesAsync(true);
         }
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
@@ -1121,14 +1127,7 @@ namespace Steam_Desktop_Authenticator
 
         private void labelUpdate_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
         {
-            if (newVersion == null || currentVersion == null)
-            {
-                checkForUpdates();
-            }
-            else
-            {
-                compareVersions();
-            }
+            _ = CheckForUpdatesAsync(false);
         }
 
         private void btnCopy_Click(object sender, EventArgs e)
@@ -3239,33 +3238,49 @@ namespace Steam_Desktop_Authenticator
             timerSteamGuard_Tick(this, EventArgs.Empty);
             loadSettings();
             ConfigureLoginActionsMonitor();
-            checkForUpdates();
+        }
+
+        private void StartStartupUpdateCheck()
+        {
+            if (startupUpdateCheckStarted || manifest == null)
+                return;
+
+            startupUpdateCheckStarted = true;
+            _ = CheckForUpdatesAsync(true);
         }
 
         // Logic for version checking
-        private Version newVersion = null;
-        private Version currentVersion = null;
         private static readonly HttpClient updateClient = new HttpClient();
         private const int MaximumUpdateResponseBytes = 1024 * 1024;
         private static readonly TimeSpan UpdateRequestTimeout = TimeSpan.FromSeconds(20);
-        private string updateUrl = null;
-        private bool startupUpdateCheck = true;
         private bool isCheckingForUpdates = false;
+        private string updateCheckStatusMessage = String.Empty;
+        private string updateCheckStatusTone = "info";
 
-        private async void checkForUpdates()
+        private async Task CheckForUpdatesAsync(bool isStartupCheck)
         {
-            if (isCheckingForUpdates) return;
+            if (manifest == null)
+                return;
+
+            if (isCheckingForUpdates)
+            {
+                if (!isStartupCheck)
+                    await PublishUpdateCheckStateAsync(true, "A check for updates is already in progress.", "info");
+                return;
+            }
+
             CancellationToken cancellationToken = lifetimeCancellationSource.Token;
             if (cancellationToken.IsCancellationRequested)
                 return;
-            
-            if (startupUpdateCheck && !Manifest.GetManifest().CheckForUpdates)
+
+            if (isStartupCheck && !manifest.CheckForUpdates)
             {
-                startupUpdateCheck = false;
+                await PublishUpdateCheckStateAsync(false, "Automatic update checks are disabled. You can check manually anytime.", "info");
                 return;
             }
 
             isCheckingForUpdates = true;
+            await PublishUpdateCheckStateAsync(true, "Checking for updates...", "info");
 
             try
             {
@@ -3307,10 +3322,8 @@ namespace Steam_Desktop_Authenticator
                         if (String.IsNullOrWhiteSpace(downloadUrl))
                             throw new InvalidDataException("The update service returned no trusted download.");
 
-                        newVersion = parsedVersion;
-                        currentVersion = new Version(Application.ProductVersion);
-                        updateUrl = downloadUrl;
-                        compareVersions();
+                        Version installedVersion = new Version(Application.ProductVersion);
+                        await ShowUpdateResultAsync(parsedVersion, installedVersion, downloadUrl, isStartupCheck);
                     }
                 }
             }
@@ -3318,70 +3331,97 @@ namespace Steam_Desktop_Authenticator
             {
                 // The form is closing; cancellation is expected.
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                if (!startupUpdateCheck)
-                {
-                    AstroMessageBox.Show("Failed to check for updates.");
-                }
+                DiagnosticErrorLogger.Log("Application update check", ex, "The update service request failed.");
+                await PublishUpdateCheckStateAsync(false, "Could not check for updates. Try again.", "error");
+                if (!isStartupCheck && !lifetimeCancellationSource.IsCancellationRequested)
+                    AstroMessageBox.Show("Failed to check for updates.", "Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             finally
             {
                 isCheckingForUpdates = false;
-                startupUpdateCheck = false; // Set when it's done checking on startup
             }
         }
 
-        private void compareVersions()
+        private async Task ShowUpdateResultAsync(Version latestVersion, Version installedVersion, string downloadUrl, bool isStartupCheck)
         {
-            if (newVersion > currentVersion)
+            if (latestVersion > installedVersion)
             {
                 labelUpdate.Text = "Download new version"; // Show the user a new version is available if they press no
-                
-                string checkboxText = startupUpdateCheck ? "Don't check for updates on launch" : null;
+
+                await PublishUpdateCheckStateAsync(false, String.Format("Version {0} is available.", latestVersion), "success");
+                string checkboxText = isStartupCheck ? "Don't check for updates on launch" : null;
                 bool isChecked = false;
-                
+
                 DialogResult updateDialog;
                 if (checkboxText != null)
                 {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out isChecked);
+                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, latestVersion.ToString()), "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out isChecked);
                 }
                 else
                 {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
+                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, latestVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
                 }
 
-                if (startupUpdateCheck && isChecked)
-                {
-                    Manifest.GetManifest().CheckForUpdates = false;
-                    Manifest.GetManifest().Save();
-                }
+                if (isStartupCheck && isChecked)
+                    DisableStartupUpdateChecks();
 
                 if (updateDialog == DialogResult.Yes)
-                {
-                    try
-                    {
-                        using (Process process = Process.Start(new ProcessStartInfo(updateUrl) { UseShellExecute = true })
-                            ?? throw new InvalidOperationException("Windows did not create the update process."))
-                        {
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        DiagnosticErrorLogger.Log("Application update", ex, "The trusted update page could not be opened.");
-                        AstroMessageBox.Show("The update page could not be opened. Visit the project release page to download the update.", "Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-                }
+                    OpenUpdateUrl(downloadUrl);
             }
             else
             {
-                if (!startupUpdateCheck)
-                {
-                    AstroMessageBox.Show(String.Format("You are using the latest version: {0}", Application.ProductVersion));
-                }
+                string latestMessage = String.Format("You are using the latest version: {0}", Application.ProductVersion);
+                await PublishUpdateCheckStateAsync(false, latestMessage, "success");
+                if (!isStartupCheck)
+                    AstroMessageBox.Show(latestMessage, "Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private void DisableStartupUpdateChecks()
+        {
+            if (manifest == null)
+                return;
+
+            StorageResult saveResult = manifest.SaveSettingsWithResult(staged => staged.CheckForUpdates = false);
+            if (!saveResult.Succeeded)
+            {
+                DiagnosticErrorLogger.Log("Application update settings", saveResult.Exception, "The automatic update preference could not be saved.");
+                return;
             }
 
-            newVersion = null; // Check the api again next time they check for updates
+            SendSettingsToWebView();
+        }
+
+        private void OpenUpdateUrl(string downloadUrl)
+        {
+            try
+            {
+                using (Process process = Process.Start(new ProcessStartInfo(downloadUrl) { UseShellExecute = true })
+                    ?? throw new InvalidOperationException("Windows did not create the update process."))
+                {
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Application update", ex, "The trusted update page could not be opened.");
+                AstroMessageBox.Show("The update page could not be opened. Visit the project release page to download the update.", "Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async Task PublishUpdateCheckStateAsync(bool checking, string message, string tone)
+        {
+            updateCheckStatusMessage = message ?? String.Empty;
+            updateCheckStatusTone = tone ?? "info";
+
+            if (GetCoreWebView2IfAvailable() == null)
+                return;
+
+            string jsMessage = JsonConvert.SerializeObject(updateCheckStatusMessage);
+            string jsTone = JsonConvert.SerializeObject(updateCheckStatusTone);
+            string jsChecking = checking.ToString().ToLowerInvariant();
+            await ExecuteScriptSafelyAsync($"updateCheckState({jsChecking}, {jsMessage}, {jsTone});", "Update status UI");
         }
 
 
@@ -3613,6 +3653,7 @@ namespace Steam_Desktop_Authenticator
                 // Set autostart checkbox
                 bool isAutoStart = WindowsStartup.IsEnabled();
                 _ = ExecuteScriptSafelyAsync($"setAutoStart({isAutoStart.ToString().ToLowerInvariant()});", "Startup setting UI");
+                _ = PublishUpdateCheckStateAsync(isCheckingForUpdates, updateCheckStatusMessage, updateCheckStatusTone);
 
                 StartBackgroundServicesAfterUiReady();
             };
@@ -3634,6 +3675,7 @@ namespace Steam_Desktop_Authenticator
             settings["autoConfirmMarket"] = manifest.AutoConfirmMarketTransactions;
             settings["autoConfirmTrades"] = manifest.AutoConfirmTrades;
             settings["minimizeToTray"] = manifest.MinimizeToTray;
+            settings["checkForUpdates"] = manifest.CheckForUpdates;
             settings["diagnosticErrorLoggingEnabled"] = manifest.DiagnosticErrorLoggingEnabled;
             settings["loginActionMonitoringEnabled"] = manifest.LoginActionMonitoringEnabled;
             settings["loginActionMode"] = manifest.LoginActionMode;
@@ -3854,6 +3896,7 @@ namespace Steam_Desktop_Authenticator
                 bool autoConfirmMarket = (bool?)payload["autoConfirmMarket"] ?? false;
                 bool autoConfirmTrades = (bool?)payload["autoConfirmTrades"] ?? false;
                 bool minimizeToTray = (bool?)payload["minimizeToTray"] ?? false;
+                bool checkForUpdates = (bool?)payload["checkForUpdates"] ?? manifest.CheckForUpdates;
                 bool diagnosticLogging = (bool?)payload["diagnosticErrorLoggingEnabled"] ?? false;
                 bool loginMonitoring = ((bool?)payload["loginActionMonitoringEnabled"] ?? false) || newLoginActionMode != LoginActionModes.Manual;
 
@@ -3867,6 +3910,7 @@ namespace Steam_Desktop_Authenticator
                     staged.AutoConfirmMarketTransactions = autoConfirmMarket;
                     staged.AutoConfirmTrades = autoConfirmTrades;
                     staged.MinimizeToTray = minimizeToTray;
+                    staged.CheckForUpdates = checkForUpdates;
                     staged.DiagnosticErrorLoggingEnabled = diagnosticLogging;
                     staged.LoginActionMonitoringEnabled = loginMonitoring;
                     staged.LoginActionMode = newLoginActionMode;
@@ -3980,7 +4024,7 @@ namespace Steam_Desktop_Authenticator
             {
                 "proxyEnabled", "loginActionAutoAllowIpEnabled", "loginActionAutoAllowCurrentDeviceIp",
                 "tradeConfirmationCustomIntervalEnabled", "autoConfirmMarket", "autoConfirmTrades",
-                "minimizeToTray", "diagnosticErrorLoggingEnabled", "loginActionMonitoringEnabled"
+                "minimizeToTray", "checkForUpdates", "diagnosticErrorLoggingEnabled", "loginActionMonitoringEnabled"
             };
             foreach (string property in booleanProperties)
             {
@@ -4094,6 +4138,10 @@ namespace Steam_Desktop_Authenticator
                     AstroMessageBox.Show("The requested account removal is invalid. Refresh the account list and try again.", "Remove Account", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     _ = ExecuteScriptSafelyAsync("hideSpinner('remove-account');", "Managed account removal");
                 }
+            }
+            else if (action == "check_for_updates")
+            {
+                _ = CheckForUpdatesAsync(false);
             }
             else if (action == "load_settings")
             {
