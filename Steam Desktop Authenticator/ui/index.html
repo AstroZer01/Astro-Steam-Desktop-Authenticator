@@ -1552,6 +1552,11 @@
         if (cb) cb.checked = enabled;
     }
 
+    function setCheckForUpdates(enabled) {
+        let cb = document.getElementById('check-for-updates');
+        if (cb) cb.checked = enabled;
+    }
+
     document.getElementById('auto-start-windows').addEventListener('change', (e) => {
         window.chrome.webview.postMessage({ action: 'toggle_autostart', enabled: e.target.checked });
     });

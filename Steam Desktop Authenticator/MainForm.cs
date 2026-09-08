@@ -3391,7 +3391,7 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            SendSettingsToWebView();
+            _ = ExecuteScriptSafelyAsync("setCheckForUpdates(false);", "Update setting UI");
         }
 
         private void OpenUpdateUrl(string downloadUrl)
