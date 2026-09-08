@@ -3822,7 +3822,7 @@ namespace Steam_Desktop_Authenticator
                 return;
 
             settingsSaveInProgress = true;
-            long updatePreferenceRevisionAtSaveStart = updatePreferenceRevision.CaptureForSettingsSave();
+            UpdatePreferenceRevisionTracker.SettingsSaveOperation updatePreferenceSave = updatePreferenceRevision.BeginSettingsSave();
             string saveContext = (string)payload["saveContext"] ?? String.Empty;
             CancellationTokenSource proxySaveSource = null;
             try
@@ -3927,10 +3927,9 @@ namespace Steam_Desktop_Authenticator
                 if (proxyConfiguration.Enabled)
                     proxySaveSource.Token.ThrowIfCancellationRequested();
 
-                StorageResult saveResult = updatePreferenceRevision.SaveSettingsWithResult(
+                StorageResult saveResult = updatePreferenceSave.SaveSettingsWithResult(
                     manifest,
                     checkForUpdates,
-                    updatePreferenceRevisionAtSaveStart,
                     staged =>
                 {
                     staged.TradeConfirmationCustomIntervalEnabled = tradeConfirmationCustomIntervalEnabled;

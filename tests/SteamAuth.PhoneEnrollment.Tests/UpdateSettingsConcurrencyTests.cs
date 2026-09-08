@@ -1,7 +1,6 @@
 using Steam_Desktop_Authenticator;
 using System;
 using System.IO;
-using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -35,13 +34,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
         public void MergeCheckForUpdatesPreference_PreservesUpdaterDisableAfterActivationRevisionChanges()
         {
             UpdatePreferenceRevisionTracker tracker = new UpdatePreferenceRevisionTracker();
-            long saveStartRevision = tracker.CaptureForSettingsSave();
+            UpdatePreferenceRevisionTracker.SettingsSaveOperation settingsSave = tracker.BeginSettingsSave();
             tracker.RecordSuccessfulDisable();
 
-            bool mergedValue = tracker.MergeCheckForUpdatesPreference(
+            bool mergedValue = settingsSave.MergeCheckForUpdatesPreference(
                 requestedValue: true,
-                currentValue: false,
-                saveStartRevision);
+                currentValue: false);
 
             Assert.False(mergedValue);
         }
@@ -50,11 +48,11 @@ namespace SteamAuth.PhoneEnrollment.Tests
         public void MergeCheckForUpdatesPreference_AllowsLaterSettingsSaveWhenRevisionIsUnchanged()
         {
             UpdatePreferenceRevisionTracker tracker = new UpdatePreferenceRevisionTracker();
+            UpdatePreferenceRevisionTracker.SettingsSaveOperation settingsSave = tracker.BeginSettingsSave();
 
-            bool mergedValue = tracker.MergeCheckForUpdatesPreference(
+            bool mergedValue = settingsSave.MergeCheckForUpdatesPreference(
                 requestedValue: true,
-                currentValue: false,
-                tracker.CaptureForSettingsSave());
+                currentValue: false);
 
             Assert.True(mergedValue);
         }
@@ -64,9 +62,9 @@ namespace SteamAuth.PhoneEnrollment.Tests
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
             UpdatePreferenceRevisionTracker tracker = new UpdatePreferenceRevisionTracker();
+            UpdatePreferenceRevisionTracker.SettingsSaveOperation settingsSaveOperation = tracker.BeginSettingsSave();
             TaskCompletionSource<bool> proxyValidationStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             TaskCompletionSource<bool> releaseSettingsSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            long saveStartRevision = tracker.CaptureForSettingsSave();
 
             Task<StorageResult> settingsSave = CompleteSettingsSaveAfterProxyValidationAsync();
             await proxyValidationStarted.Task;
@@ -86,10 +84,9 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 proxyValidationStarted.SetResult(true);
                 await releaseSettingsSave.Task;
 
-                return tracker.SaveSettingsWithResult(
+                return settingsSaveOperation.SaveSettingsWithResult(
                     manifest,
                     requestedValue: true,
-                    saveStartRevision,
                     _ => { });
             }
         }

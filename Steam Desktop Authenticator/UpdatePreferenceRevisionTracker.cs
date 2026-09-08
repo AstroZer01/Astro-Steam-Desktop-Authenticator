@@ -7,9 +7,9 @@ namespace Steam_Desktop_Authenticator
     {
         private long revision;
 
-        internal long CaptureForSettingsSave()
+        internal SettingsSaveOperation BeginSettingsSave()
         {
-            return Volatile.Read(ref revision);
+            return new SettingsSaveOperation(this, Volatile.Read(ref revision));
         }
 
         internal void RecordSuccessfulDisable()
@@ -28,7 +28,7 @@ namespace Steam_Desktop_Authenticator
             return result;
         }
 
-        internal StorageResult SaveSettingsWithResult(
+        private StorageResult SaveSettingsWithResult(
             Manifest manifest,
             bool requestedValue,
             long saveStartRevision,
@@ -47,6 +47,31 @@ namespace Steam_Desktop_Authenticator
                     staged.CheckForUpdates,
                     saveStartRevision);
             });
+        }
+
+        internal sealed class SettingsSaveOperation
+        {
+            private readonly UpdatePreferenceRevisionTracker tracker;
+            private readonly long saveStartRevision;
+
+            internal SettingsSaveOperation(UpdatePreferenceRevisionTracker tracker, long saveStartRevision)
+            {
+                this.tracker = tracker;
+                this.saveStartRevision = saveStartRevision;
+            }
+
+            internal StorageResult SaveSettingsWithResult(
+                Manifest manifest,
+                bool requestedValue,
+                Action<Manifest> updateSettings)
+            {
+                return tracker.SaveSettingsWithResult(manifest, requestedValue, saveStartRevision, updateSettings);
+            }
+
+            internal bool MergeCheckForUpdatesPreference(bool requestedValue, bool currentValue)
+            {
+                return tracker.MergeCheckForUpdatesPreference(requestedValue, currentValue, saveStartRevision);
+            }
         }
 
         internal bool MergeCheckForUpdatesPreference(
