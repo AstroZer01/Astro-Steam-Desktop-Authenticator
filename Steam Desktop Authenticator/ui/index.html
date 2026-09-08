@@ -1553,8 +1553,15 @@
     }
 
     function setCheckForUpdates(enabled) {
+        const isEnabled = !!enabled;
         let cb = document.getElementById('check-for-updates');
-        if (cb) cb.checked = enabled;
+        if (cb) cb.checked = isEnabled;
+        if (settingsBaseline === null) return;
+
+        const baseline = JSON.parse(settingsBaseline);
+        baseline.checkForUpdates = isEnabled;
+        settingsBaseline = JSON.stringify(baseline);
+        updateSettingsDirty();
     }
 
     document.getElementById('auto-start-windows').addEventListener('change', (e) => {
