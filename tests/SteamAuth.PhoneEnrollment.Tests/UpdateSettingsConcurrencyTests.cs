@@ -62,7 +62,6 @@ namespace SteamAuth.PhoneEnrollment.Tests
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
             UpdatePreferenceRevisionTracker tracker = new UpdatePreferenceRevisionTracker();
-            UpdatePreferenceRevisionTracker.SettingsSaveOperation settingsSaveOperation = tracker.BeginSettingsSave();
             TaskCompletionSource<bool> proxyValidationStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             TaskCompletionSource<bool> releaseSettingsSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -81,12 +80,16 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             async Task<StorageResult> CompleteSettingsSaveAfterProxyValidationAsync()
             {
-                proxyValidationStarted.SetResult(true);
-                await releaseSettingsSave.Task;
-
-                return settingsSaveOperation.SaveSettingsWithResult(
+                return await MainForm.ExecuteSettingsSaveWithUpdaterPreferenceAsync(
+                    tracker,
                     manifest,
                     requestedValue: true,
+                    async () =>
+                    {
+                        proxyValidationStarted.SetResult(true);
+                        await releaseSettingsSave.Task;
+                        return StorageResult.Success();
+                    },
                     _ => { });
             }
         }

@@ -3272,6 +3272,30 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
+        internal static async Task<StorageResult> ExecuteSettingsSaveWithUpdaterPreferenceAsync(
+            UpdatePreferenceRevisionTracker updatePreferenceRevision,
+            Manifest manifest,
+            bool requestedValue,
+            Func<Task<StorageResult>> prepareSettingsAsync,
+            Action<Manifest> updateSettings)
+        {
+            if (updatePreferenceRevision == null)
+                throw new ArgumentNullException(nameof(updatePreferenceRevision));
+            if (manifest == null)
+                throw new ArgumentNullException(nameof(manifest));
+            if (prepareSettingsAsync == null)
+                throw new ArgumentNullException(nameof(prepareSettingsAsync));
+            if (updateSettings == null)
+                throw new ArgumentNullException(nameof(updateSettings));
+
+            UpdatePreferenceRevisionTracker.SettingsSaveOperation settingsSave = updatePreferenceRevision.BeginSettingsSave();
+            StorageResult preparationResult = await prepareSettingsAsync();
+            if (!preparationResult.Succeeded)
+                return preparationResult;
+
+            return settingsSave.SaveSettingsWithResult(manifest, requestedValue, updateSettings);
+        }
+
         // Logic for version checking
         private static readonly HttpClient updateClient = new HttpClient();
         private const int MaximumUpdateResponseBytes = 1024 * 1024;
@@ -3822,7 +3846,6 @@ namespace Steam_Desktop_Authenticator
                 return;
 
             settingsSaveInProgress = true;
-            UpdatePreferenceRevisionTracker.SettingsSaveOperation updatePreferenceSave = updatePreferenceRevision.BeginSettingsSave();
             string saveContext = (string)payload["saveContext"] ?? String.Empty;
             CancellationTokenSource proxySaveSource = null;
             try
@@ -3859,62 +3882,6 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                if (proxyConfiguration.Enabled)
-                {
-                    proxySaveSource = BeginProxyOperation();
-                    ProxyTestResult proxyResult;
-                    try
-                    {
-                        proxyResult = await ProxyService.TestAsync(proxyConfiguration, proxySaveSource.Token);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        await PublishSettingsSaveFailureAsync("The proxy test was canceled. Settings were not saved.");
-                        return;
-                    }
-                    if (!proxyResult.Succeeded)
-                    {
-                        await PublishSettingsSaveFailureAsync(proxyResult.Message + " Settings were not saved.");
-                        return;
-                    }
-                    proxySaveSource.Token.ThrowIfCancellationRequested();
-                }
-                else
-                {
-                    CancelProxyOperation();
-                }
-
-                bool automaticDenyExceptionChanged = newLoginActionMode == LoginActionModes.Deny &&
-                    (newLoginActionAutoAllowIpEnabled != manifest.LoginActionAutoAllowIpEnabled ||
-                     newLoginActionAutoAllowCurrentDeviceIp != manifest.LoginActionAutoAllowCurrentDeviceIp ||
-                     !String.Equals(newLoginActionAutoAllowIp, manifest.LoginActionAutoAllowIp, StringComparison.Ordinal));
-                if ((newLoginActionMode != manifest.LoginActionMode && newLoginActionMode != LoginActionModes.Manual) || automaticDenyExceptionChanged)
-                {
-                    string actionDescription = newLoginActionMode == LoginActionModes.ApprovePersistent
-                        ? "automatically approve every pending login request with a persistent sign-in"
-                        : "automatically deny every pending login request";
-                    if (newLoginActionMode == LoginActionModes.Deny && newLoginActionAutoAllowIpEnabled)
-                    {
-                        var allowedSources = new List<string>();
-                        if (newLoginActionAutoAllowCurrentDeviceIp)
-                            allowedSources.Add("this device's current public IP address");
-                        if (!String.IsNullOrWhiteSpace(newLoginActionAutoAllowIp))
-                            allowedSources.Add(newLoginActionAutoAllowIp);
-                        if (allowedSources.Count > 0)
-                            actionDescription += ", except requests from " + String.Join(" or ", allowedSources) + ", which will be approved with a persistent sign-in";
-                    }
-                    DialogResult confirmation = AstroMessageBox.Show(
-                        "This setting will " + actionDescription + " for every managed account, including requests that are already pending. Login monitoring will remain enabled while this rule is active. Continue?",
-                        "Enable Automatic Login Action",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Warning);
-                    if (confirmation != DialogResult.Yes)
-                    {
-                        await PublishSettingsSaveFailureAsync("Settings were not saved.");
-                        return;
-                    }
-                }
-
                 bool tradeConfirmationCustomIntervalEnabled = (bool?)payload["tradeConfirmationCustomIntervalEnabled"] ?? false;
                 int tradeConfirmationCheckInterval = Math.Clamp((int?)payload["tradeConfirmationCheckInterval"] ?? 15, 3, 3600);
                 bool autoConfirmMarket = (bool?)payload["autoConfirmMarket"] ?? false;
@@ -3924,12 +3891,61 @@ namespace Steam_Desktop_Authenticator
                 bool diagnosticLogging = (bool?)payload["diagnosticErrorLoggingEnabled"] ?? false;
                 bool loginMonitoring = ((bool?)payload["loginActionMonitoringEnabled"] ?? false) || newLoginActionMode != LoginActionModes.Manual;
 
-                if (proxyConfiguration.Enabled)
-                    proxySaveSource.Token.ThrowIfCancellationRequested();
-
-                StorageResult saveResult = updatePreferenceSave.SaveSettingsWithResult(
+                StorageResult saveResult = await ExecuteSettingsSaveWithUpdaterPreferenceAsync(
+                    updatePreferenceRevision,
                     manifest,
                     checkForUpdates,
+                    async () =>
+                    {
+                        if (!proxyConfiguration.Enabled)
+                        {
+                            CancelProxyOperation();
+                            return StorageResult.Success();
+                        }
+
+                        proxySaveSource = BeginProxyOperation();
+                        ProxyTestResult proxyResult = await ProxyService.TestAsync(proxyConfiguration, proxySaveSource.Token);
+                        if (!proxyResult.Succeeded)
+                        {
+                            return StorageResult.Failure(
+                                StorageFailureKind.Validation,
+                                proxyResult.Message + " Settings were not saved.");
+                        }
+
+                        proxySaveSource.Token.ThrowIfCancellationRequested();
+
+                        bool automaticDenyExceptionChanged = newLoginActionMode == LoginActionModes.Deny &&
+                            (newLoginActionAutoAllowIpEnabled != manifest.LoginActionAutoAllowIpEnabled ||
+                             newLoginActionAutoAllowCurrentDeviceIp != manifest.LoginActionAutoAllowCurrentDeviceIp ||
+                             !String.Equals(newLoginActionAutoAllowIp, manifest.LoginActionAutoAllowIp, StringComparison.Ordinal));
+                        if ((newLoginActionMode != manifest.LoginActionMode && newLoginActionMode != LoginActionModes.Manual) || automaticDenyExceptionChanged)
+                        {
+                            string actionDescription = newLoginActionMode == LoginActionModes.ApprovePersistent
+                                ? "automatically approve every pending login request with a persistent sign-in"
+                                : "automatically deny every pending login request";
+                            if (newLoginActionMode == LoginActionModes.Deny && newLoginActionAutoAllowIpEnabled)
+                            {
+                                var allowedSources = new List<string>();
+                                if (newLoginActionAutoAllowCurrentDeviceIp)
+                                    allowedSources.Add("this device's current public IP address");
+                                if (!String.IsNullOrWhiteSpace(newLoginActionAutoAllowIp))
+                                    allowedSources.Add(newLoginActionAutoAllowIp);
+                                if (allowedSources.Count > 0)
+                                    actionDescription += ", except requests from " + String.Join(" or ", allowedSources) + ", which will be approved with a persistent sign-in";
+                            }
+                            DialogResult confirmation = AstroMessageBox.Show(
+                                "This setting will " + actionDescription + " for every managed account, including requests that are already pending. Login monitoring will remain enabled while this rule is active. Continue?",
+                                "Enable Automatic Login Action",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Warning);
+                            if (confirmation != DialogResult.Yes)
+                            {
+                                return StorageResult.Failure(StorageFailureKind.Validation, "Settings were not saved.");
+                            }
+                        }
+
+                        return StorageResult.Success();
+                    },
                     staged =>
                 {
                     staged.TradeConfirmationCustomIntervalEnabled = tradeConfirmationCustomIntervalEnabled;
