@@ -1,6 +1,8 @@
 using Steam_Desktop_Authenticator;
+using Newtonsoft.Json.Linq;
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -65,33 +67,82 @@ namespace SteamAuth.PhoneEnrollment.Tests
             TaskCompletionSource<bool> proxyValidationStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             TaskCompletionSource<bool> releaseSettingsSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            Task<StorageResult> settingsSave = CompleteSettingsSaveAfterProxyValidationAsync();
-            await proxyValidationStarted.Task;
-
-            StorageResult disableResult = tracker.DisableStartupUpdateChecks(manifest);
-            Assert.True(disableResult.Succeeded, disableResult.UserMessage);
-            Assert.False(manifest.CheckForUpdates);
-            releaseSettingsSave.SetResult(true);
-
-            StorageResult settingsResult = await settingsSave;
-            Assert.True(settingsResult.Succeeded, settingsResult.UserMessage);
-            Assert.False(manifest.CheckForUpdates);
-            Assert.False(Manifest.GetManifest(true).CheckForUpdates);
-
-            async Task<StorageResult> CompleteSettingsSaveAfterProxyValidationAsync()
+            using (MainForm form = new MainForm(
+                manifest,
+                tracker,
+                async (_, __) =>
+                {
+                    proxyValidationStarted.SetResult(true);
+                    await releaseSettingsSave.Task;
+                    return new ProxyTestResult { Succeeded = true, Message = "Proxy test succeeded." };
+                },
+                _ => { }))
             {
-                return await MainForm.ExecuteSettingsSaveWithUpdaterPreferenceAsync(
-                    tracker,
-                    manifest,
-                    requestedValue: true,
-                    async () =>
-                    {
-                        proxyValidationStarted.SetResult(true);
-                        await releaseSettingsSave.Task;
-                        return StorageResult.Success();
-                    },
-                    _ => { });
+                Task settingsSave = form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: true,
+                    proxyEnabled: true,
+                    autoConfirmMarket: true));
+                await proxyValidationStarted.Task;
+
+                StorageResult disableResult = tracker.DisableStartupUpdateChecks(manifest);
+                Assert.True(disableResult.Succeeded, disableResult.UserMessage);
+                Assert.False(manifest.CheckForUpdates);
+                releaseSettingsSave.SetResult(true);
+
+                await settingsSave;
             }
+
+            Assert.False(manifest.CheckForUpdates);
+            Assert.True(manifest.AutoConfirmMarketTransactions);
+            Assert.False(Manifest.GetManifest(true).CheckForUpdates);
+            Assert.True(Manifest.GetManifest(true).AutoConfirmMarketTransactions);
+        }
+
+        [Fact]
+        public async Task SaveSettingsAsync_PersistsUpdaterPreferenceFromProductionCaller()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            UpdatePreferenceRevisionTracker tracker = new UpdatePreferenceRevisionTracker();
+
+            using (MainForm form = new MainForm(manifest, tracker, null, _ => { }))
+            {
+                await form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: true,
+                    proxyEnabled: false,
+                    autoConfirmMarket: true));
+            }
+
+            Assert.True(manifest.CheckForUpdates);
+            Assert.True(manifest.AutoConfirmMarketTransactions);
+            Assert.True(Manifest.GetManifest(true).CheckForUpdates);
+            Assert.True(Manifest.GetManifest(true).AutoConfirmMarketTransactions);
+        }
+
+        private static JObject CreateSettingsPayload(bool checkForUpdates, bool proxyEnabled, bool autoConfirmMarket)
+        {
+            return new JObject
+            {
+                ["saveContext"] = String.Empty,
+                ["tradeConfirmationCustomIntervalEnabled"] = false,
+                ["tradeConfirmationCheckInterval"] = 15,
+                ["autoConfirmMarket"] = autoConfirmMarket,
+                ["autoConfirmTrades"] = false,
+                ["minimizeToTray"] = false,
+                ["checkForUpdates"] = checkForUpdates,
+                ["diagnosticErrorLoggingEnabled"] = false,
+                ["loginActionMonitoringEnabled"] = false,
+                ["loginActionMode"] = "manual",
+                ["loginActionAutoAllowIpEnabled"] = false,
+                ["loginActionAutoAllowCurrentDeviceIp"] = false,
+                ["loginActionAutoAllowIp"] = String.Empty,
+                ["proxyEnabled"] = proxyEnabled,
+                ["proxyScheme"] = "http",
+                ["proxyHost"] = proxyEnabled ? "127.0.0.1" : String.Empty,
+                ["proxyPort"] = proxyEnabled ? 8080 : 0,
+                ["proxyUsername"] = String.Empty,
+                ["proxyPasswordAction"] = "keep",
+                ["proxyPassword"] = String.Empty
+            };
         }
 
         public void Dispose()

@@ -94,7 +94,9 @@ namespace Steam_Desktop_Authenticator
         private bool allowExitAfterSettingsSave;
         private bool exitAfterSettingsSaveRequested;
         private bool settingsSaveInProgress;
-        private readonly UpdatePreferenceRevisionTracker updatePreferenceRevision = new UpdatePreferenceRevisionTracker();
+        private readonly UpdatePreferenceRevisionTracker updatePreferenceRevision;
+        private readonly Func<ProxyConfiguration, CancellationToken, Task<ProxyTestResult>> proxyTestAsync;
+        private readonly Action<ProxyConfiguration> applyProxy;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -486,12 +488,24 @@ namespace Steam_Desktop_Authenticator
             return hasRetry && IsTradeConfirmationTokenFailure(exception);
         }
 
-        public MainForm()
+        public MainForm() : this(null, null, null, null)
+        {
+        }
+
+        internal MainForm(
+            Manifest initialManifest,
+            UpdatePreferenceRevisionTracker updatePreferenceRevision,
+            Func<ProxyConfiguration, CancellationToken, Task<ProxyTestResult>> proxyTestAsync,
+            Action<ProxyConfiguration> applyProxy)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
             timerTradesPopup.Enabled = false;
             loginActionsTimer.Tick += loginActionsTimer_Tick;
+            manifest = initialManifest;
+            this.updatePreferenceRevision = updatePreferenceRevision ?? new UpdatePreferenceRevisionTracker();
+            this.proxyTestAsync = proxyTestAsync ?? ProxyService.TestAsync;
+            this.applyProxy = applyProxy ?? ProxyService.Apply;
         }
 
         public void SetEncryptionKey(string key)
@@ -3272,7 +3286,7 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
-        internal static async Task<StorageResult> ExecuteSettingsSaveWithUpdaterPreferenceAsync(
+        private static async Task<StorageResult> ExecuteSettingsSaveWithUpdaterPreferenceAsync(
             UpdatePreferenceRevisionTracker updatePreferenceRevision,
             Manifest manifest,
             bool requestedValue,
@@ -3826,7 +3840,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                ProxyTestResult result = await ProxyService.TestAsync(configuration, token);
+                ProxyTestResult result = await proxyTestAsync(configuration, token);
                 if (!token.IsCancellationRequested)
                     await PublishProxyTestResultAsync(result);
             }
@@ -3840,7 +3854,7 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private async Task SaveSettingsAsync(JObject payload)
+        internal async Task SaveSettingsAsync(JObject payload)
         {
             if (settingsSaveInProgress || manifest == null)
                 return;
@@ -3904,7 +3918,7 @@ namespace Steam_Desktop_Authenticator
                         }
 
                         proxySaveSource = BeginProxyOperation();
-                        ProxyTestResult proxyResult = await ProxyService.TestAsync(proxyConfiguration, proxySaveSource.Token);
+                        ProxyTestResult proxyResult = await proxyTestAsync(proxyConfiguration, proxySaveSource.Token);
                         if (!proxyResult.Succeeded)
                         {
                             return StorageResult.Failure(
@@ -3973,7 +3987,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                ProxyService.Apply(proxyConfiguration);
+                applyProxy(proxyConfiguration);
                 DiagnosticErrorLogger.Configure(manifest.DiagnosticErrorLoggingEnabled);
                 ConfigureTradeConfirmationMonitor();
                 ConfigureLoginActionsMonitor();
