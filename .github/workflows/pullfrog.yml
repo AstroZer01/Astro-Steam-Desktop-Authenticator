@@ -112,7 +112,7 @@ jobs:
             "For a mixed review, route the complete final review to sol when any finding crosses a sol boundary; do not treat unrelated routine changes as complex.",
             "Never repeat the full prompt, dashboard instructions, payload JSON, repository instructions, diff contents, secrets, or absolute filesystem paths in visible output. Use compact evidence summaries only.",
             "Start your final visible text with ROUTE DECISION: Luna Max — <reason>. or ROUTE DECISION: Sol High — <reason>.",
-            "Finish the visible text with ROUTER MODEL: Luna Max (openai/gpt-5.6-luna, max). This identifies the classifier model; it is not the final review route.",
+            "Finish the visible text with ROUTER MODEL: Luna Max (openai/gpt-6-luna, max). This identifies the classifier model; it is not the final review route.",
             "Then call set_output exactly once with an object containing exactly route, selected_role, task_type, logic_change, risk, ambiguity, confidence, verification_difficulty, scope, and reason.",
           ].join("\n");
 
@@ -120,7 +120,7 @@ jobs:
           try {
             const payload = JSON.parse(raw);
             if (payload && payload["~pullfrog"] === true && typeof payload.prompt === "string") {
-              payload.model = "openai/gpt-5.6-luna";
+              payload.model = "openai/gpt-6-luna";
               payload.modelExplicit = true;
               payload.effort = "max";
               payload.generateSummary = false;
@@ -144,7 +144,7 @@ jobs:
         uses: pullfrog/pullfrog@v0
         with:
           prompt: ${{ steps.prepare_route.outputs.prompt }}
-          model: openai/gpt-5.6-luna
+          model: openai/gpt-6-luna
           effort: max
           timeout: 30m
           push: disabled
@@ -206,7 +206,7 @@ jobs:
           if (!["high", "medium", "low"].includes(value.confidence)) {
             throw new Error("route output confidence must be high, medium, or low");
           }
-          const selectedModel = value.route === "sol" ? "openai/gpt-5.6-sol" : "openai/gpt-5.6-luna";
+          const selectedModel = value.route === "sol" ? "openai/gpt-6.1-sol" : "openai/gpt-6-luna";
           const selectedEffort = value.route === "sol" ? "high" : "max";
           const record = {
             task_type: "review",
@@ -254,7 +254,7 @@ jobs:
           const reason = process.env.PULLFROG_ROUTE_REASON ?? "";
           const routeRecord = process.env.PULLFROG_ROUTE_RECORD ?? "{}";
           const routeName = route === "sol" ? "Sol High" : "Luna Max";
-          const model = route === "sol" ? "openai/gpt-5.6-sol" : "openai/gpt-5.6-luna";
+          const model = route === "sol" ? "openai/gpt-6.1-sol" : "openai/gpt-6-luna";
           const effort = route === "sol" ? "high" : "max";
           const finalInstructions = [
             `This is the final Pullfrog review pass. The read-only route pass selected ${routeName} via ${role} (${model}, ${effort}).`,
@@ -301,7 +301,7 @@ jobs:
         uses: pullfrog/pullfrog@v0
         with:
           prompt: ${{ steps.prepare_final.outputs.luna_prompt }}
-          model: openai/gpt-5.6-luna
+          model: openai/gpt-6-luna
           effort: max
           timeout: 90m
           push: disabled
@@ -324,7 +324,7 @@ jobs:
         uses: pullfrog/pullfrog@v0
         with:
           prompt: ${{ steps.prepare_final.outputs.sol_prompt }}
-          model: openai/gpt-5.6-sol
+          model: openai/gpt-6.1-sol
           effort: high
           timeout: 90m
           push: disabled
