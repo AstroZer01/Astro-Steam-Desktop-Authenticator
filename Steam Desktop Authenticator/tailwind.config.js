@@ -1,7 +1,8 @@
 /**
  * Regenerate ui/assets/css/app.css with:
- *   npx --yes --package tailwindcss@3.4.17 --package @tailwindcss/forms@0.5.10 tailwindcss -c tailwind.config.js -i ui/tailwind-input.css -o ui/assets/css/app.css --minify
+ *   npm run build:ui (from the repository root)
  *
+ * Loaded explicitly by ui/tailwind-input.css through Tailwind v4's @config directive.
  * The generated CSS is committed so normal Visual Studio/MSBuild builds do not require Node.js.
  */
 const defaultTheme = require("tailwindcss/defaultTheme");

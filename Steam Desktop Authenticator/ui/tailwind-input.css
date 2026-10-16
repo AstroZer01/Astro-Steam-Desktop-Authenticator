@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss" source(none);
+@config "../tailwind.config.js";
 
 @font-face {
   font-family: "Inter";
@@ -19,6 +18,25 @@
 }
 
 @layer base {
+  /* Preserve the v3 defaults used by the existing WebView templates. */
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: #e5e7eb;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #9ca3af;
+  }
+
+  button,
+  [role="button"] {
+    cursor: pointer;
+  }
+
   body[data-page="dashboard"] {
     background-color: theme("colors.background");
     color: theme("colors.on-surface");

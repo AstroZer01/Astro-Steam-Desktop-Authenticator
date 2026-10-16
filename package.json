@@ -2,12 +2,18 @@
   "name": "astro-steam-desktop-authenticator-ui",
   "private": true,
   "scripts": {
-    "build:ui": "cd \"Steam Desktop Authenticator\" && tailwindcss -c tailwind.config.js -i ui/tailwind-input.css -o ui/assets/css/app.css --minify",
+    "build:ui": "cd \"Steam Desktop Authenticator\" && tailwindcss -i ui/tailwind-input.css -o ui/assets/css/app.css --minify",
     "check:ui": "npm run build:ui && git diff --exit-code -- \"Steam Desktop Authenticator/ui/assets/css/app.css\"",
     "prepare": "node -e \"const { spawnSync } = require('child_process'); const check = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { stdio: 'ignore' }); if (check.status === 0) { const configure = spawnSync('git', ['config', '--local', 'core.hooksPath', '.githooks'], { stdio: 'inherit' }); process.exit(configure.status ?? 1); }\""
   },
   "devDependencies": {
+    "@tailwindcss/cli": "4.3.3",
     "@tailwindcss/forms": "0.5.10",
-    "tailwindcss": "3.4.17"
+    "tailwindcss": "4.3.3"
+  },
+  "overrides": {
+    "@tailwindcss/cli": {
+      "@parcel/watcher": "2.6.0"
+    }
   }
 }
