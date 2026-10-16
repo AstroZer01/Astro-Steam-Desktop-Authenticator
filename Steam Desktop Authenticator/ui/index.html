@@ -298,8 +298,8 @@
                         <div class="flex items-start gap-3">
                             <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="check-for-updates" type="checkbox"/>
                             <div>
-                                <label class="text-on-surface" for="check-for-updates">Check for updates on launch</label>
-                                <p class="text-sm text-on-surface-variant mt-1">Looks for a newer Astro SDA release when the app starts. You can always check manually below.</p>
+                                <label class="text-on-surface" for="check-for-updates">Show update notifications on launch</label>
+                                <p class="text-sm text-on-surface-variant mt-1">Looks for a newer Astro SDA release when the app starts. Turning this off hides the launch notification; Settings still reports available releases.</p>
                             </div>
                         </div>
                         <div class="pl-8 mt-2 space-y-2">
@@ -321,6 +321,10 @@
                     
                     <div class="text-center mt-6">
                         <p id="app-version-text" class="text-xs text-on-surface-variant/50 font-mono tracking-wider">Astro Steam Desktop Authenticator v...</p>
+                        <p id="app-update-available" class="hidden mt-1 text-xs text-secondary font-mono tracking-wider" role="status" aria-live="polite">
+                            New version <span id="app-update-version"></span> available.
+                            <button id="app-update-download" type="button" class="text-primary hover:text-on-surface transition-colors">Download update.</button>
+                        </p>
                     </div>
                 </div>
             </div>
@@ -1547,6 +1551,22 @@
         if (el) el.innerText = "Astro Steam Desktop Authenticator v" + version;
     }
 
+    function setUpdateAvailable(version) {
+        const updateElement = document.getElementById('app-update-available');
+        const versionText = document.getElementById('app-update-version');
+        if (!updateElement || !versionText) return;
+
+        versionText.textContent = "v" + version;
+        updateElement.classList.remove('hidden');
+    }
+
+    function clearUpdateAvailable() {
+        const updateElement = document.getElementById('app-update-available');
+        const versionText = document.getElementById('app-update-version');
+        if (updateElement) updateElement.classList.add('hidden');
+        if (versionText) versionText.textContent = '';
+    }
+
     function setAutoStart(enabled) {
         let cb = document.getElementById('auto-start-windows');
         if (cb) cb.checked = enabled;
@@ -1563,6 +1583,10 @@
         settingsBaseline = JSON.stringify(baseline);
         updateSettingsDirty();
     }
+
+    document.getElementById('app-update-download').addEventListener('click', () => {
+        window.chrome.webview.postMessage({ action: 'open_update_available' });
+    });
 
     document.getElementById('auto-start-windows').addEventListener('change', (e) => {
         window.chrome.webview.postMessage({ action: 'toggle_autostart', enabled: e.target.checked });
