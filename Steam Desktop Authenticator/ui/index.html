@@ -32,7 +32,7 @@
     <div class="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] bg-primary/5 rounded-full blur-[120px] pointer-events-none"></div>
 
     <!-- Global Loading Spinner -->
-    <div id="global-spinner" class="hidden absolute inset-0 flex items-center justify-center bg-surface/50 backdrop-blur-sm z-50 rounded-xl" role="status" aria-live="polite" aria-label="Loading">
+    <div id="global-spinner" class="hidden absolute inset-0 flex items-center justify-center bg-surface/50 backdrop-blur-xs z-50 rounded-xl" role="status" aria-live="polite" aria-label="Loading">
         <div class="loader"></div>
     </div>
 
@@ -41,9 +41,9 @@
         <!-- Authenticator View -->
         <section id="view-authenticator" class="lg:col-span-8 lg:col-start-3 flex flex-col gap-4">
             <div class="grid grid-cols-3 gap-4">
-                <button id="btn-setup-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-sm">Setup New Account</button>
-                <button id="btn-import-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-sm">Import Account</button>
-                <button id="btn-setup-encryption" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-sm">Setup Encryption</button>
+                <button id="btn-setup-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-xs">Setup New Account</button>
+                <button id="btn-import-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-xs">Import Account</button>
+                <button id="btn-setup-encryption" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-xs">Setup Encryption</button>
             </div>
             
             <div class="glass-panel rounded-xl p-4 flex flex-col gap-4">
@@ -55,13 +55,13 @@
                     <button id="btn-copy" class="bg-surface-variant hover:bg-surface-bright border border-white/10 rounded-lg px-6 w-24 transition-colors text-on-surface text-sm">Copy</button>
                 </div>
                 <div class="w-full bg-surface-variant rounded-full h-4 mt-2 overflow-hidden border border-white/10">
-                    <div id="progress-bar-fill" class="bg-gradient-to-r from-[#00a572] to-[#4edea3] h-full rounded-full transition-all duration-1000" style="width: 100%"></div>
+                    <div id="progress-bar-fill" class="bg-linear-to-r/srgb from-[#00a572] to-[#4edea3] h-full rounded-full transition-all duration-1000" style="width: 100%"></div>
                 </div>
             </div>
             
             <div class="glass-panel rounded-xl p-4 flex flex-col gap-4">
                 <div id="account-title" class="text-on-surface-variant text-xs uppercase tracking-wider">Account: ...</div>
-                <button id="btn-login-qr" aria-describedby="qr-scan-status" class="bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-sm">Login via QR</button>
+                <button id="btn-login-qr" aria-describedby="qr-scan-status" class="bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-xs">Login via QR</button>
                 <div id="qr-scan-status" class="hidden rounded-lg border border-primary/30 bg-primary/10 p-3" role="status" aria-live="polite">
                     <div class="flex items-start gap-3">
                         <svg class="ui-icon text-primary shrink-0 mt-0.5" viewBox="0 0 24 24" aria-hidden="true" style="stroke-width: 2.25"><circle cx="12" cy="12" r="7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M12 9v6m-3-3h6"/></svg>
@@ -77,7 +77,7 @@
                 <div id="account-list-container" class="account-list-scroll bg-surface-container-lowest border border-white/10 rounded-lg overflow-y-auto overflow-x-hidden"></div>
                 <div class="flex items-center gap-3 pt-2">
                     <span class="text-on-surface-variant text-sm">Filter:</span>
-                    <input id="filter-input" class="flex-1 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-1.5 px-3 focus:ring-1 focus:ring-[#00daf3] focus:outline-none h-8" type="text">
+                    <input id="filter-input" class="flex-1 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-1.5 px-3 focus:ring-1 focus:ring-[#00daf3] focus:outline-hidden h-8" type="text">
                 </div>
             </div>
         </section>
@@ -90,7 +90,7 @@
                     <p id="trade-confirmations-count" class="text-sm text-on-surface-variant mt-1">Review pending Steam confirmations.</p>
                 </div>
                 <div class="flex items-center gap-2 w-full sm:w-auto">
-                    <select id="trade-account-select" class="min-w-0 flex-1 sm:w-44 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-2 focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer">
+                    <select id="trade-account-select" class="min-w-0 flex-1 sm:w-44 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-2 focus:outline-hidden focus:ring-1 focus:ring-primary cursor-pointer">
                         <option value="all">All accounts</option>
                     </select>
                     <button id="btn-refresh-trades" class="p-2 hover:bg-surface-variant rounded-lg flex items-center justify-center transition-colors text-on-surface-variant" title="Refresh" aria-label="Refresh trade confirmations">
@@ -117,7 +117,7 @@
                     <p id="login-actions-count" class="text-sm text-on-surface-variant mt-1">Review pending Steam login requests.</p>
                 </div>
                 <div class="flex items-center gap-2 w-full sm:w-auto">
-                    <select id="login-account-select" class="min-w-0 flex-1 sm:w-44 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-2 focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer">
+                    <select id="login-account-select" class="min-w-0 flex-1 sm:w-44 bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-2 focus:outline-hidden focus:ring-1 focus:ring-primary cursor-pointer">
                         <option value="all">All accounts</option>
                     </select>
                     <button id="btn-refresh-login-actions" class="shrink-0 p-2 hover:bg-surface-variant rounded-lg flex items-center justify-center transition-colors text-on-surface-variant" title="Refresh login requests" aria-label="Refresh login requests">
@@ -166,22 +166,22 @@
             </header>
             <div class="glass-panel rounded-xl p-5 space-y-5">
                 <div class="flex items-start gap-3">
-                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="trade-confirmation-custom-interval-enabled" type="checkbox"/>
+                    <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="trade-confirmation-custom-interval-enabled" type="checkbox"/>
                     <div>
                         <label class="text-on-surface" for="trade-confirmation-custom-interval-enabled">Use a custom confirmation check delay</label>
                         <p class="text-sm text-on-surface-variant mt-1">All managed accounts are checked in sequence every 15 seconds by default.</p>
                     </div>
                 </div>
                 <div class="flex items-center gap-3 pl-8">
-                    <input class="w-20 rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-50" id="trade-confirmation-check-interval" type="number" min="3" max="3600" value="15" disabled/>
+                    <input class="w-20 rounded-sm border-white/10 bg-surface-variant text-on-surface px-3 py-2 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-50" id="trade-confirmation-check-interval" type="number" min="3" max="3600" value="15" disabled/>
                     <span class="text-on-surface-variant">Seconds between account checks (minimum 3 seconds)</span>
                 </div>
                 <div class="flex items-start gap-3">
-                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-confirm-market" type="checkbox"/>
+                    <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-confirm-market" type="checkbox"/>
                     <label class="text-on-surface" for="auto-confirm-market">Auto-confirm market transactions</label>
                 </div>
                 <div class="flex items-start gap-3">
-                    <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-confirm-trades" type="checkbox"/>
+                    <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-confirm-trades" type="checkbox"/>
                     <label class="text-on-surface" for="auto-confirm-trades">Auto-confirm trades</label>
                 </div>
                 <hr class="border-white/10 my-4">
@@ -192,7 +192,7 @@
                         <p class="text-sm text-on-surface-variant mt-1">Review and respond to Steam login approvals across all accounts.</p>
                     </div>
                     <div class="flex items-start gap-3">
-                        <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="login-action-monitoring-enabled" type="checkbox"/>
+                        <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="login-action-monitoring-enabled" type="checkbox"/>
                         <div>
                             <label class="text-on-surface" for="login-action-monitoring-enabled">Monitor pending login requests and show notifications</label>
                             <p class="text-sm text-on-surface-variant mt-1">Monitoring never takes action unless you configure an automatic rule below.</p>
@@ -200,7 +200,7 @@
                     </div>
                     <div class="space-y-1">
                         <label class="block text-sm text-on-surface" for="login-action-mode">Automatic login action</label>
-                        <select id="login-action-mode" class="w-full bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-3 focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer">
+                        <select id="login-action-mode" class="w-full bg-[#0F172A] border border-white/10 text-on-surface text-sm rounded-lg py-2 px-3 focus:outline-hidden focus:ring-1 focus:ring-primary cursor-pointer">
                             <option value="manual">Manual — do nothing automatically</option>
                             <option value="approve_persistent">Auto-approve all requests with persistent sign-in</option>
                             <option value="deny">Auto-deny all requests</option>
@@ -209,14 +209,14 @@
                     </div>
                     <div id="login-auto-allow-ip-settings" class="hidden rounded-lg border border-white/10 bg-surface-container p-3 space-y-3">
                         <div class="flex items-start gap-3">
-                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="login-action-auto-allow-ip-enabled" type="checkbox"/>
+                            <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="login-action-auto-allow-ip-enabled" type="checkbox"/>
                             <div>
                                 <label class="text-on-surface" for="login-action-auto-allow-ip-enabled">Enable login IP whitelist</label>
                                 <p class="text-sm text-on-surface-variant mt-1">All other login requests will be denied. A matching whitelisted request is approved with a persistent sign-in.</p>
                             </div>
                         </div>
                         <div class="flex items-start gap-3">
-                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary disabled:cursor-not-allowed disabled:opacity-50" id="login-action-auto-allow-current-device-ip" type="checkbox" disabled/>
+                            <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary disabled:cursor-not-allowed disabled:opacity-50" id="login-action-auto-allow-current-device-ip" type="checkbox" disabled/>
                             <div>
                                 <label class="text-on-surface" for="login-action-auto-allow-current-device-ip">Whitelist current device IP</label>
                                 <p class="text-sm text-on-surface-variant mt-1">Looks up this device's current public IP for each pending login, so dynamic IP changes are handled automatically.</p>
@@ -224,7 +224,7 @@
                         </div>
                         <div>
                             <label class="block text-sm text-on-surface mb-1" for="login-action-auto-allow-ip">Additional whitelisted public IPv4 address</label>
-                            <input id="login-action-auto-allow-ip" class="w-full rounded border border-white/10 bg-surface-variant text-on-surface px-3 py-2 disabled:cursor-not-allowed disabled:opacity-50" type="text" inputmode="numeric" autocomplete="off" placeholder="Optional, for example 203.0.113.5" disabled/>
+                            <input id="login-action-auto-allow-ip" class="w-full rounded-sm border border-white/10 bg-surface-variant text-on-surface px-3 py-2 disabled:cursor-not-allowed disabled:opacity-50" type="text" inputmode="numeric" autocomplete="off" placeholder="Optional, for example 203.0.113.5" disabled/>
                             <p class="text-xs text-on-surface-variant mt-1">Optional. It must match Steam's reported login IP exactly; leaving it blank does not allow any additional IP.</p>
                         </div>
                     </div>
@@ -241,7 +241,7 @@
                     
                     <div id="proxy-settings-content" class="hidden space-y-4 mt-4 pb-2">
                         <div class="flex items-start gap-3">
-                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="enable-proxy" type="checkbox"/>
+                            <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="enable-proxy" type="checkbox"/>
                             <div>
                                 <label class="text-on-surface" for="enable-proxy">Enable proxy for all sessions</label>
                                 <p class="text-sm text-error mt-1">Avoid rotating proxies. Frequent IP or location changes may trigger Steam security checks.</p>
@@ -251,31 +251,31 @@
                         <div class="grid grid-cols-2 gap-4 pl-8">
                             <div>
                                 <label class="block text-xs text-on-surface-variant mb-1" for="proxy-scheme">Proxy connection type</label>
-                                <select class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-scheme">
+                                <select class="w-full rounded-sm border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-scheme">
                                     <option value="http">HTTP (most providers)</option>
                                     <option value="https">HTTPS (encrypted proxy endpoint)</option>
                                 </select>
                             </div>
                             <div>
                                 <label class="block text-xs text-on-surface-variant mb-1" for="proxy-host">Host</label>
-                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-host" type="text" autocomplete="off" placeholder="127.0.0.1"/>
+                                <input class="w-full rounded-sm border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-host" type="text" autocomplete="off" placeholder="127.0.0.1"/>
                             </div>
                             <div>
                                 <label class="block text-xs text-on-surface-variant mb-1" for="proxy-port">Port</label>
-                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-port" type="number" min="1" max="65535" placeholder="8080"/>
+                                <input class="w-full rounded-sm border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-port" type="number" min="1" max="65535" placeholder="8080"/>
                             </div>
                             <div>
                                 <label class="block text-xs text-on-surface-variant mb-1" for="proxy-user">Username</label>
-                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-user" type="text" autocomplete="off" placeholder="Optional"/>
+                                <input class="w-full rounded-sm border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-user" type="text" autocomplete="off" placeholder="Optional"/>
                             </div>
                             <div>
                                 <label class="block text-xs text-on-surface-variant mb-1" for="proxy-pass">Password</label>
-                                <input class="w-full rounded border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-pass" type="password" autocomplete="new-password" placeholder="Optional"/>
+                                <input class="w-full rounded-sm border-white/10 bg-surface-variant text-on-surface px-3 py-2" id="proxy-pass" type="password" autocomplete="new-password" placeholder="Optional"/>
                             </div>
                         </div>
                         <p class="pl-8 text-xs text-on-surface-variant">Choose HTTP for standard HTTP(S)/CONNECT proxies. Choose HTTPS only when your provider says the proxy endpoint itself uses HTTPS.</p>
                         <label id="proxy-clear-password-row" class="hidden flex items-center gap-2 pl-8 text-xs text-on-surface-variant">
-                            <input id="proxy-clear-password" class="rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" type="checkbox"/>
+                            <input id="proxy-clear-password" class="rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" type="checkbox"/>
                             Clear saved proxy password
                         </label>
                         <div class="pl-8 space-y-2">
@@ -287,16 +287,16 @@
 
                 <div class="pt-4 border-t border-white/10 mt-4">
                     <div class="flex items-start gap-3 mb-4">
-                        <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-start-windows" type="checkbox"/>
+                        <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="auto-start-windows" type="checkbox"/>
                         <label class="text-on-surface" for="auto-start-windows">Start with Windows (Auto-start)</label>
                     </div>
                     <div class="flex items-start gap-3 mb-6">
-                        <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="close-to-tray" type="checkbox"/>
+                        <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="close-to-tray" type="checkbox"/>
                         <label class="text-on-surface" for="close-to-tray">Close to System Tray (Keep running in background)</label>
                     </div>
                     <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6">
                         <div class="flex items-start gap-3">
-                            <input class="mt-1 rounded border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="diagnostic-error-logging-enabled" type="checkbox"/>
+                            <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="diagnostic-error-logging-enabled" type="checkbox"/>
                             <div>
                                 <label class="text-on-surface" for="diagnostic-error-logging-enabled">Enable diagnostic error logging</label>
                                 <p class="text-sm text-on-surface-variant mt-1">Off by default. Saves local debugging information to <span class="font-mono text-xs">%LOCALAPPDATA%\Astro Steam Desktop Authenticator\Logs</span>. It is never sent anywhere by Astro SDA.</p>
@@ -316,14 +316,14 @@
     </div>
 </main>
 
-<div id="recent-login-attempt-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="recent-login-attempt-title" aria-describedby="recent-login-attempt-outcome">
+<div id="recent-login-attempt-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-xs p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="recent-login-attempt-title" aria-describedby="recent-login-attempt-outcome">
     <div class="w-full max-w-md max-h-[80vh] overflow-y-auto rounded-xl border border-white/10 bg-surface-container shadow-2xl p-4 space-y-4">
         <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
                 <h2 id="recent-login-attempt-title" class="font-semibold text-on-surface">Login attempt</h2>
                 <p id="recent-login-attempt-outcome" class="text-sm text-secondary mt-1"></p>
             </div>
-            <button id="btn-close-recent-login-attempt" type="button" class="shrink-0 p-1 rounded hover:bg-surface-variant text-on-surface-variant" aria-label="Close login attempt details">
+            <button id="btn-close-recent-login-attempt" type="button" class="shrink-0 p-1 rounded-sm hover:bg-surface-variant text-on-surface-variant" aria-label="Close login attempt details">
                 <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
             </button>
         </div>
@@ -331,7 +331,7 @@
     </div>
 </div>
 
-<div id="remove-account-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="remove-account-title">
+<div id="remove-account-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-xs p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="remove-account-title">
     <div class="w-full max-w-md rounded-xl border border-white/10 bg-surface-container shadow-2xl p-5 space-y-4">
         <div>
             <h2 id="remove-account-title" class="font-semibold text-on-surface">Remove account</h2>
@@ -349,7 +349,7 @@
     </div>
 </div>
 
-<div id="unsaved-settings-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="unsaved-settings-title">
+<div id="unsaved-settings-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-xs p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="unsaved-settings-title">
     <div class="w-full max-w-md rounded-xl border border-white/10 bg-surface-container shadow-2xl p-5 space-y-4">
         <div>
             <h2 id="unsaved-settings-title" class="font-semibold text-on-surface">Unsaved settings</h2>
@@ -471,13 +471,13 @@
         button.disabled = qrScanWaiting || !hasAccounts || currentAccExpired;
 
         if (qrScanWaiting) {
-            button.className = 'bg-primary/10 border border-primary text-primary text-sm py-3 px-4 rounded-lg shadow-sm cursor-crosshair';
+            button.className = 'bg-primary/10 border border-primary text-primary text-sm py-3 px-4 rounded-lg shadow-xs cursor-crosshair';
             button.textContent = 'Waiting for Right Ctrl (' + qrScanRemainingSeconds + 's)';
         } else if (!hasAccounts || currentAccExpired) {
-            button.className = 'bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm py-3 px-4 rounded-lg shadow-sm transition-colors';
+            button.className = 'bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm py-3 px-4 rounded-lg shadow-xs transition-colors';
             button.textContent = currentAccExpired ? 'Renew session to use QR login' : 'Login via QR';
         } else {
-            button.className = 'bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-sm';
+            button.className = 'bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-xs';
             button.textContent = 'Login via QR';
         }
     }
@@ -546,9 +546,9 @@
         
         btn.disabled = !hasAccounts;
         if (!hasAccounts) {
-            btn.className = "bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed rounded-xl text-sm py-3 px-2 shadow-sm transition-colors";
+            btn.className = "bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed rounded-xl text-sm py-3 px-2 shadow-xs transition-colors";
         } else {
-            btn.className = "glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-sm";
+            btn.className = "glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-xs";
         }
     }
 
@@ -641,8 +641,8 @@
             renewButton.type = 'button';
             renewButton.disabled = !sessionExpired || !acc.steamId;
             renewButton.className = sessionExpired && acc.steamId
-                ? "shrink-0 rounded p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
-                : "shrink-0 rounded p-1 text-on-surface-variant opacity-70 cursor-not-allowed transition-colors";
+                ? "shrink-0 rounded-sm p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
+                : "shrink-0 rounded-sm p-1 text-on-surface-variant opacity-70 cursor-not-allowed transition-colors";
             renewButton.title = "Renew session";
             renewButton.setAttribute('aria-label', "Renew session");
             renewButton.innerHTML = '<svg class="ui-icon renew-session-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 0 0-13.66-5.66L4 8"/><path d="M4 4v4h4"/><path d="M4 12a8 8 0 0 0 13.66 5.66L20 16"/><path d="M20 20v-4h-4"/></svg>';
@@ -654,7 +654,7 @@
             accountActions.appendChild(renewButton);
 
             const removeButton = document.createElement('button');
-            removeButton.className = "shrink-0 rounded p-1 text-on-surface-variant hover:bg-error-container/30 hover:text-error transition-colors";
+            removeButton.className = "shrink-0 rounded-sm p-1 text-on-surface-variant hover:bg-error-container/30 hover:text-error transition-colors";
             removeButton.title = "Remove " + acc.name;
             removeButton.setAttribute('aria-label', "Remove " + acc.name);
             removeButton.innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
@@ -977,7 +977,7 @@
         recentLoginAttempts.slice(0, 3).forEach(attempt => {
             const button = document.createElement('button');
             button.type = 'button';
-            button.className = 'min-w-0 rounded-lg border border-white/10 bg-surface-container-lowest p-2 text-left hover:bg-surface-variant focus:outline-none focus:ring-1 focus:ring-primary transition-colors';
+            button.className = 'min-w-0 rounded-lg border border-white/10 bg-surface-container-lowest p-2 text-left hover:bg-surface-variant focus:outline-hidden focus:ring-1 focus:ring-primary transition-colors';
             button.onclick = () => showRecentLoginAttempt(attempt, button);
             const device = document.createElement('div');
             device.className = 'truncate text-sm font-medium text-on-surface';
