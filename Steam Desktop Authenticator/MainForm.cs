@@ -88,11 +88,17 @@ namespace Steam_Desktop_Authenticator
         private bool backgroundServicesStarted;
         private bool startupAccountMaintenanceCompleted;
         private bool startupAccountMaintenanceFinished;
+        private bool startupUpdateCheckStarted;
         private bool settingsDirty;
         private bool explicitExitRequested;
         private bool allowExitAfterSettingsSave;
         private bool exitAfterSettingsSaveRequested;
         private bool settingsSaveInProgress;
+        private readonly UpdatePreferenceRevisionTracker updatePreferenceRevision;
+        private readonly Func<ProxyConfiguration, CancellationToken, Task<ProxyTestResult>> proxyTestAsync;
+        private readonly Action<ProxyConfiguration> applyProxy;
+        private readonly HttpClient updateClient;
+        private readonly Func<string, DialogResult> confirmAutomaticLoginAction;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -484,12 +490,37 @@ namespace Steam_Desktop_Authenticator
             return hasRetry && IsTradeConfirmationTokenFailure(exception);
         }
 
-        public MainForm()
+        public MainForm() : this(null, null, null, null, null)
+        {
+        }
+
+        internal MainForm(
+            Manifest initialManifest,
+            UpdatePreferenceRevisionTracker updatePreferenceRevision,
+            Func<ProxyConfiguration, CancellationToken, Task<ProxyTestResult>> proxyTestAsync,
+            Action<ProxyConfiguration> applyProxy,
+            HttpClient updateClient = null,
+            Func<string, DialogResult> confirmAutomaticLoginAction = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
             timerTradesPopup.Enabled = false;
             loginActionsTimer.Tick += loginActionsTimer_Tick;
+            manifest = initialManifest;
+            this.updatePreferenceRevision = updatePreferenceRevision ?? new UpdatePreferenceRevisionTracker();
+            this.proxyTestAsync = proxyTestAsync ?? ProxyService.TestAsync;
+            this.applyProxy = applyProxy ?? ProxyService.Apply;
+            this.updateClient = updateClient ?? defaultUpdateClient;
+            this.confirmAutomaticLoginAction = confirmAutomaticLoginAction ?? ShowAutomaticLoginActionConfirmation;
+        }
+
+        private static DialogResult ShowAutomaticLoginActionConfirmation(string message)
+        {
+            return AstroMessageBox.Show(
+                message,
+                "Enable Automatic Login Action",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
         }
 
         public void SetEncryptionKey(string key)
@@ -576,6 +607,8 @@ namespace Steam_Desktop_Authenticator
 
             if (backgroundServicesEligible)
                 StartBackgroundServicesAfterUiReady();
+
+            StartStartupUpdateCheck();
 
             if (startSilent)
             {
@@ -797,14 +830,14 @@ namespace Steam_Desktop_Authenticator
         {
             if (m.Msg == Program.RestoreExistingInstanceMessage)
             {
-                TryBeginInvoke(RestoreWindowFromActivation);
+                TryBeginInvoke(() => RestoreWindowFromActivation(true));
                 return;
             }
 
             base.WndProc(ref m);
         }
 
-        private void RestoreWindowFromActivation()
+        private void RestoreWindowFromActivation(bool checkForUpdates = false)
         {
             if (IsDisposed)
                 return;
@@ -813,6 +846,9 @@ namespace Steam_Desktop_Authenticator
             WindowState = FormWindowState.Normal;
             Activate();
             BringToFront();
+
+            if (checkForUpdates)
+                StartUpdateCheckFromActivation();
         }
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
@@ -1121,14 +1157,7 @@ namespace Steam_Desktop_Authenticator
 
         private void labelUpdate_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
         {
-            if (newVersion == null || currentVersion == null)
-            {
-                checkForUpdates();
-            }
-            else
-            {
-                compareVersions();
-            }
+            _ = CheckForUpdatesAsync(false);
         }
 
         private void btnCopy_Click(object sender, EventArgs e)
@@ -3239,33 +3268,91 @@ namespace Steam_Desktop_Authenticator
             timerSteamGuard_Tick(this, EventArgs.Empty);
             loadSettings();
             ConfigureLoginActionsMonitor();
-            checkForUpdates();
+        }
+
+        private void StartStartupUpdateCheck()
+        {
+            if (manifest == null)
+                return;
+
+            TryStartStartupUpdateCheck(ref startupUpdateCheckStarted, () => _ = CheckForUpdatesAsync(true));
+        }
+
+        private void StartUpdateCheckFromActivation()
+        {
+            if (manifest == null)
+                return;
+
+            if (TryStartStartupUpdateCheck(ref startupUpdateCheckStarted, () => _ = CheckForUpdatesAsync(true)))
+                return;
+
+            _ = CheckForUpdatesAsync(true);
+        }
+
+        internal static bool TryStartStartupUpdateCheck(ref bool startupUpdateCheckStarted, Action startCheck)
+        {
+            if (startCheck == null)
+                throw new ArgumentNullException(nameof(startCheck));
+            if (startupUpdateCheckStarted)
+                return false;
+
+            startupUpdateCheckStarted = true;
+            startCheck();
+            return true;
+        }
+
+        private static async Task<StorageResult> ExecuteSettingsSaveWithUpdaterPreferenceAsync(
+            UpdatePreferenceRevisionTracker updatePreferenceRevision,
+            Manifest manifest,
+            bool requestedValue,
+            Func<Task<StorageResult>> prepareSettingsAsync,
+            Action<Manifest> updateSettings)
+        {
+            if (updatePreferenceRevision == null)
+                throw new ArgumentNullException(nameof(updatePreferenceRevision));
+            if (manifest == null)
+                throw new ArgumentNullException(nameof(manifest));
+            if (prepareSettingsAsync == null)
+                throw new ArgumentNullException(nameof(prepareSettingsAsync));
+            if (updateSettings == null)
+                throw new ArgumentNullException(nameof(updateSettings));
+
+            UpdatePreferenceRevisionTracker.SettingsSaveOperation settingsSave = updatePreferenceRevision.BeginSettingsSave();
+            StorageResult preparationResult = await prepareSettingsAsync();
+            if (!preparationResult.Succeeded)
+                return preparationResult;
+
+            return settingsSave.SaveSettingsWithResult(manifest, requestedValue, updateSettings);
         }
 
         // Logic for version checking
-        private Version newVersion = null;
-        private Version currentVersion = null;
-        private static readonly HttpClient updateClient = new HttpClient();
+        private static readonly HttpClient defaultUpdateClient = new HttpClient();
         private const int MaximumUpdateResponseBytes = 1024 * 1024;
         private static readonly TimeSpan UpdateRequestTimeout = TimeSpan.FromSeconds(20);
-        private string updateUrl = null;
-        private bool startupUpdateCheck = true;
         private bool isCheckingForUpdates = false;
+        private string updateCheckStatusMessage = String.Empty;
+        private string updateCheckStatusTone = "info";
+        private Version availableUpdateVersion;
+        private string availableUpdateDownloadUrl;
 
-        private async void checkForUpdates()
+        internal async Task CheckForUpdatesAsync(bool isStartupCheck)
         {
-            if (isCheckingForUpdates) return;
-            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
-            if (cancellationToken.IsCancellationRequested)
+            if (manifest == null)
                 return;
-            
-            if (startupUpdateCheck && !Manifest.GetManifest().CheckForUpdates)
+
+            if (isCheckingForUpdates)
             {
-                startupUpdateCheck = false;
+                if (!isStartupCheck)
+                    await PublishUpdateCheckStateAsync(true, "A check for updates is already in progress.", "info");
                 return;
             }
 
+            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
             isCheckingForUpdates = true;
+            await PublishUpdateCheckStateAsync(true, "Checking for updates...", "info");
 
             try
             {
@@ -3284,6 +3371,7 @@ namespace Steam_Desktop_Authenticator
                             throw new InvalidDataException("The update service returned an oversized response.");
                 
                         string responseBody = await ReadResponseBodyWithLimitAsync(response.Content, requestCancellationToken);
+                        requestCancellationToken.ThrowIfCancellationRequested();
 
                         JObject resultObject;
                         using (StringReader stringReader = new StringReader(responseBody))
@@ -3307,10 +3395,8 @@ namespace Steam_Desktop_Authenticator
                         if (String.IsNullOrWhiteSpace(downloadUrl))
                             throw new InvalidDataException("The update service returned no trusted download.");
 
-                        newVersion = parsedVersion;
-                        currentVersion = new Version(Application.ProductVersion);
-                        updateUrl = downloadUrl;
-                        compareVersions();
+                        Version installedVersion = new Version(Application.ProductVersion);
+                        await ShowUpdateResultAsync(parsedVersion, installedVersion, downloadUrl, isStartupCheck, cancellationToken);
                     }
                 }
             }
@@ -3318,70 +3404,126 @@ namespace Steam_Desktop_Authenticator
             {
                 // The form is closing; cancellation is expected.
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                if (!startupUpdateCheck)
-                {
-                    AstroMessageBox.Show("Failed to check for updates.");
-                }
+                DiagnosticErrorLogger.Log("Application update check", ex, "The update service request failed.");
+                await PublishUpdateCheckStateAsync(false, "Could not check for updates. Try again.", "error");
+                if (!isStartupCheck && !lifetimeCancellationSource.IsCancellationRequested)
+                    AstroMessageBox.Show("Failed to check for updates.", "Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             finally
             {
                 isCheckingForUpdates = false;
-                startupUpdateCheck = false; // Set when it's done checking on startup
             }
         }
 
-        private void compareVersions()
+        private async Task ShowUpdateResultAsync(Version latestVersion, Version installedVersion, string downloadUrl, bool isStartupCheck, CancellationToken cancellationToken)
         {
-            if (newVersion > currentVersion)
+            if (IsUpdateAvailable(latestVersion, installedVersion))
             {
+                availableUpdateVersion = latestVersion;
+                availableUpdateDownloadUrl = downloadUrl;
                 labelUpdate.Text = "Download new version"; // Show the user a new version is available if they press no
-                
-                string checkboxText = startupUpdateCheck ? "Don't check for updates on launch" : null;
+
+                await PublishAvailableUpdateAsync();
+                await PublishUpdateCheckStateAsync(false, String.Format("Version {0} is available.", latestVersion), "success");
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!ShouldShowUpdateNotification(isStartupCheck, manifest.CheckForUpdates))
+                    return;
+
+                string checkboxText = isStartupCheck ? "Don't show update notifications on launch" : null;
                 bool isChecked = false;
-                
+
                 DialogResult updateDialog;
                 if (checkboxText != null)
                 {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out isChecked);
+                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, latestVersion.ToString()), "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out isChecked);
                 }
                 else
                 {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, newVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
+                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, latestVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
                 }
 
-                if (startupUpdateCheck && isChecked)
-                {
-                    Manifest.GetManifest().CheckForUpdates = false;
-                    Manifest.GetManifest().Save();
-                }
+                if (isStartupCheck && isChecked)
+                    DisableStartupUpdateChecks();
 
                 if (updateDialog == DialogResult.Yes)
-                {
-                    try
-                    {
-                        using (Process process = Process.Start(new ProcessStartInfo(updateUrl) { UseShellExecute = true })
-                            ?? throw new InvalidOperationException("Windows did not create the update process."))
-                        {
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        DiagnosticErrorLogger.Log("Application update", ex, "The trusted update page could not be opened.");
-                        AstroMessageBox.Show("The update page could not be opened. Visit the project release page to download the update.", "Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-                }
+                    OpenUpdateUrl(downloadUrl);
             }
             else
             {
-                if (!startupUpdateCheck)
-                {
-                    AstroMessageBox.Show(String.Format("You are using the latest version: {0}", Application.ProductVersion));
-                }
+                availableUpdateVersion = null;
+                availableUpdateDownloadUrl = null;
+                await PublishAvailableUpdateAsync();
+                string latestMessage = String.Format("You are using the latest version: {0}", Application.ProductVersion);
+                await PublishUpdateCheckStateAsync(false, latestMessage, "success");
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!isStartupCheck)
+                    AstroMessageBox.Show(latestMessage, "Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private void DisableStartupUpdateChecks()
+        {
+            if (manifest == null)
+                return;
+
+            StorageResult saveResult = updatePreferenceRevision.DisableStartupUpdateChecks(manifest);
+            if (!saveResult.Succeeded)
+            {
+                DiagnosticErrorLogger.Log("Application update settings", saveResult.Exception, "The automatic update preference could not be saved.");
+                return;
             }
 
-            newVersion = null; // Check the api again next time they check for updates
+            _ = ExecuteScriptSafelyAsync("setCheckForUpdates(false);", "Update setting UI");
+        }
+
+        private async Task PublishAvailableUpdateAsync()
+        {
+            if (availableUpdateVersion == null || String.IsNullOrWhiteSpace(availableUpdateDownloadUrl))
+            {
+                await ExecuteScriptSafelyAsync("clearUpdateAvailable();", "Available update UI");
+                return;
+            }
+
+            string jsVersion = JsonConvert.SerializeObject(availableUpdateVersion.ToString());
+            await ExecuteScriptSafelyAsync($"setUpdateAvailable({jsVersion});", "Available update UI");
+        }
+
+        private void OpenAvailableUpdate()
+        {
+            if (!String.IsNullOrWhiteSpace(availableUpdateDownloadUrl))
+                OpenUpdateUrl(availableUpdateDownloadUrl);
+        }
+
+        private void OpenUpdateUrl(string downloadUrl)
+        {
+            try
+            {
+                using (Process process = Process.Start(new ProcessStartInfo(downloadUrl) { UseShellExecute = true })
+                    ?? throw new InvalidOperationException("Windows did not create the update process."))
+                {
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Application update", ex, "The trusted update page could not be opened.");
+                AstroMessageBox.Show("The update page could not be opened. Visit the project release page to download the update.", "Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async Task PublishUpdateCheckStateAsync(bool checking, string message, string tone)
+        {
+            updateCheckStatusMessage = message ?? String.Empty;
+            updateCheckStatusTone = tone ?? "info";
+
+            if (GetCoreWebView2IfAvailable() == null)
+                return;
+
+            string jsMessage = JsonConvert.SerializeObject(updateCheckStatusMessage);
+            string jsTone = JsonConvert.SerializeObject(updateCheckStatusTone);
+            string jsChecking = checking.ToString().ToLowerInvariant();
+            await ExecuteScriptSafelyAsync($"updateCheckState({jsChecking}, {jsMessage}, {jsTone});", "Update status UI");
         }
 
 
@@ -3613,6 +3755,8 @@ namespace Steam_Desktop_Authenticator
                 // Set autostart checkbox
                 bool isAutoStart = WindowsStartup.IsEnabled();
                 _ = ExecuteScriptSafelyAsync($"setAutoStart({isAutoStart.ToString().ToLowerInvariant()});", "Startup setting UI");
+                _ = PublishAvailableUpdateAsync();
+                _ = PublishUpdateCheckStateAsync(isCheckingForUpdates, updateCheckStatusMessage, updateCheckStatusTone);
 
                 StartBackgroundServicesAfterUiReady();
             };
@@ -3634,6 +3778,7 @@ namespace Steam_Desktop_Authenticator
             settings["autoConfirmMarket"] = manifest.AutoConfirmMarketTransactions;
             settings["autoConfirmTrades"] = manifest.AutoConfirmTrades;
             settings["minimizeToTray"] = manifest.MinimizeToTray;
+            settings["checkForUpdates"] = manifest.CheckForUpdates;
             settings["diagnosticErrorLoggingEnabled"] = manifest.DiagnosticErrorLoggingEnabled;
             settings["loginActionMonitoringEnabled"] = manifest.LoginActionMonitoringEnabled;
             settings["loginActionMode"] = manifest.LoginActionMode;
@@ -3737,7 +3882,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                ProxyTestResult result = await ProxyService.TestAsync(configuration, token);
+                ProxyTestResult result = await proxyTestAsync(configuration, token);
                 if (!token.IsCancellationRequested)
                     await PublishProxyTestResultAsync(result);
             }
@@ -3751,7 +3896,7 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private async Task SaveSettingsAsync(JObject payload)
+        internal async Task SaveSettingsAsync(JObject payload)
         {
             if (settingsSaveInProgress || manifest == null)
                 return;
@@ -3793,74 +3938,69 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                if (proxyConfiguration.Enabled)
-                {
-                    proxySaveSource = BeginProxyOperation();
-                    ProxyTestResult proxyResult;
-                    try
-                    {
-                        proxyResult = await ProxyService.TestAsync(proxyConfiguration, proxySaveSource.Token);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        await PublishSettingsSaveFailureAsync("The proxy test was canceled. Settings were not saved.");
-                        return;
-                    }
-                    if (!proxyResult.Succeeded)
-                    {
-                        await PublishSettingsSaveFailureAsync(proxyResult.Message + " Settings were not saved.");
-                        return;
-                    }
-                    proxySaveSource.Token.ThrowIfCancellationRequested();
-                }
-                else
-                {
-                    CancelProxyOperation();
-                }
-
-                bool automaticDenyExceptionChanged = newLoginActionMode == LoginActionModes.Deny &&
-                    (newLoginActionAutoAllowIpEnabled != manifest.LoginActionAutoAllowIpEnabled ||
-                     newLoginActionAutoAllowCurrentDeviceIp != manifest.LoginActionAutoAllowCurrentDeviceIp ||
-                     !String.Equals(newLoginActionAutoAllowIp, manifest.LoginActionAutoAllowIp, StringComparison.Ordinal));
-                if ((newLoginActionMode != manifest.LoginActionMode && newLoginActionMode != LoginActionModes.Manual) || automaticDenyExceptionChanged)
-                {
-                    string actionDescription = newLoginActionMode == LoginActionModes.ApprovePersistent
-                        ? "automatically approve every pending login request with a persistent sign-in"
-                        : "automatically deny every pending login request";
-                    if (newLoginActionMode == LoginActionModes.Deny && newLoginActionAutoAllowIpEnabled)
-                    {
-                        var allowedSources = new List<string>();
-                        if (newLoginActionAutoAllowCurrentDeviceIp)
-                            allowedSources.Add("this device's current public IP address");
-                        if (!String.IsNullOrWhiteSpace(newLoginActionAutoAllowIp))
-                            allowedSources.Add(newLoginActionAutoAllowIp);
-                        if (allowedSources.Count > 0)
-                            actionDescription += ", except requests from " + String.Join(" or ", allowedSources) + ", which will be approved with a persistent sign-in";
-                    }
-                    DialogResult confirmation = AstroMessageBox.Show(
-                        "This setting will " + actionDescription + " for every managed account, including requests that are already pending. Login monitoring will remain enabled while this rule is active. Continue?",
-                        "Enable Automatic Login Action",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Warning);
-                    if (confirmation != DialogResult.Yes)
-                    {
-                        await PublishSettingsSaveFailureAsync("Settings were not saved.");
-                        return;
-                    }
-                }
-
                 bool tradeConfirmationCustomIntervalEnabled = (bool?)payload["tradeConfirmationCustomIntervalEnabled"] ?? false;
                 int tradeConfirmationCheckInterval = Math.Clamp((int?)payload["tradeConfirmationCheckInterval"] ?? 15, 3, 3600);
                 bool autoConfirmMarket = (bool?)payload["autoConfirmMarket"] ?? false;
                 bool autoConfirmTrades = (bool?)payload["autoConfirmTrades"] ?? false;
                 bool minimizeToTray = (bool?)payload["minimizeToTray"] ?? false;
+                bool checkForUpdates = (bool?)payload["checkForUpdates"] ?? manifest.CheckForUpdates;
                 bool diagnosticLogging = (bool?)payload["diagnosticErrorLoggingEnabled"] ?? false;
                 bool loginMonitoring = ((bool?)payload["loginActionMonitoringEnabled"] ?? false) || newLoginActionMode != LoginActionModes.Manual;
 
-                if (proxyConfiguration.Enabled)
-                    proxySaveSource.Token.ThrowIfCancellationRequested();
+                StorageResult saveResult = await ExecuteSettingsSaveWithUpdaterPreferenceAsync(
+                    updatePreferenceRevision,
+                    manifest,
+                    checkForUpdates,
+                    async () =>
+                    {
+                        if (!proxyConfiguration.Enabled)
+                        {
+                            CancelProxyOperation();
+                        }
+                        else
+                        {
+                            proxySaveSource = BeginProxyOperation();
+                            ProxyTestResult proxyResult = await proxyTestAsync(proxyConfiguration, proxySaveSource.Token);
+                            if (!proxyResult.Succeeded)
+                            {
+                                return StorageResult.Failure(
+                                    StorageFailureKind.Validation,
+                                    proxyResult.Message + " Settings were not saved.");
+                            }
 
-                StorageResult saveResult = manifest.SaveSettingsWithResult(staged =>
+                            proxySaveSource.Token.ThrowIfCancellationRequested();
+                        }
+
+                        bool automaticDenyExceptionChanged = newLoginActionMode == LoginActionModes.Deny &&
+                            (newLoginActionAutoAllowIpEnabled != manifest.LoginActionAutoAllowIpEnabled ||
+                             newLoginActionAutoAllowCurrentDeviceIp != manifest.LoginActionAutoAllowCurrentDeviceIp ||
+                             !String.Equals(newLoginActionAutoAllowIp, manifest.LoginActionAutoAllowIp, StringComparison.Ordinal));
+                        if ((newLoginActionMode != manifest.LoginActionMode && newLoginActionMode != LoginActionModes.Manual) || automaticDenyExceptionChanged)
+                        {
+                            string actionDescription = newLoginActionMode == LoginActionModes.ApprovePersistent
+                                ? "automatically approve every pending login request with a persistent sign-in"
+                                : "automatically deny every pending login request";
+                            if (newLoginActionMode == LoginActionModes.Deny && newLoginActionAutoAllowIpEnabled)
+                            {
+                                var allowedSources = new List<string>();
+                                if (newLoginActionAutoAllowCurrentDeviceIp)
+                                    allowedSources.Add("this device's current public IP address");
+                                if (!String.IsNullOrWhiteSpace(newLoginActionAutoAllowIp))
+                                    allowedSources.Add(newLoginActionAutoAllowIp);
+                                if (allowedSources.Count > 0)
+                                    actionDescription += ", except requests from " + String.Join(" or ", allowedSources) + ", which will be approved with a persistent sign-in";
+                            }
+                            DialogResult confirmation = confirmAutomaticLoginAction(
+                                "This setting will " + actionDescription + " for every managed account, including requests that are already pending. Login monitoring will remain enabled while this rule is active. Continue?");
+                            if (confirmation != DialogResult.Yes)
+                            {
+                                return StorageResult.Failure(StorageFailureKind.Validation, "Settings were not saved.");
+                            }
+                        }
+
+                        return StorageResult.Success();
+                    },
+                    staged =>
                 {
                     staged.TradeConfirmationCustomIntervalEnabled = tradeConfirmationCustomIntervalEnabled;
                     staged.TradeConfirmationCheckInterval = tradeConfirmationCheckInterval;
@@ -3887,7 +4027,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                ProxyService.Apply(proxyConfiguration);
+                applyProxy(proxyConfiguration);
                 DiagnosticErrorLogger.Configure(manifest.DiagnosticErrorLoggingEnabled);
                 ConfigureTradeConfirmationMonitor();
                 ConfigureLoginActionsMonitor();
@@ -3919,6 +4059,28 @@ namespace Steam_Desktop_Authenticator
                 CompleteProxyOperation(proxySaveSource);
                 settingsSaveInProgress = false;
             }
+        }
+
+        internal static bool IsUpdateAvailable(Version latestVersion, Version installedVersion)
+        {
+            if (latestVersion == null || installedVersion == null)
+                return false;
+
+            return NormalizeReleaseVersion(latestVersion).CompareTo(NormalizeReleaseVersion(installedVersion)) > 0;
+        }
+
+        internal static bool ShouldShowUpdateNotification(bool isStartupCheck, bool checkForUpdates)
+        {
+            return !isStartupCheck || checkForUpdates;
+        }
+
+        private static Version NormalizeReleaseVersion(Version version)
+        {
+            return new Version(
+                version.Major,
+                version.Minor,
+                Math.Max(0, version.Build),
+                Math.Max(0, version.Revision));
         }
 
         private static bool IsTrustedUpdateUrl(string value)
@@ -3980,7 +4142,7 @@ namespace Steam_Desktop_Authenticator
             {
                 "proxyEnabled", "loginActionAutoAllowIpEnabled", "loginActionAutoAllowCurrentDeviceIp",
                 "tradeConfirmationCustomIntervalEnabled", "autoConfirmMarket", "autoConfirmTrades",
-                "minimizeToTray", "diagnosticErrorLoggingEnabled", "loginActionMonitoringEnabled"
+                "minimizeToTray", "checkForUpdates", "diagnosticErrorLoggingEnabled", "loginActionMonitoringEnabled"
             };
             foreach (string property in booleanProperties)
             {
@@ -4094,6 +4256,14 @@ namespace Steam_Desktop_Authenticator
                     AstroMessageBox.Show("The requested account removal is invalid. Refresh the account list and try again.", "Remove Account", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     _ = ExecuteScriptSafelyAsync("hideSpinner('remove-account');", "Managed account removal");
                 }
+            }
+            else if (action == "open_update_available")
+            {
+                OpenAvailableUpdate();
+            }
+            else if (action == "check_for_updates")
+            {
+                _ = CheckForUpdatesAsync(false);
             }
             else if (action == "load_settings")
             {
