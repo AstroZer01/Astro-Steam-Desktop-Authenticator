@@ -410,6 +410,7 @@
         if (!validTabIds.has(tabId)) return;
         if (activeTabId === tabId) return;
         if (activeTabId === 'settings' && tabId !== 'settings' && settingsDirty) {
+            if (tabId !== 'trades') pendingConfirmationTab = null;
             pendingSettingsNavigation = tabId;
             openUnsavedSettingsModal();
             return;
@@ -556,6 +557,7 @@
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         const tradeSelect = document.getElementById('trade-account-select');
         const loginSelect = document.getElementById('login-account-select');
+        const previousTradeSelection = tradeSelect ? (tradeSelect.value || 'all') : 'all';
         if (currentAccExpired) {
             if (tradeSelect) tradeSelect.value = 'all';
             if (loginSelect) loginSelect.value = 'all';
@@ -564,10 +566,13 @@
             if (tradeSelect && tradeSelect.value !== 'all' && hasOption(tradeSelect)) tradeSelect.value = currentAccSteamId;
             if (loginSelect && loginSelect.value !== 'all' && hasOption(loginSelect)) loginSelect.value = currentAccSteamId;
         }
+        const tradeSelectionChanged = syncTradeAccountSelection(previousTradeSelection);
         renderLoginActions();
         updateQrLoginButton();
         if (selectionChanged && currentAccExpired) {
-            window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: 'all' });
+            if (!tradeSelectionChanged) {
+                window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: 'all' });
+            }
             window.chrome.webview.postMessage({ action: 'load_login_actions' });
         }
     }
@@ -619,6 +624,7 @@
         
         let sel = document.getElementById('trade-account-select');
         if (sel) {
+            const previousSelection = sel.value || 'all';
             const previous = sel.value || (currentAccExpired ? 'all' : currentAccSteamId) || 'all';
             sel.innerHTML = '';
             const allOption = document.createElement('option');
@@ -632,6 +638,7 @@
                 sel.appendChild(opt);
             });
             sel.value = usableAccounts.some(account => account.steamId === previous) && !currentAccExpired ? previous : 'all';
+            syncTradeAccountSelection(previousSelection);
         }
 
         let loginSelect = document.getElementById('login-account-select');
@@ -824,6 +831,16 @@
         }
     }
 
+    function syncTradeAccountSelection(previousSelection) {
+        const tradeSelect = document.getElementById('trade-account-select');
+        if (!tradeSelect) return false;
+        const nextSelection = tradeSelect.value || 'all';
+        if (nextSelection === previousSelection) return false;
+        beginTradeLoad();
+        window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: nextSelection });
+        return true;
+    }
+
     const confirmationTabOrder = ['all', 'trades', 'market'];
     const validConfirmationTabs = new Set(confirmationTabOrder);
     let activeConfirmationTab = 'all';
@@ -906,12 +923,17 @@
         renderConfirmations();
     }
 
+    function confirmationTabPersisted(tabId) {
+        if (validConfirmationTabs.has(tabId)) {
+            persistedConfirmationTab = tabId;
+        }
+    }
+
     function setConfirmationTab(tabId, focusTab = false, persist = true) {
         if (!validConfirmationTabs.has(tabId)) return;
         activeConfirmationTab = tabId;
         renderConfirmations();
         if (persist && persistedConfirmationTab !== tabId) {
-            persistedConfirmationTab = tabId;
             window.chrome.webview.postMessage({ action: 'confirmation_tab_changed', tabName: tabId });
         }
         if (focusTab) {
@@ -1740,10 +1762,14 @@
                 btn.classList.remove('bg-secondary', 'text-on-secondary');
             }, 1500);
         }
-        if (saveContext && saveContext.startsWith('tab:')) {
-            const target = saveContext.substring(4);
-            pendingSettingsNavigation = null;
-            performTabSwitch(target);
+        const navigationTarget = saveContext && saveContext.startsWith('tab:')
+            ? saveContext.substring(4)
+            : pendingSettingsNavigation;
+        pendingSettingsNavigation = null;
+        if (navigationTarget && validTabIds.has(navigationTarget)) {
+            performTabSwitch(navigationTarget);
+        } else {
+            pendingConfirmationTab = null;
         }
     }
 
