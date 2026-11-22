@@ -35,6 +35,9 @@ namespace SteamAuth
         [JsonConverter(typeof(StringEnumConverter))]
         public EMobileConfirmationType ConfType { get; set; } = EMobileConfirmationType.Invalid;
 
+        [JsonProperty(PropertyName = "type_name")]
+        public string TypeName { get; set; }
+
         public enum EMobileConfirmationType
         {
             Invalid = 0,
@@ -43,7 +46,14 @@ namespace SteamAuth
             MarketListing = 3,
             FeatureOptOut = 4,
             PhoneNumberChange = 5,
-            AccountRecovery = 6
+            AccountRecovery = 6,
+            BuildChangeRequest = 7,
+            AddUser = 8,
+            RegisterApiKey = 9,
+            InviteToFamilyGroup = 10,
+            JoinFamilyGroup = 11,
+            MarketPurchase = 12,
+            RequestRefund = 13
         }
     }
 
