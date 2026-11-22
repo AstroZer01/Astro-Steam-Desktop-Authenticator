@@ -99,6 +99,8 @@ namespace Steam_Desktop_Authenticator
         private readonly Action<ProxyConfiguration> applyProxy;
         private readonly HttpClient updateClient;
         private readonly Func<string, DialogResult> confirmAutomaticLoginAction;
+        private readonly Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate;
+        private readonly Func<bool, string, string, Task> publishUpdateCheckStateAsync;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -500,7 +502,9 @@ namespace Steam_Desktop_Authenticator
             Func<ProxyConfiguration, CancellationToken, Task<ProxyTestResult>> proxyTestAsync,
             Action<ProxyConfiguration> applyProxy,
             HttpClient updateClient = null,
-            Func<string, DialogResult> confirmAutomaticLoginAction = null)
+            Func<string, DialogResult> confirmAutomaticLoginAction = null,
+            Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate = null,
+            Func<bool, string, string, Task> publishUpdateCheckStateAsync = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
@@ -512,6 +516,23 @@ namespace Steam_Desktop_Authenticator
             this.applyProxy = applyProxy ?? ProxyService.Apply;
             this.updateClient = updateClient ?? defaultUpdateClient;
             this.confirmAutomaticLoginAction = confirmAutomaticLoginAction ?? ShowAutomaticLoginActionConfirmation;
+            this.promptForUpdate = promptForUpdate ?? ShowUpdateAvailablePrompt;
+            this.publishUpdateCheckStateAsync = publishUpdateCheckStateAsync;
+        }
+
+        private static (DialogResult Result, bool DisableStartupChecks) ShowUpdateAvailablePrompt(Version latestVersion, string checkboxText)
+        {
+            string message = String.Format(
+                "A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}",
+                Application.ProductVersion,
+                latestVersion.ToString());
+            if (checkboxText != null)
+            {
+                DialogResult result = AstroMessageBox.Show(message, "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out bool isChecked);
+                return (result, isChecked);
+            }
+
+            return (AstroMessageBox.Show(message, "New Version", MessageBoxButtons.YesNo), false);
         }
 
         private static DialogResult ShowAutomaticLoginActionConfirmation(string message)
@@ -3328,6 +3349,7 @@ namespace Steam_Desktop_Authenticator
         // Logic for version checking
         private static readonly HttpClient defaultUpdateClient = new HttpClient();
         private const int MaximumUpdateResponseBytes = 1024 * 1024;
+        private const string AutomaticUpdateChecksDisabledMessage = "Automatic update checks are disabled. You can check manually anytime.";
         private static readonly TimeSpan UpdateRequestTimeout = TimeSpan.FromSeconds(20);
         private bool isCheckingForUpdates = false;
         private string updateCheckStatusMessage = String.Empty;
@@ -3351,52 +3373,72 @@ namespace Steam_Desktop_Authenticator
             if (cancellationToken.IsCancellationRequested)
                 return;
 
+            if (!ShouldRunUpdateCheck(isStartupCheck, manifest.CheckForUpdates))
+            {
+                if (String.IsNullOrEmpty(updateCheckStatusMessage))
+                    await PublishUpdateCheckStateAsync(false, AutomaticUpdateChecksDisabledMessage, "info");
+                return;
+            }
+
+            string previousStatusMessage = updateCheckStatusMessage;
+            string previousStatusTone = updateCheckStatusTone;
+            bool restoreIdleStateAfterAbort = false;
             isCheckingForUpdates = true;
-            await PublishUpdateCheckStateAsync(true, "Checking for updates...", "info");
 
             try
             {
-                using (CancellationTokenSource updateTimeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
-                using (var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest"))
+                await PublishUpdateCheckStateAsync(true, "Checking for updates...", "info");
+                if (cancellationToken.IsCancellationRequested)
+                    return;
+
+                if (!ShouldRunUpdateCheck(isStartupCheck, manifest.CheckForUpdates))
                 {
-                    updateTimeoutSource.CancelAfter(UpdateRequestTimeout);
-                    CancellationToken requestCancellationToken = updateTimeoutSource.Token;
-                    request.Headers.Add("User-Agent", "Astro Steam Desktop Assistant");
-                    request.Headers.Add("Accept", "application/json");
-                
-                    using (HttpResponseMessage response = await updateClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, requestCancellationToken))
+                    restoreIdleStateAfterAbort = true;
+                }
+                else
+                {
+                    using (CancellationTokenSource updateTimeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                    using (var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest"))
                     {
-                        response.EnsureSuccessStatusCode();
-                        if (response.Content == null || response.Content.Headers.ContentLength > MaximumUpdateResponseBytes)
-                            throw new InvalidDataException("The update service returned an oversized response.");
-                
-                        string responseBody = await ReadResponseBodyWithLimitAsync(response.Content, requestCancellationToken);
-                        requestCancellationToken.ThrowIfCancellationRequested();
-
-                        JObject resultObject;
-                        using (StringReader stringReader = new StringReader(responseBody))
-                        using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                        updateTimeoutSource.CancelAfter(UpdateRequestTimeout);
+                        CancellationToken requestCancellationToken = updateTimeoutSource.Token;
+                        request.Headers.Add("User-Agent", "Astro Steam Desktop Assistant");
+                        request.Headers.Add("Accept", "application/json");
+                    
+                        using (HttpResponseMessage response = await updateClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, requestCancellationToken))
                         {
-                            resultObject = JObject.Load(jsonReader);
+                            response.EnsureSuccessStatusCode();
+                            if (response.Content == null || response.Content.Headers.ContentLength > MaximumUpdateResponseBytes)
+                                throw new InvalidDataException("The update service returned an oversized response.");
+                    
+                            string responseBody = await ReadResponseBodyWithLimitAsync(response.Content, requestCancellationToken);
+                            requestCancellationToken.ThrowIfCancellationRequested();
+
+                            JObject resultObject;
+                            using (StringReader stringReader = new StringReader(responseBody))
+                            using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                            {
+                                resultObject = JObject.Load(jsonReader);
+                            }
+
+                            string tagName = resultObject.Value<string>("tag_name")?.Trim();
+                            if (String.IsNullOrWhiteSpace(tagName) || tagName.Length > 64)
+                                throw new InvalidDataException("The update service returned an invalid version.");
+                            if (tagName.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+                                tagName = tagName.Substring(1);
+                            if (!Version.TryParse(tagName, out Version parsedVersion) || parsedVersion < new Version(0, 0))
+                                throw new InvalidDataException("The update service returned an invalid version.");
+
+                            JArray assets = resultObject["assets"] as JArray;
+                            string downloadUrl = assets?.OfType<JObject>()
+                                .Select(asset => asset.Value<string>("browser_download_url"))
+                                .FirstOrDefault(IsTrustedUpdateUrl);
+                            if (String.IsNullOrWhiteSpace(downloadUrl))
+                                throw new InvalidDataException("The update service returned no trusted download.");
+
+                            Version installedVersion = new Version(Application.ProductVersion);
+                            await ShowUpdateResultAsync(parsedVersion, installedVersion, downloadUrl, isStartupCheck, cancellationToken);
                         }
-
-                        string tagName = resultObject.Value<string>("tag_name")?.Trim();
-                        if (String.IsNullOrWhiteSpace(tagName) || tagName.Length > 64)
-                            throw new InvalidDataException("The update service returned an invalid version.");
-                        if (tagName.StartsWith("v", StringComparison.OrdinalIgnoreCase))
-                            tagName = tagName.Substring(1);
-                        if (!Version.TryParse(tagName, out Version parsedVersion) || parsedVersion < new Version(0, 0))
-                            throw new InvalidDataException("The update service returned an invalid version.");
-
-                        JArray assets = resultObject["assets"] as JArray;
-                        string downloadUrl = assets?.OfType<JObject>()
-                            .Select(asset => asset.Value<string>("browser_download_url"))
-                            .FirstOrDefault(IsTrustedUpdateUrl);
-                        if (String.IsNullOrWhiteSpace(downloadUrl))
-                            throw new InvalidDataException("The update service returned no trusted download.");
-
-                        Version installedVersion = new Version(Application.ProductVersion);
-                        await ShowUpdateResultAsync(parsedVersion, installedVersion, downloadUrl, isStartupCheck, cancellationToken);
                     }
                 }
             }
@@ -3415,6 +3457,15 @@ namespace Steam_Desktop_Authenticator
             {
                 isCheckingForUpdates = false;
             }
+
+            if (restoreIdleStateAfterAbort)
+            {
+                bool hasPreviousStatus = !String.IsNullOrEmpty(previousStatusMessage);
+                await PublishUpdateCheckStateAsync(
+                    false,
+                    hasPreviousStatus ? previousStatusMessage : AutomaticUpdateChecksDisabledMessage,
+                    hasPreviousStatus ? previousStatusTone : "info");
+            }
         }
 
         private async Task ShowUpdateResultAsync(Version latestVersion, Version installedVersion, string downloadUrl, bool isStartupCheck, CancellationToken cancellationToken)
@@ -3431,18 +3482,8 @@ namespace Steam_Desktop_Authenticator
                 if (!ShouldShowUpdateNotification(isStartupCheck, manifest.CheckForUpdates))
                     return;
 
-                string checkboxText = isStartupCheck ? "Don't show update notifications on launch" : null;
-                bool isChecked = false;
-
-                DialogResult updateDialog;
-                if (checkboxText != null)
-                {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, latestVersion.ToString()), "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out isChecked);
-                }
-                else
-                {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, latestVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
-                }
+                string checkboxText = isStartupCheck ? "Don't check for updates on launch" : null;
+                (DialogResult updateDialog, bool isChecked) = promptForUpdate(latestVersion, checkboxText);
 
                 if (isStartupCheck && isChecked)
                     DisableStartupUpdateChecks();
@@ -3516,6 +3557,12 @@ namespace Steam_Desktop_Authenticator
         {
             updateCheckStatusMessage = message ?? String.Empty;
             updateCheckStatusTone = tone ?? "info";
+
+            if (publishUpdateCheckStateAsync != null)
+            {
+                await publishUpdateCheckStateAsync(checking, updateCheckStatusMessage, updateCheckStatusTone);
+                return;
+            }
 
             if (GetCoreWebView2IfAvailable() == null)
                 return;
@@ -4036,6 +4083,12 @@ namespace Steam_Desktop_Authenticator
                 ConfigureLoginActionsMonitor();
                 settingsDirty = false;
                 SendSettingsToWebView();
+                if (manifest.CheckForUpdates &&
+                    !isCheckingForUpdates &&
+                    String.Equals(updateCheckStatusMessage, AutomaticUpdateChecksDisabledMessage, StringComparison.Ordinal))
+                {
+                    await PublishUpdateCheckStateAsync(false, String.Empty, "info");
+                }
                 string jsContext = JsonConvert.SerializeObject(saveContext);
                 await ExecuteScriptSafelyAsync($"settingsSaved({jsContext});", "Settings UI");
 
@@ -4072,9 +4125,15 @@ namespace Steam_Desktop_Authenticator
             return NormalizeReleaseVersion(latestVersion).CompareTo(NormalizeReleaseVersion(installedVersion)) > 0;
         }
 
-        internal static bool ShouldShowUpdateNotification(bool isStartupCheck, bool checkForUpdates)
+        internal static bool ShouldRunUpdateCheck(bool isStartupCheck, bool checkForUpdates)
         {
             return !isStartupCheck || checkForUpdates;
+        }
+
+        // Also re-evaluated after an in-flight startup request finishes in case the user opted out mid-request.
+        internal static bool ShouldShowUpdateNotification(bool isStartupCheck, bool checkForUpdates)
+        {
+            return ShouldRunUpdateCheck(isStartupCheck, checkForUpdates);
         }
 
         private static Version NormalizeReleaseVersion(Version version)
