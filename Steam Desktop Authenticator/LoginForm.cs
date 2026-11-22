@@ -497,16 +497,43 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            // Begin linking mobile authenticator
+            // Resolve encryption passkey before starting Steam authenticator enrollment
+            // so closing or failing the prompt never abandons a newly issued revocation
+            // code, while still deferring first-account encryption commit until SaveAccount.
+            Manifest manifest = Manifest.GetManifest();
             AuthenticatorLinker linker = new AuthenticatorLinker(sessionData);
             linker.FinalizationProgress += UpdateFinalizationProgress;
 
             AuthenticatorEnrollmentCoordinator coordinator = new AuthenticatorEnrollmentCoordinator(
                 linker,
                 new LoginPhoneEnrollmentInteraction(account, this));
-            AuthenticatorEnrollmentOutcome enrollmentOutcome = await coordinator.StartAsync(cancellationToken);
+            InitialEnrollmentPreparation preparation;
+            try
+            {
+                preparation = await PrepareInitialEnrollmentAsync(
+                    () =>
+                    {
+                        bool resolved = TryResolveManifestPassKey(manifest, suppliedPassKey, out string resolvedKey);
+                        return (resolved, resolvedKey);
+                    },
+                    ct => coordinator.StartAsync(ct),
+                    cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                ResetLoginButton(cancellationToken);
+                return;
+            }
             if (IsDisposed || Disposing)
                 return;
+            if (!preparation.PassKeyResolved)
+            {
+                this.Close();
+                return;
+            }
+
+            string passKey = preparation.PassKey;
+            AuthenticatorEnrollmentOutcome enrollmentOutcome = preparation.EnrollmentOutcome;
             switch (enrollmentOutcome.Result)
             {
                 case AuthenticatorEnrollmentResult.AwaitingFinalization:
@@ -533,13 +560,6 @@ namespace Steam_Desktop_Authenticator
                     AstroMessageBox.Show("Error adding your authenticator: " + enrollmentError, "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     ResetLoginButton(cancellationToken);
                     return;
-            }
-
-            Manifest manifest = Manifest.GetManifest();
-            if (!TryResolveManifestPassKey(manifest, suppliedPassKey, out string passKey))
-            {
-                this.Close();
-                return;
             }
 
             //Save the file immediately; losing this would be bad.
@@ -808,6 +828,42 @@ namespace Steam_Desktop_Authenticator
                     return unavailableResult;
                 }
             }
+        }
+
+        internal readonly struct InitialEnrollmentPreparation
+        {
+            public InitialEnrollmentPreparation(
+                bool passKeyResolved,
+                string passKey,
+                AuthenticatorEnrollmentOutcome enrollmentOutcome)
+            {
+                PassKeyResolved = passKeyResolved;
+                PassKey = passKey;
+                EnrollmentOutcome = enrollmentOutcome;
+            }
+
+            public bool PassKeyResolved { get; }
+            public string PassKey { get; }
+            public AuthenticatorEnrollmentOutcome EnrollmentOutcome { get; }
+        }
+
+        internal static async Task<InitialEnrollmentPreparation> PrepareInitialEnrollmentAsync(
+            Func<(bool Resolved, string PassKey)> resolvePassKey,
+            Func<CancellationToken, Task<AuthenticatorEnrollmentOutcome>> startEnrollmentAsync,
+            CancellationToken cancellationToken)
+        {
+            if (resolvePassKey == null)
+                throw new ArgumentNullException(nameof(resolvePassKey));
+            if (startEnrollmentAsync == null)
+                throw new ArgumentNullException(nameof(startEnrollmentAsync));
+
+            (bool resolved, string passKey) = resolvePassKey();
+            if (!resolved)
+                return new InitialEnrollmentPreparation(false, null, null);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            AuthenticatorEnrollmentOutcome enrollmentOutcome = await startEnrollmentAsync(cancellationToken);
+            return new InitialEnrollmentPreparation(true, passKey, enrollmentOutcome);
         }
 
         private bool TryResolveManifestPassKey(Manifest manifest, string currentPassKey, out string resolvedPassKey)

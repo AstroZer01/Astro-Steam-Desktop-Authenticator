@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Xunit;
@@ -193,6 +194,114 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             Assert.False(resolved);
             Assert.Null(resolvedPassKey);
+        }
+
+        [Fact]
+        public async Task PrepareInitialEnrollmentAsync_SkipsSteamEnrollmentWhenPassKeyResolutionFails()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            int startEnrollmentCalls = 0;
+
+            LoginForm.InitialEnrollmentPreparation preparation = await LoginForm.PrepareInitialEnrollmentAsync(
+                () =>
+                {
+                    bool resolved = LoginForm.TryResolveManifestPassKey(
+                        manifest,
+                        null,
+                        _ => (Manifest.SetupPassKeyStatus.Failed, null),
+                        (_, _) => throw new InvalidOperationException("Current passkey prompt should not run on an empty manifest."),
+                        _ => throw new InvalidOperationException("Error message should not show on an empty manifest."),
+                        out string passKey);
+                    return (resolved, passKey);
+                },
+                _ =>
+                {
+                    startEnrollmentCalls++;
+                    return Task.FromResult(new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.AwaitingFinalization));
+                },
+                CancellationToken.None);
+
+            Assert.False(preparation.PassKeyResolved);
+            Assert.Null(preparation.PassKey);
+            Assert.Null(preparation.EnrollmentOutcome);
+            Assert.Equal(0, startEnrollmentCalls);
+            Assert.False(manifest.Encrypted);
+            Assert.Empty(manifest.Entries);
+        }
+
+        [Fact]
+        public async Task PrepareInitialEnrollmentAsync_ResolvesPassKeyBeforeStartingSteamEnrollmentAndDefersCommit()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            string manifestPath = Path.Combine(Manifest.GetExecutableDir(), "maFiles", "manifest.json");
+            List<string> steps = new List<string>();
+
+            LoginForm.InitialEnrollmentPreparation preparation = await LoginForm.PrepareInitialEnrollmentAsync(
+                () =>
+                {
+                    steps.Add("resolve-passkey");
+                    Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                        LoginForm.SetupPassKeyPromptLabel,
+                        commitImmediately: false,
+                        (label, isPassword) =>
+                        {
+                            using (InputForm form = new InputForm(label, isPassword, initializeModernUi: false))
+                            {
+                                form.SubmitInput("deferred-before-start");
+                                return form.ToPassKeyPromptResult();
+                            }
+                        },
+                        _ => { },
+                        out string passKey);
+                    Assert.Equal(Manifest.SetupPassKeyStatus.Set, status);
+                    return (true, passKey);
+                },
+                _ =>
+                {
+                    steps.Add("start-enrollment");
+                    Assert.False(manifest.Encrypted);
+                    Assert.False(File.Exists(manifestPath));
+                    return Task.FromResult(new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.Failed, "Steam rejected enrollment."));
+                },
+                CancellationToken.None);
+
+            Assert.Equal(new[] { "resolve-passkey", "start-enrollment" }, steps);
+            Assert.True(preparation.PassKeyResolved);
+            Assert.Equal("deferred-before-start", preparation.PassKey);
+            Assert.Equal(AuthenticatorEnrollmentResult.Failed, preparation.EnrollmentOutcome.Result);
+            Assert.False(manifest.Encrypted);
+            Assert.False(File.Exists(manifestPath));
+        }
+
+        [Fact]
+        public async Task PrepareInitialEnrollmentAsync_ReturnsPreResolvedPassKeyForImmediateFirstSave()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            List<string> steps = new List<string>();
+
+            LoginForm.InitialEnrollmentPreparation preparation = await LoginForm.PrepareInitialEnrollmentAsync(
+                () =>
+                {
+                    steps.Add("resolve-passkey");
+                    return (true, "ready-for-first-save");
+                },
+                _ =>
+                {
+                    steps.Add("start-enrollment");
+                    return Task.FromResult(new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.AwaitingFinalization));
+                },
+                CancellationToken.None);
+
+            Assert.Equal(new[] { "resolve-passkey", "start-enrollment" }, steps);
+            Assert.True(preparation.PassKeyResolved);
+            Assert.Equal("ready-for-first-save", preparation.PassKey);
+            Assert.Equal(AuthenticatorEnrollmentResult.AwaitingFinalization, preparation.EnrollmentOutcome.Result);
+
+            SteamGuardAccount account = CreateAccount(76561198000001007UL, "pre-resolved-user");
+            StorageResult saveResult = manifest.SaveAccount(account, encrypt: true, passKey: preparation.PassKey);
+            Assert.True(saveResult.Succeeded, saveResult.UserMessage);
+            Assert.True(manifest.Encrypted);
+            Assert.True(manifest.VerifyPasskey("ready-for-first-save"));
         }
 
         [Fact]
