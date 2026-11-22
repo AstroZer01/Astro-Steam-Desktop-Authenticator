@@ -79,25 +79,20 @@ namespace Steam_Desktop_Authenticator
             if (confirmation == null)
                 return "Confirmation";
 
-            if (IsTradeConfirmation(confirmation.ConfType))
-                return "Trade";
+            ConfirmationTypeMetadata metadata = ConfirmationTypePresentation.Get(confirmation.ConfType);
+            if (confirmation.ConfType == Confirmation.EMobileConfirmationType.Unknown ||
+                confirmation.ConfType == Confirmation.EMobileConfirmationType.Invalid ||
+                !Enum.IsDefined(typeof(Confirmation.EMobileConfirmationType), confirmation.ConfType))
+            {
+                return ConfirmationTypePresentation.SanitizeBadgeLabel(confirmation.TypeName, metadata.BadgeLabel);
+            }
 
-            if (IsMarketConfirmation(confirmation.ConfType))
-                return "Market";
-
-            string typeName = confirmation.TypeName?.Trim();
-            return String.IsNullOrEmpty(typeName) ? "Confirmation" : typeName;
+            return metadata.BadgeLabel;
         }
 
         public static string GetNotificationTitle(Confirmation.EMobileConfirmationType confType)
         {
-            if (IsMarketConfirmation(confType))
-                return "Market confirmation needed";
-
-            if (IsTradeConfirmation(confType))
-                return "Trade confirmation needed";
-
-            return "Steam confirmation needed";
+            return ConfirmationTypePresentation.Get(confType).NotificationTitle;
         }
 
         public static string GetNotificationTab(Confirmation.EMobileConfirmationType confType)
@@ -111,17 +106,22 @@ namespace Steam_Desktop_Authenticator
         public static object CreateWebPayload(string id, string accountName, Confirmation confirmation)
         {
             Confirmation.EMobileConfirmationType confType = confirmation?.ConfType ?? Confirmation.EMobileConfirmationType.Invalid;
+            ConfirmationTypeMetadata metadata = ConfirmationTypePresentation.Get(confType);
             return new
             {
                 Id = id,
                 AccountName = accountName,
                 Headline = confirmation?.Headline,
+                DefaultHeadline = metadata.DefaultHeadline,
                 Creator = confirmation?.Creator.ToString() ?? "0",
-                Icon = confirmation?.Icon,
+                Icon = ConfirmationTypePresentation.SanitizeIconUrl(confirmation?.Icon),
                 Summary = confirmation?.Summary,
                 Type = confType.ToString(),
                 Category = GetCategory(confType),
-                TypeLabel = GetDisplayLabel(confirmation)
+                TypeLabel = GetDisplayLabel(confirmation),
+                IsSecuritySensitive = metadata.IsSecuritySensitive,
+                AcceptLabel = ConfirmationTypePresentation.SanitizeButtonLabel(confirmation?.Accept, metadata.DefaultAcceptLabel, metadata.IsSecuritySensitive),
+                CancelLabel = ConfirmationTypePresentation.SanitizeButtonLabel(confirmation?.Cancel, metadata.DefaultCancelLabel, metadata.IsSecuritySensitive)
             };
         }
     }

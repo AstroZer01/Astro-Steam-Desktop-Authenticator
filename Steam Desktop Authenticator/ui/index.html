@@ -878,7 +878,10 @@
     }
 
     function getConfirmationFallbackHeadline(confirmation) {
-        if (confirmation && confirmation.Type === 'MarketPurchase') return 'Market purchase';
+        if (confirmation && typeof confirmation.DefaultHeadline === 'string' && confirmation.DefaultHeadline.trim()) {
+            return confirmation.DefaultHeadline.trim();
+        }
+        if (confirmation && confirmation.Type === 'MarketPurchase') return 'Steam purchase';
         if (confirmation && confirmation.Type === 'MarketListing') return 'Market listing';
         const category = getConfirmationCategory(confirmation);
         if (category === 'market') return 'Steam market';
@@ -1065,6 +1068,7 @@
                 const image = document.createElement('img');
                 image.src = c.Icon;
                 image.alt = '';
+                image.referrerPolicy = 'no-referrer';
                 image.className = 'w-11 h-11 shrink-0 object-contain rounded-lg bg-surface-container-lowest border border-white/5';
                 image.onerror = () => image.remove();
                 content.appendChild(image);
@@ -1078,7 +1082,9 @@
             headline.textContent = c.Headline || getConfirmationFallbackHeadline(c);
             headline.title = headline.textContent;
             const type = document.createElement('span');
-            type.className = 'shrink-0 max-w-[40%] truncate rounded-full border border-white/10 bg-surface-variant px-2 py-0.5 text-xs text-on-surface-variant';
+            type.className = c.IsSecuritySensitive
+                ? 'shrink-0 max-w-[40%] truncate rounded-full border border-error/40 bg-error-container/30 px-2 py-0.5 text-xs font-medium text-error'
+                : 'shrink-0 max-w-[40%] truncate rounded-full border border-white/10 bg-surface-variant px-2 py-0.5 text-xs text-on-surface-variant';
             type.textContent = getConfirmationTypeLabel(c);
             type.title = type.textContent;
             top.appendChild(headline);
@@ -1099,13 +1105,13 @@
             cancel.type = 'button';
             cancel.disabled = isActionInFlight;
             cancel.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-error-container/30 hover:bg-error-container/60 text-error text-sm font-medium transition-colors border border-error/30 disabled:opacity-50 disabled:cursor-not-allowed';
-            cancel.textContent = 'Cancel';
+            cancel.textContent = (typeof c.CancelLabel === 'string' && c.CancelLabel.trim()) ? c.CancelLabel.trim() : 'Cancel';
             cancel.onclick = () => sendTradeAction(c.Id, 'reject_trade', card);
             const accept = document.createElement('button');
             accept.type = 'button';
             accept.disabled = isActionInFlight;
             accept.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30 disabled:opacity-50 disabled:cursor-not-allowed';
-            accept.textContent = 'Accept';
+            accept.textContent = (typeof c.AcceptLabel === 'string' && c.AcceptLabel.trim()) ? c.AcceptLabel.trim() : 'Accept';
             accept.onclick = () => sendTradeAction(c.Id, 'accept_trade', card);
             actions.appendChild(cancel);
             actions.appendChild(accept);
