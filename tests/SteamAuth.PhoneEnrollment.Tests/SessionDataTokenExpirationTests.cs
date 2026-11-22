@@ -188,6 +188,103 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public async Task ClearingTokenWhileReaderIsPausedBeforeCacheStore_DoesNotRetainClearedCredential()
+        {
+            long farFuture = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds();
+            string initialAccessToken = CreateJwt("{\"exp\":" + farFuture + "}");
+            string initialRefreshToken = CreateJwt("{\"exp\":" + farFuture + "}");
+
+            using (ManualResetEventSlim accessReaderPaused = new ManualResetEventSlim(false))
+            using (ManualResetEventSlim releaseAccessReader = new ManualResetEventSlim(false))
+            {
+                SessionData session = new SessionData
+                {
+                    AccessToken = initialAccessToken,
+                    RefreshToken = initialRefreshToken,
+                    BeforeTokenExpirationCacheStore = _ =>
+                    {
+                        accessReaderPaused.Set();
+                        releaseAccessReader.Wait(TimeSpan.FromSeconds(5));
+                    }
+                };
+
+                Task<bool> accessReader = Task.Run(() => session.IsAccessTokenExpired());
+                Assert.True(accessReaderPaused.Wait(TimeSpan.FromSeconds(5)));
+
+                session.AccessToken = null;
+                releaseAccessReader.Set();
+
+                Assert.False(await accessReader);
+                Assert.Null(session.AccessToken);
+                Assert.False(session.HasCachedAccessTokenExpiration);
+                Assert.True(session.IsAccessTokenExpired());
+            }
+
+            using (ManualResetEventSlim refreshReaderPaused = new ManualResetEventSlim(false))
+            using (ManualResetEventSlim releaseRefreshReader = new ManualResetEventSlim(false))
+            {
+                SessionData session = new SessionData
+                {
+                    RefreshToken = initialRefreshToken,
+                    BeforeTokenExpirationCacheStore = _ =>
+                    {
+                        refreshReaderPaused.Set();
+                        releaseRefreshReader.Wait(TimeSpan.FromSeconds(5));
+                    }
+                };
+
+                Task<bool> refreshReader = Task.Run(() => session.IsRefreshTokenExpired());
+                Assert.True(refreshReaderPaused.Wait(TimeSpan.FromSeconds(5)));
+
+                session.RefreshToken = null;
+                releaseRefreshReader.Set();
+
+                Assert.False(await refreshReader);
+                Assert.Null(session.RefreshToken);
+                Assert.False(session.HasCachedRefreshTokenExpiration);
+                Assert.True(session.IsRefreshTokenExpired());
+            }
+        }
+
+        [Fact]
+        public async Task ReplacingTokenWhileReaderIsPausedBeforeCacheStore_DoesNotOverwriteReplacement()
+        {
+            long past = DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeSeconds();
+            long farFuture = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds();
+            string validToken = CreateJwt("{\"exp\":" + farFuture + "}");
+            string expiredToken = CreateJwt("{\"exp\":" + past + "}");
+
+            using (ManualResetEventSlim readerPaused = new ManualResetEventSlim(false))
+            using (ManualResetEventSlim releaseReader = new ManualResetEventSlim(false))
+            {
+                SessionData session = new SessionData
+                {
+                    AccessToken = validToken,
+                    BeforeTokenExpirationCacheStore = token =>
+                    {
+                        if (String.Equals(token, validToken, StringComparison.Ordinal))
+                        {
+                            readerPaused.Set();
+                            releaseReader.Wait(TimeSpan.FromSeconds(5));
+                        }
+                    }
+                };
+
+                Task<bool> reader = Task.Run(() => session.IsAccessTokenExpired());
+                Assert.True(readerPaused.Wait(TimeSpan.FromSeconds(5)));
+
+                session.AccessToken = expiredToken;
+                releaseReader.Set();
+
+                Assert.False(await reader);
+                Assert.Equal(expiredToken, session.AccessToken);
+                Assert.False(session.HasCachedAccessTokenExpiration);
+                Assert.True(session.IsAccessTokenExpired());
+                Assert.True(session.HasCachedAccessTokenExpiration);
+            }
+        }
+
+        [Fact]
         public async Task ConcurrentReadsAndUpdates_RemainConsistent()
         {
             long past = DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeSeconds();
