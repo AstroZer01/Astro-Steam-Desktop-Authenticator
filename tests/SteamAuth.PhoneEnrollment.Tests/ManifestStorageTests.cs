@@ -1318,11 +1318,13 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             long beforeSaveWithResult = Manifest.StorageDirectoryValidationCount;
             Assert.True(manifest.SaveWithResult().Succeeded);
-            Assert.Equal(1, Manifest.StorageDirectoryValidationCount - beforeSaveWithResult);
+            // 1 pre-recovery + 1 post-recovery validation (constant, independent of entry count).
+            Assert.Equal(2, Manifest.StorageDirectoryValidationCount - beforeSaveWithResult);
 
             long beforeMove = Manifest.StorageDirectoryValidationCount;
             Assert.True(manifest.MoveEntryWithResult(0, 1).Succeeded);
-            Assert.Equal(1, Manifest.StorageDirectoryValidationCount - beforeMove);
+            // 1 pre-recovery + 1 post-recovery validation in CommitStorageTransaction.
+            Assert.Equal(2, Manifest.StorageDirectoryValidationCount - beforeMove);
 
             long beforeGetManifest = Manifest.StorageDirectoryValidationCount;
             Manifest reloaded = Manifest.GetManifest(true);
@@ -1345,12 +1347,13 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             long beforeNormalize = Manifest.StorageDirectoryValidationCount;
             Assert.True(reloaded.NormalizeAccountFilenames().Succeeded);
-            Assert.Equal(2, Manifest.StorageDirectoryValidationCount - beforeNormalize);
+            // 1 in NormalizeAccountFilenames + 2 (pre/post-recovery) in CommitStorageTransaction.
+            Assert.Equal(3, Manifest.StorageDirectoryValidationCount - beforeNormalize);
 
             long beforeEncrypt = Manifest.StorageDirectoryValidationCount;
             Assert.True(reloaded.ChangeEncryptionKey(null, "test-passkey").Succeeded);
-            // 1 in ChangeEncryptionKey + 1 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 1 in its commit.
-            Assert.Equal(4, Manifest.StorageDirectoryValidationCount - beforeEncrypt);
+            // 1 in ChangeEncryptionKey + 2 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 2 in its commit.
+            Assert.Equal(6, Manifest.StorageDirectoryValidationCount - beforeEncrypt);
             Assert.Equal(accountCount, reloaded.GetAllAccounts("test-passkey").Length);
 
             // Verify ImportUnmanagedMaFiles and sessionless RemoveAccount also perform O(1) directory validations.
@@ -1367,8 +1370,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             long beforeImport = Manifest.StorageDirectoryValidationCount;
             Assert.True(reloaded.ImportUnmanagedMaFiles(importCandidates).Succeeded);
-            // 1 in ImportUnmanagedMaFiles + 1 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 1 in its commit.
-            Assert.Equal(4, Manifest.StorageDirectoryValidationCount - beforeImport);
+            // 1 in ImportUnmanagedMaFiles + 2 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 2 in its commit.
+            Assert.Equal(6, Manifest.StorageDirectoryValidationCount - beforeImport);
 
             SteamGuardAccount uniqueNamed = CreateAccount(76561198000003000UL);
             uniqueNamed.AccountName = "unique-removal-target";
@@ -1377,8 +1380,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             long beforeRemove = Manifest.StorageDirectoryValidationCount;
             Assert.True(reloaded.RemoveAccount(sessionlessTarget, (string)null));
-            // 1 in FindEntryForRemoval + 1 in CommitStorageTransaction (independent of the 12 stored entries).
-            Assert.Equal(2, Manifest.StorageDirectoryValidationCount - beforeRemove);
+            // 1 in FindEntryForRemoval + 2 in CommitStorageTransaction (independent of the 12 stored entries).
+            Assert.Equal(3, Manifest.StorageDirectoryValidationCount - beforeRemove);
         }
 
         [Fact]
@@ -1456,12 +1459,26 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.True(File.Exists(targetCreatedPath));
                 Assert.True(File.Exists(targetJournalPath));
 
-                // 3. Mid-operation junction swap check: ReadTextWithLimit rejects an opened file handle
-                //    whose OS final path resolves outside the validated canonical storage directory.
+                // 3. Canonical directory acquisition & opened-file handle verification fail closed:
+                //    - Direct junction is rejected via FILE_FLAG_OPEN_REPARSE_POINT (never followed to target).
+                //    - Real subdirectory beneath an ancestor junction is rejected via canonical path comparison.
+                //    - Missing directory fails closed (throws instead of returning null).
+                //    - ReadTextWithLimit rejects null/empty canonical directory and mismatched opened handles.
+                string nestedRealDirInTarget = Path.Combine(realTargetDir, "nested");
+                Directory.CreateDirectory(nestedRealDirInTarget);
+                Assert.Throws<InvalidDataException>(() => Manifest.GetValidatedCanonicalDirectoryPath(directMaFilesJunction));
+                Assert.Throws<InvalidDataException>(() => Manifest.GetValidatedCanonicalDirectoryPath(Path.Combine(linkedDataDir, "nested")));
+                Assert.Throws<InvalidDataException>(() => Manifest.GetValidatedCanonicalDirectoryPath(Path.Combine(junctionRoot, "does-not-exist")));
+
                 string realMaFilesDir = Path.Combine(dataDirectory, "maFiles");
                 Directory.CreateDirectory(realMaFilesDir);
-                string expectedCanonicalDir = Manifest.TryGetValidatedCanonicalDirectoryPath(realMaFilesDir);
+                string realSampleFile = Path.Combine(realMaFilesDir, "sample.maFile");
+                File.WriteAllText(realSampleFile, "sample-content");
+                string expectedCanonicalDir = Manifest.GetValidatedCanonicalDirectoryPath(realMaFilesDir);
                 Assert.False(String.IsNullOrEmpty(expectedCanonicalDir));
+                Assert.Equal("sample-content", Manifest.ReadTextWithLimit(realSampleFile, 1024 * 1024, expectedCanonicalDir));
+                Assert.Throws<InvalidDataException>(() => Manifest.ReadTextWithLimit(realSampleFile, 1024 * 1024, null));
+                Assert.Throws<InvalidDataException>(() => Manifest.ReadTextWithLimit(realSampleFile, 1024 * 1024, String.Empty));
                 Assert.Throws<InvalidDataException>(() =>
                     Manifest.ReadTextWithLimit(
                         Path.Combine(directMaFilesJunction, "uncommitted-target.maFile"),
