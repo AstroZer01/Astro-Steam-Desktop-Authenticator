@@ -449,27 +449,68 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.True(form.UiReady);
                 Assert.False(form.LoadFailed);
 
-                form.BeginModernUiNavigation();
+                form.BeginModernUiNavigation(navigationId: 10);
                 Assert.False(form.UiReady);
                 Assert.False(form.LoadFailed);
                 Assert.False(form.CanAcceptWebMessage(isWebViewVisible: true));
 
-                form.CompleteModernUiLoad();
+                Assert.True(form.ShouldHandleNavigationCompleted(10, out int gen10));
+                Assert.True(form.TryHandleNavigationCompletedResult(10, gen10, succeeded: true));
                 Assert.True(form.UiReady);
                 Assert.False(form.LoadFailed);
                 Assert.True(form.CanAcceptWebMessage(isWebViewVisible: true));
                 Assert.False(form.CanAcceptWebMessage(isWebViewVisible: false));
 
                 // Starting a reload clears readiness until the new navigation completes.
-                form.BeginModernUiNavigation();
+                form.BeginModernUiNavigation(navigationId: 11);
                 Assert.False(form.UiReady);
                 Assert.False(form.LoadFailed);
                 Assert.False(form.CanAcceptWebMessage(isWebViewVisible: true));
 
-                form.MarkModernUiLoadFailed();
+                Assert.True(form.ShouldHandleNavigationCompleted(11, out int gen11));
+                Assert.True(form.TryHandleNavigationCompletedResult(11, gen11, succeeded: false));
                 Assert.False(form.UiReady);
                 Assert.True(form.LoadFailed);
                 Assert.False(form.CanAcceptWebMessage(isWebViewVisible: true));
+            }
+        }
+
+        [Fact]
+        public void InputForm_IgnoresStaleNavigationCompletionsDeliveredAfterReloadStarts()
+        {
+            using (InputForm form = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
+            {
+                // Navigation 1 starts, then navigation 2 (reload) starts before navigation 1 completes.
+                form.BeginModernUiNavigation(navigationId: 1);
+                form.BeginModernUiNavigation(navigationId: 2);
+
+                // Stale completion for navigation 1 (whether failure or success) must be ignored.
+                Assert.False(form.ShouldHandleNavigationCompleted(1, out _));
+                Assert.False(form.UiReady);
+                Assert.False(form.LoadFailed);
+
+                // Active navigation 2 enters completion and begins awaiting setupInput.
+                Assert.True(form.ShouldHandleNavigationCompleted(2, out int gen2));
+
+                // Before setupInput resolves, navigation 3 starts.
+                form.BeginModernUiNavigation(navigationId: 3);
+
+                // Stale setupInput completion (failure or success) for navigation 2 must not affect navigation 3.
+                Assert.False(form.TryHandleNavigationCompletedResult(2, gen2, succeeded: false));
+                Assert.False(form.TryHandleNavigationCompletedResult(2, gen2, succeeded: true));
+                Assert.False(form.UiReady);
+                Assert.False(form.LoadFailed);
+
+                // Active navigation 3 completes successfully.
+                Assert.True(form.ShouldHandleNavigationCompleted(3, out int gen3));
+                Assert.True(form.TryHandleNavigationCompletedResult(3, gen3, succeeded: true));
+                Assert.True(form.UiReady);
+                Assert.False(form.LoadFailed);
+
+                // Canceled untrusted navigation completion (unrecorded NavigationId 99) must not disrupt ready state.
+                Assert.False(form.ShouldHandleNavigationCompleted(99, out _));
+                Assert.True(form.UiReady);
+                Assert.False(form.LoadFailed);
             }
         }
 
@@ -608,7 +649,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                         {
                             if (initialClosedEarly)
                             {
-                                form.BeginModernUiNavigation();
+                                form.BeginModernUiNavigation(navigationId: 1);
                                 form.Canceled = true;
                             }
                             else
@@ -620,7 +661,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                         {
                             if (confirmClosedEarly)
                             {
-                                form.BeginModernUiNavigation();
+                                form.BeginModernUiNavigation(navigationId: 2);
                                 form.Canceled = true;
                             }
                             else

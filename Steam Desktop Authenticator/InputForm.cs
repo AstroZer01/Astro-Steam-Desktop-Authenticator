@@ -22,6 +22,7 @@ namespace Steam_Desktop_Authenticator
         public bool Canceled = false;
         private bool userClosed = true;
         private int navigationGeneration = 0;
+        private ulong? activeNavigationId;
         internal bool IsPasswordMasked { get; }
         internal bool Accepted { get; private set; }
         internal bool UiReady { get; private set; }
@@ -166,23 +167,59 @@ namespace Steam_Desktop_Authenticator
             return UiReady && !LoadFailed && isWebViewVisible;
         }
 
-        internal void BeginModernUiNavigation(Panel loadingPanel = null, Label lblLoading = null)
+        private void ShowLoadingState(Panel loadingPanel, Label lblLoading, string message)
         {
-            navigationGeneration++;
-            this.UiReady = false;
-            this.LoadFailed = false;
             if (!IsDisposed && !Disposing)
             {
                 if (webView != null)
                     webView.Visible = false;
                 if (lblLoading != null)
-                    lblLoading.Text = "Loading...";
+                    lblLoading.Text = message;
                 if (loadingPanel != null)
                 {
                     loadingPanel.Visible = true;
                     loadingPanel.BringToFront();
                 }
             }
+        }
+
+        internal void ResetModernUiState(Panel loadingPanel = null, Label lblLoading = null)
+        {
+            activeNavigationId = null;
+            navigationGeneration++;
+            this.UiReady = false;
+            this.LoadFailed = false;
+            ShowLoadingState(loadingPanel, lblLoading, "Loading...");
+        }
+
+        internal void BeginModernUiNavigation(ulong navigationId, Panel loadingPanel = null, Label lblLoading = null)
+        {
+            activeNavigationId = navigationId;
+            navigationGeneration++;
+            this.UiReady = false;
+            this.LoadFailed = false;
+            ShowLoadingState(loadingPanel, lblLoading, "Loading...");
+        }
+
+        internal bool ShouldHandleNavigationCompleted(ulong navigationId, out int expectedGeneration)
+        {
+            expectedGeneration = navigationGeneration;
+            return activeNavigationId.HasValue && activeNavigationId.Value == navigationId;
+        }
+
+        internal bool TryHandleNavigationCompletedResult(ulong navigationId, int expectedGeneration, bool succeeded, Panel loadingPanel = null, Label lblLoading = null)
+        {
+            if (!activeNavigationId.HasValue || activeNavigationId.Value != navigationId || navigationGeneration != expectedGeneration)
+                return false;
+
+            if (!succeeded)
+            {
+                MarkModernUiLoadFailed(loadingPanel, lblLoading);
+                return true;
+            }
+
+            CompleteModernUiLoad(loadingPanel);
+            return true;
         }
 
         internal void CompleteModernUiLoad(Panel loadingPanel = null)
@@ -205,20 +242,10 @@ namespace Steam_Desktop_Authenticator
 
         internal void MarkModernUiLoadFailed(Panel loadingPanel = null, Label lblLoading = null)
         {
+            activeNavigationId = null;
             this.UiReady = false;
             this.LoadFailed = true;
-            if (!IsDisposed && !Disposing)
-            {
-                if (webView != null)
-                    webView.Visible = false;
-                if (lblLoading != null)
-                    lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
-                if (loadingPanel != null)
-                {
-                    loadingPanel.Visible = true;
-                    loadingPanel.BringToFront();
-                }
-            }
+            ShowLoadingState(loadingPanel, lblLoading, "Input UI could not be loaded. Restore the complete release folder and try again.");
         }
 
         internal void SubmitInput(string value)
@@ -267,7 +294,7 @@ namespace Steam_Desktop_Authenticator
             this.Controls.Add(webView);
             webView.BringToFront();
 
-            BeginModernUiNavigation(loadingPanel, lblLoading);
+            ResetModernUiState(loadingPanel, lblLoading);
 
             try
             {
@@ -297,7 +324,7 @@ namespace Steam_Desktop_Authenticator
             {
                 if (WebViewSecurityPolicy.IsTrustedLocalDocument(args.Uri, htmlPath))
                 {
-                    BeginModernUiNavigation(loadingPanel, lblLoading);
+                    BeginModernUiNavigation(args.NavigationId, loadingPanel, lblLoading);
                     return;
                 }
 
@@ -364,17 +391,18 @@ namespace Steam_Desktop_Authenticator
 
             webView.NavigationCompleted += async (sender, args) =>
             {
-                int expectedGeneration = navigationGeneration;
                 if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
+                    return;
+                if (!ShouldHandleNavigationCompleted(args.NavigationId, out int expectedGeneration))
                     return;
                 if (!args.IsSuccess)
                 {
-                    MarkModernUiLoadFailed(loadingPanel, lblLoading);
+                    TryHandleNavigationCompletedResult(args.NavigationId, expectedGeneration, succeeded: false, loadingPanel, lblLoading);
                     return;
                 }
                 if (!WebViewSecurityPolicy.IsTrustedLocalDocument(webView.CoreWebView2.Source, htmlPath))
                 {
-                    MarkModernUiLoadFailed(loadingPanel, lblLoading);
+                    TryHandleNavigationCompletedResult(args.NavigationId, expectedGeneration, succeeded: false, loadingPanel, lblLoading);
                     DiagnosticErrorLogger.Log(
                         "Input UI",
                         new InvalidOperationException("WebView2 completed navigation to an untrusted document."),
@@ -385,22 +413,17 @@ namespace Steam_Desktop_Authenticator
                 string jsLabel = JsonConvert.SerializeObject(label);
                 string isPassStr = isPassword ? "true" : "false";
                 bool setupSucceeded = await ExecuteScriptSafelyAsync($"setupInput({jsLabel}, {isPassStr})", "Input dialog UI", requireTrueResult: true);
-                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null || navigationGeneration != expectedGeneration)
+                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null)
                     return;
-                if (!setupSucceeded)
-                {
-                    MarkModernUiLoadFailed(loadingPanel, lblLoading);
-                    return;
-                }
 
-                CompleteModernUiLoad(loadingPanel);
+                TryHandleNavigationCompletedResult(args.NavigationId, expectedGeneration, setupSucceeded, loadingPanel, lblLoading);
             };
 
             if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null)
                 return;
             try
             {
-                BeginModernUiNavigation(loadingPanel, lblLoading);
+                ResetModernUiState(loadingPanel, lblLoading);
                 webView.Source = new Uri(htmlPath);
             }
             catch (Exception ex)
