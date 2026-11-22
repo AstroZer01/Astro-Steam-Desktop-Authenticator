@@ -12,6 +12,7 @@ namespace SteamAuth
     /// </summary>
     public static class SteamNetworkConfiguration
     {
+        public static readonly TimeSpan DefaultPooledConnectionLifetime = TimeSpan.FromMinutes(2);
         private static ClientGeneration current = new ClientGeneration(CreateHttpClient(null));
 
         public static void ConfigureProxy(IWebProxy proxy)
@@ -39,13 +40,7 @@ namespace SteamAuth
 
         public static HttpClient CreateHttpClient(IWebProxy proxy, bool allowAutoRedirect, bool includeMobileUserAgent)
         {
-            HttpClientHandler handler = new HttpClientHandler
-            {
-                UseCookies = false,
-                AllowAutoRedirect = allowAutoRedirect,
-                UseProxy = proxy != null,
-                Proxy = proxy
-            };
+            HttpMessageHandler handler = CreateHttpMessageHandler(proxy, allowAutoRedirect);
             HttpClient client = new HttpClient(handler)
             {
                 Timeout = Timeout.InfiniteTimeSpan
@@ -53,6 +48,30 @@ namespace SteamAuth
             if (includeMobileUserAgent)
                 client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", SteamWeb.MOBILE_APP_USER_AGENT);
             return client;
+        }
+
+        internal static HttpMessageHandler CreateHttpMessageHandler(IWebProxy proxy, bool allowAutoRedirect)
+        {
+#if NET5_0_OR_GREATER
+            return new SocketsHttpHandler
+            {
+                UseCookies = false,
+                AllowAutoRedirect = allowAutoRedirect,
+                UseProxy = proxy != null,
+                Proxy = proxy,
+                AutomaticDecompression = DecompressionMethods.All,
+                PooledConnectionLifetime = DefaultPooledConnectionLifetime
+            };
+#else
+            return new HttpClientHandler
+            {
+                UseCookies = false,
+                AllowAutoRedirect = allowAutoRedirect,
+                UseProxy = proxy != null,
+                Proxy = proxy,
+                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+            };
+#endif
         }
 
         internal static HttpClientLease AcquireHttpClient()
