@@ -412,7 +412,7 @@
         if (activeTabId === 'settings' && tabId !== 'settings' && (settingsDirty || settingsSavePending)) {
             if (tabId !== 'trades') pendingConfirmationTab = null;
             pendingSettingsNavigation = tabId;
-            if (settingsDirty) openUnsavedSettingsModal();
+            if (settingsDirty && !settingsSavePending) openUnsavedSettingsModal();
             return;
         }
         performTabSwitch(tabId);
@@ -1576,6 +1576,7 @@
         settingsSavePending = true;
         document.getElementById('btn-save-settings').disabled = true;
         document.getElementById('btn-save-settings-navigation').disabled = true;
+        document.getElementById('btn-discard-settings-navigation').disabled = true;
         document.getElementById('btn-test-proxy').disabled = true;
         const saveStatus = document.getElementById('settings-save-status');
         saveStatus.classList.add('hidden');
@@ -1672,6 +1673,7 @@
             saveSettings('tab:' + pendingSettingsNavigation);
     });
     document.getElementById('btn-discard-settings-navigation').addEventListener('click', () => {
+        if (settingsSavePending) return;
         const target = pendingSettingsNavigation;
         pendingSettingsNavigation = null;
         closeUnsavedSettingsModal();
@@ -1749,6 +1751,7 @@
         settingsSavePending = false;
         document.getElementById('btn-save-settings').disabled = false;
         document.getElementById('btn-save-settings-navigation').disabled = false;
+        document.getElementById('btn-discard-settings-navigation').disabled = false;
         const testButton = document.getElementById('btn-test-proxy');
         testButton.disabled = false;
         testButton.innerText = 'Test Proxy';
@@ -1766,7 +1769,7 @@
                 btn.classList.remove('bg-secondary', 'text-on-secondary');
             }, 1500);
         }
-        const navigationTarget = saveContext === 'exit'
+        const navigationTarget = saveContext === 'exit' || activeTabId !== 'settings'
             ? null
             : (pendingSettingsNavigation ||
                 (saveContext && saveContext.startsWith('tab:') ? saveContext.substring(4) : null));
@@ -1783,6 +1786,7 @@
         settingsSavePending = false;
         document.getElementById('btn-save-settings').disabled = false;
         document.getElementById('btn-save-settings-navigation').disabled = false;
+        document.getElementById('btn-discard-settings-navigation').disabled = false;
         const testButton = document.getElementById('btn-test-proxy');
         testButton.disabled = false;
         testButton.innerText = 'Test Proxy';
