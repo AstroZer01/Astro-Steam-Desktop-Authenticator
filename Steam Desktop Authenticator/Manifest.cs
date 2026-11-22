@@ -1883,13 +1883,36 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
-        public void MoveEntry(int from, int to)
+        public bool MoveEntry(int from, int to)
         {
-            if (from < 0 || to < 0 || from >= Entries.Count || to >= Entries.Count) return;
-            ManifestEntry sel = Entries[from];
-            Entries.RemoveAt(from);
-            Entries.Insert(to, sel);
-            Save();
+            return MoveEntryWithResult(from, to).Succeeded;
+        }
+
+        public StorageResult MoveEntryWithResult(int from, int to)
+        {
+            lock (storageLock)
+            {
+                if (Entries == null || from < 0 || to < 0 || from >= Entries.Count || to >= Entries.Count)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The selected account position is out of range.");
+                if (from == to)
+                    return StorageResult.Success();
+
+                try
+                {
+                    Manifest stagedManifest = CloneForStorage();
+                    ManifestEntry selected = stagedManifest.Entries[from];
+                    stagedManifest.Entries.RemoveAt(from);
+                    stagedManifest.Entries.Insert(to, selected);
+                    StorageResult result = stagedManifest.SaveWithResult();
+                    if (result.Succeeded)
+                        CopyStorageStateFrom(stagedManifest);
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Manifest, "The account order could not be saved.", ex);
+                }
+            }
         }
 
         public class ManifestEntry

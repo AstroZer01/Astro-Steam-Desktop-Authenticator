@@ -3206,8 +3206,32 @@ namespace Steam_Desktop_Authenticator
             {
                 if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
                 {
-                    int to = listAccounts.SelectedIndex - (e.KeyCode == Keys.Up ? 1 : -1);
-                    manifest.MoveEntry(listAccounts.SelectedIndex, to);
+                    if (manifest == null)
+                        return;
+
+                    int from = listAccounts.SelectedIndex;
+                    int to = from - (e.KeyCode == Keys.Up ? 1 : -1);
+                    if (from < 0 || to < 0 || from >= listAccounts.Items.Count || to >= listAccounts.Items.Count)
+                        return;
+
+                    StorageResult moveResult = manifest.MoveEntryWithResult(from, to);
+                    if (!moveResult.Succeeded)
+                    {
+                        DiagnosticErrorLogger.Log("Account reordering", moveResult.Exception, "The updated account order could not be saved.");
+                        if (moveResult.FailureKind == StorageFailureKind.Validation)
+                        {
+                            loadAccountsList();
+                            return;
+                        }
+
+                        AstroMessageBox.Show(
+                            moveResult.UserMessage ?? "The account order could not be saved.",
+                            "Account Order",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                        return;
+                    }
+
                     loadAccountsList();
                 }
                 return;

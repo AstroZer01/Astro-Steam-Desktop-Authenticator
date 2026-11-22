@@ -764,6 +764,134 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False(File.Exists(backupPath));
         }
 
+        [Fact]
+        public void MoveEntryWithResult_ReordersAndPersistsWithoutChangingAccountRevisions()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000000000UL;
+            ulong secondId = 76561198000000001UL;
+            ulong thirdId = 76561198000000002UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(thirdId), false).Succeeded);
+
+            long revisionBefore = manifest.StorageRevision;
+            long firstAccountRevBefore = manifest.GetAccountStorageRevision(firstId);
+            long secondAccountRevBefore = manifest.GetAccountStorageRevision(secondId);
+            long thirdAccountRevBefore = manifest.GetAccountStorageRevision(thirdId);
+
+            StorageResult result = manifest.MoveEntryWithResult(2, 0);
+
+            Assert.True(result.Succeeded);
+            Assert.Equal(new[] { thirdId, firstId, secondId }, manifest.Entries.Select(e => e.SteamID).ToArray());
+            Assert.Equal(revisionBefore + 1, manifest.StorageRevision);
+            Assert.Equal(firstAccountRevBefore, manifest.GetAccountStorageRevision(firstId));
+            Assert.Equal(secondAccountRevBefore, manifest.GetAccountStorageRevision(secondId));
+            Assert.Equal(thirdAccountRevBefore, manifest.GetAccountStorageRevision(thirdId));
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(new[] { thirdId, firstId, secondId }, reloaded.Entries.Select(e => e.SteamID).ToArray());
+        }
+
+        [Fact]
+        public void MoveEntryWithResult_ReturnsValidationFailureForInvalidBoundsAndNullEntries()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000001UL), false).Succeeded);
+            long revisionBefore = manifest.StorageRevision;
+
+            StorageResult negativeFrom = manifest.MoveEntryWithResult(-1, 0);
+            StorageResult negativeTo = manifest.MoveEntryWithResult(0, -1);
+            StorageResult outOfRangeFrom = manifest.MoveEntryWithResult(2, 0);
+            StorageResult outOfRangeTo = manifest.MoveEntryWithResult(0, 2);
+
+            Assert.All(new[] { negativeFrom, negativeTo, outOfRangeFrom, outOfRangeTo }, result =>
+            {
+                Assert.False(result.Succeeded);
+                Assert.Equal(StorageFailureKind.Validation, result.FailureKind);
+            });
+            Assert.Equal(new[] { 76561198000000000UL, 76561198000000001UL }, manifest.Entries.Select(e => e.SteamID).ToArray());
+            Assert.Equal(revisionBefore, manifest.StorageRevision);
+
+            Manifest nullEntriesManifest = new Manifest { Entries = null };
+            StorageResult nullResult = nullEntriesManifest.MoveEntryWithResult(0, 0);
+            Assert.False(nullResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, nullResult.FailureKind);
+        }
+
+        [Fact]
+        public void MoveEntryWithResult_NoOpWhenIndicesMatchDoesNotMutateOrWrite()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+            long revisionBefore = manifest.StorageRevision;
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            File.WriteAllText(Path.Combine(maDirectory, ".asda-storage-transaction.json"), "invalid json");
+
+            StorageResult result = manifest.MoveEntryWithResult(0, 0);
+
+            Assert.True(result.Succeeded);
+            Assert.Equal(revisionBefore, manifest.StorageRevision);
+        }
+
+        [Fact]
+        public void MoveEntryWithResult_PreservesInMemoryOrderWhenSaveFails()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000000000UL;
+            ulong secondId = 76561198000000001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+            long revisionBefore = manifest.StorageRevision;
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(journalPath, "corrupted journal");
+
+            StorageResult result = manifest.MoveEntryWithResult(0, 1);
+
+            Assert.False(result.Succeeded);
+            Assert.Equal(StorageFailureKind.Io, result.FailureKind);
+            Assert.Equal(new[] { firstId, secondId }, manifest.Entries.Select(e => e.SteamID).ToArray());
+            Assert.Equal(revisionBefore, manifest.StorageRevision);
+
+            File.Delete(journalPath);
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(new[] { firstId, secondId }, reloaded.Entries.Select(e => e.SteamID).ToArray());
+        }
+
+        [Fact]
+        public async Task ConcurrentMoveEntryAndSaveAccount_PreservesAllAccountsWithoutCorruption()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000000000UL;
+            ulong secondId = 76561198000000001UL;
+            ulong thirdId = 76561198000000002UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+
+            Task<StorageResult> reorderTask = Task.Run(() =>
+            {
+                for (int i = 0; i < 10; i++)
+                {
+                    StorageResult moveResult = manifest.MoveEntryWithResult(0, 1);
+                    if (!moveResult.Succeeded)
+                        return moveResult;
+                }
+                return StorageResult.Success();
+            });
+            Task<StorageResult> saveTask = Task.Run(() => manifest.SaveAccount(CreateAccount(thirdId), false));
+
+            StorageResult[] results = await Task.WhenAll(reorderTask, saveTask);
+
+            Assert.All(results, result => Assert.True(result.Succeeded));
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(3, reloaded.Entries.Count);
+            Assert.Equal(new[] { firstId, secondId, thirdId }, reloaded.Entries.Select(e => e.SteamID).OrderBy(id => id).ToArray());
+        }
+
         public void Dispose()
         {
             Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);
