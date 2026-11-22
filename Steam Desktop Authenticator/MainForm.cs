@@ -99,6 +99,7 @@ namespace Steam_Desktop_Authenticator
         private readonly Action<ProxyConfiguration> applyProxy;
         private readonly HttpClient updateClient;
         private readonly Func<string, DialogResult> confirmAutomaticLoginAction;
+        private readonly Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -500,7 +501,8 @@ namespace Steam_Desktop_Authenticator
             Func<ProxyConfiguration, CancellationToken, Task<ProxyTestResult>> proxyTestAsync,
             Action<ProxyConfiguration> applyProxy,
             HttpClient updateClient = null,
-            Func<string, DialogResult> confirmAutomaticLoginAction = null)
+            Func<string, DialogResult> confirmAutomaticLoginAction = null,
+            Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
@@ -512,6 +514,22 @@ namespace Steam_Desktop_Authenticator
             this.applyProxy = applyProxy ?? ProxyService.Apply;
             this.updateClient = updateClient ?? defaultUpdateClient;
             this.confirmAutomaticLoginAction = confirmAutomaticLoginAction ?? ShowAutomaticLoginActionConfirmation;
+            this.promptForUpdate = promptForUpdate ?? ShowUpdateAvailablePrompt;
+        }
+
+        private static (DialogResult Result, bool DisableStartupChecks) ShowUpdateAvailablePrompt(Version latestVersion, string checkboxText)
+        {
+            string message = String.Format(
+                "A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}",
+                Application.ProductVersion,
+                latestVersion.ToString());
+            if (checkboxText != null)
+            {
+                DialogResult result = AstroMessageBox.Show(message, "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out bool isChecked);
+                return (result, isChecked);
+            }
+
+            return (AstroMessageBox.Show(message, "New Version", MessageBoxButtons.YesNo), false);
         }
 
         private static DialogResult ShowAutomaticLoginActionConfirmation(string message)
@@ -3351,6 +3369,13 @@ namespace Steam_Desktop_Authenticator
             if (cancellationToken.IsCancellationRequested)
                 return;
 
+            if (!ShouldRunUpdateCheck(isStartupCheck, manifest.CheckForUpdates))
+            {
+                if (String.IsNullOrEmpty(updateCheckStatusMessage))
+                    await PublishUpdateCheckStateAsync(false, "Automatic update checks are disabled. You can check manually anytime.", "info");
+                return;
+            }
+
             isCheckingForUpdates = true;
             await PublishUpdateCheckStateAsync(true, "Checking for updates...", "info");
 
@@ -3431,18 +3456,8 @@ namespace Steam_Desktop_Authenticator
                 if (!ShouldShowUpdateNotification(isStartupCheck, manifest.CheckForUpdates))
                     return;
 
-                string checkboxText = isStartupCheck ? "Don't show update notifications on launch" : null;
-                bool isChecked = false;
-
-                DialogResult updateDialog;
-                if (checkboxText != null)
-                {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, latestVersion.ToString()), "New Version", MessageBoxButtons.YesNo, MessageBoxIcon.None, checkboxText, out isChecked);
-                }
-                else
-                {
-                    updateDialog = AstroMessageBox.Show(String.Format("A new version is available! Would you like to download it now?\nYou will update from version {0} to {1}", Application.ProductVersion, latestVersion.ToString()), "New Version", MessageBoxButtons.YesNo);
-                }
+                string checkboxText = isStartupCheck ? "Don't check for updates on launch" : null;
+                (DialogResult updateDialog, bool isChecked) = promptForUpdate(latestVersion, checkboxText);
 
                 if (isStartupCheck && isChecked)
                     DisableStartupUpdateChecks();
@@ -4069,9 +4084,14 @@ namespace Steam_Desktop_Authenticator
             return NormalizeReleaseVersion(latestVersion).CompareTo(NormalizeReleaseVersion(installedVersion)) > 0;
         }
 
-        internal static bool ShouldShowUpdateNotification(bool isStartupCheck, bool checkForUpdates)
+        internal static bool ShouldRunUpdateCheck(bool isStartupCheck, bool checkForUpdates)
         {
             return !isStartupCheck || checkForUpdates;
+        }
+
+        internal static bool ShouldShowUpdateNotification(bool isStartupCheck, bool checkForUpdates)
+        {
+            return ShouldRunUpdateCheck(isStartupCheck, checkForUpdates);
         }
 
         private static Version NormalizeReleaseVersion(Version version)
