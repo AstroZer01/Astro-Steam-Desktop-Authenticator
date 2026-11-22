@@ -1252,10 +1252,14 @@ namespace Steam_Desktop_Authenticator
 
                     trackedRetainedObsoleteFilenames = retainedObsoleteFilenames
                         .Where(filename => !String.IsNullOrWhiteSpace(filename) &&
-                            !createdFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase) &&
-                            !obsoleteFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase))
+                            !createdFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList();
+                    if (trackedRetainedObsoleteFilenames.Count > 0)
+                    {
+                        HashSet<string> trackedRetainedSet = new HashSet<string>(trackedRetainedObsoleteFilenames, StringComparer.OrdinalIgnoreCase);
+                        obsoleteFilenames.RemoveAll(filename => trackedRetainedSet.Contains(filename));
+                    }
 
                     CopySettingsInto(stagedManifest);
                     ValidateManifestEntries(stagedManifest, maDir);
@@ -1353,8 +1357,10 @@ namespace Steam_Desktop_Authenticator
                     retainedObsoleteFilenames.Count > 0 &&
                     !DeleteFilesBestEffort(maDir, retainedObsoleteFilenames, "A retained obsolete authenticator file could not be removed after a failed save."))
                 {
-                    if (PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsoleteFilenames))
+                    bool backupDeleted = String.IsNullOrWhiteSpace(backupFilename) ||
                         DeleteFileBestEffort(backupFilename, "A manifest backup could not be removed after a failed save.");
+                    string retainedBackupFilename = backupDeleted ? null : Path.GetFileName(backupFilename);
+                    PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsoleteFilenames, retainedBackupFilename);
                     return;
                 }
 
@@ -1366,7 +1372,8 @@ namespace Steam_Desktop_Authenticator
         private static bool PreserveRetainedObsoleteJournal(
             string manifestFilename,
             string journalFilename,
-            IReadOnlyList<string> retainedObsoleteFilenames)
+            IReadOnlyList<string> retainedObsoleteFilenames,
+            string retainedBackupFilename = null)
         {
             try
             {
@@ -1379,7 +1386,7 @@ namespace Steam_Desktop_Authenticator
                     ManifestHash = GetContentHash(currentManifestContents),
                     CreatedFilenames = new List<string>(),
                     ObsoleteFilenames = retainedObsoleteFilenames.ToList(),
-                    BackupFilename = null
+                    BackupFilename = retainedBackupFilename
                 };
                 WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings));
                 return true;
@@ -1445,13 +1452,15 @@ namespace Steam_Desktop_Authenticator
                         // The manifest is committed, so its newly created files are live.
                         // Retain only the obsolete-file cleanup state before allowing a
                         // later settings save to replace the manifest.
-                        if (backupFilename != null)
+                        bool committedBackupDeleted = backupFilename == null ||
                             DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
-                        journal.BackupFilename = null;
+                        journal.BackupFilename = committedBackupDeleted ? null : Path.GetFileName(backupFilename);
                         journal.CreatedFilenames = new List<string>();
                         journal.ObsoleteFilenames = committedObsolete;
                         journal.RetainedObsoleteFilenames = null;
                         WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
+                        if (!committedBackupDeleted)
+                            return false;
                         if (retainedObsoleteFilenames != null)
                         {
                             foreach (string filename in committedObsolete)
@@ -1463,9 +1472,12 @@ namespace Steam_Desktop_Authenticator
                     if (!manifestCommitted && retainedObsolete.Count > 0 &&
                         !DeleteFilesBestEffort(maDir, retainedObsolete, "A retained obsolete authenticator file could not be removed during storage recovery."))
                     {
-                        if (backupFilename != null)
+                        bool uncommittedBackupDeleted = backupFilename == null ||
                             DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
-                        if (!PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsolete))
+                        string retainedBackupFilename = uncommittedBackupDeleted ? null : Path.GetFileName(backupFilename);
+                        if (!PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsolete, retainedBackupFilename))
+                            return false;
+                        if (!uncommittedBackupDeleted)
                             return false;
                         if (retainedObsoleteFilenames != null)
                         {

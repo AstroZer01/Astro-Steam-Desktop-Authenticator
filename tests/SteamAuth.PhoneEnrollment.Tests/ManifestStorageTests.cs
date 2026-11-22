@@ -970,6 +970,115 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void StartupRecovery_UncommittedRetainedObsoletePreservesLockedManifestBackupUntilUnlocked()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-locked-obsolete.maFile");
+            string backupPath = Path.Combine(maDirectory, TestBackupFilename);
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(obsoletePath, "obsolete");
+            File.Copy(manifestPath, backupPath);
+
+            JObject uncommittedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(File.ReadAllText(manifestPath) + "uncommitted"),
+                ["created_filenames"] = new JArray(),
+                ["obsolete_filenames"] = new JArray(),
+                ["retained_obsolete_filenames"] = new JArray("retained-locked-obsolete.maFile"),
+                ["backup_filename"] = TestBackupFilename
+            };
+            File.WriteAllText(journalPath, uncommittedJournal.ToString(Formatting.None));
+
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            using (new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(backupPath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            Manifest recovered = Manifest.GetManifest(true);
+            Assert.Single(recovered.Entries);
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(backupPath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void FailedImportOverlappingRetainedObsoleteFile_PreservesCleanupOnRestart()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong existingId = 76561198000000000UL;
+            ulong importedId = 76561198000000001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(existingId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string overlappingFilename = "overlapping-retained.maFile";
+            string overlappingPath = Path.Combine(maDirectory, overlappingFilename);
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(overlappingPath, JsonConvert.SerializeObject(CreateAccount(importedId)));
+
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Single(candidates);
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", overlappingFilename, null);
+
+            // Keep overlappingPath readable so import can read/validate it, while preventing deletion,
+            // and hold manifest.json open so File.Replace fails and rolls back.
+            using (new FileStream(overlappingPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult result = manifest.ImportUnmanagedMaFiles(candidates);
+                Assert.False(result.Succeeded);
+                Assert.Single(manifest.Entries);
+                Assert.True(File.Exists(overlappingPath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            // Once unlocked, startup recovery must still delete the retained obsolete file rather than orphaning it.
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Single(reloaded.Entries);
+            Assert.False(File.Exists(overlappingPath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void StartupRecovery_RejectsRetainedObsoleteFilenameThatTargetsALiveAccountFile(bool manifestCommitted)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string liveFilename = manifest.Entries[0].Filename;
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string manifestHashSource = manifestCommitted
+                ? File.ReadAllText(manifestPath)
+                : File.ReadAllText(manifestPath) + "uncommitted";
+
+            JObject tamperedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(manifestHashSource),
+                ["created_filenames"] = new JArray(),
+                ["obsolete_filenames"] = new JArray(),
+                ["retained_obsolete_filenames"] = new JArray(liveFilename),
+                ["backup_filename"] = TestBackupFilename
+            };
+            File.WriteAllText(journalPath, tamperedJournal.ToString(Formatting.None));
+
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(Path.Combine(maDirectory, liveFilename)));
+            Assert.True(File.Exists(journalPath));
+        }
+
+        [Fact]
         public void MoveEntryBySteamIdOffsetWithResult_MovesInConsistentDirectionWithoutReversingOnSortedList()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
