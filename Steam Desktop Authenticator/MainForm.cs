@@ -2104,20 +2104,19 @@ namespace Steam_Desktop_Authenticator
             if (IsDisposed || Disposing || account == null || confirmation == null)
                 return;
 
-            string title = confirmation.ConfType == Confirmation.EMobileConfirmationType.MarketListing
-                ? "Market confirmation needed"
-                : "Trade confirmation needed";
+            string title = TradeConfirmationClassifier.GetNotificationTitle(confirmation.ConfType);
+            string notificationTab = TradeConfirmationClassifier.GetNotificationTab(confirmation.ConfType);
             string detail = String.IsNullOrWhiteSpace(confirmation.Headline) ? "New Steam confirmation" : confirmation.Headline;
             string message = account.AccountName + " · " + detail;
-            trayNotificationClickAction = OpenTradeConfirmationsFromNotification;
+            trayNotificationClickAction = () => OpenTradeConfirmationsFromNotification(notificationTab);
             trayIcon.Visible = true;
             trayIcon.BalloonTipTitle = title;
             trayIcon.BalloonTipText = message;
             trayIcon.BalloonTipIcon = ToolTipIcon.Info;
             trayIcon.ShowBalloonTip(10000);
 
-            var popup = new LoginNotificationPopup(title, message, ToolTipIcon.Info, "Click to open Trade Confirmations");
-            popup.NotificationClicked += (sender, args) => OpenTradeConfirmationsFromNotification();
+            var popup = new LoginNotificationPopup(title, message, ToolTipIcon.Info, "Click to open Confirmations");
+            popup.NotificationClicked += (sender, args) => OpenTradeConfirmationsFromNotification(notificationTab);
             popup.FormClosed += (sender, args) => activeLoginNotificationPopups.Remove(popup);
             activeLoginNotificationPopups.Add(popup);
             popup.ShowAtBottomRight((activeLoginNotificationPopups.Count - 1) * 126);
@@ -2598,16 +2597,12 @@ namespace Steam_Desktop_Authenticator
             }
 
             var settings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
-            string jsonStr = JsonConvert.SerializeObject(entries.Select(entry => new
-            {
-                Id = BuildTradeConfirmationKey(entry.Account, entry.Confirmation),
-                AccountName = entry.Account.AccountName,
-                Headline = entry.Confirmation.Headline,
-                Creator = entry.Confirmation.Creator.ToString(),
-                Icon = entry.Confirmation.Icon,
-                Summary = entry.Confirmation.Summary,
-                Type = entry.Confirmation.ConfType.ToString()
-            }), settings);
+            string jsonStr = JsonConvert.SerializeObject(
+                entries.Select(entry => TradeConfirmationClassifier.CreateWebPayload(
+                    BuildTradeConfirmationKey(entry.Account, entry.Confirmation),
+                    entry.Account.AccountName,
+                    entry.Confirmation)),
+                settings);
             string jsError = String.IsNullOrWhiteSpace(errorMessage) ? "null" : JsonConvert.SerializeObject(errorMessage);
             long revision = Interlocked.Increment(ref tradeViewRevision);
             string jsSelection = JsonConvert.SerializeObject(selectionToPublish);
@@ -2715,10 +2710,37 @@ namespace Steam_Desktop_Authenticator
             _ = ExecuteScriptSafelyAsync("switchTab('login-actions');", "Login actions navigation");
         }
 
-        private void OpenTradeConfirmationsFromNotification()
+        private void OpenTradeConfirmationsFromNotification(string confirmationTab = null)
         {
             trayRestore_Click(this, EventArgs.Empty);
-            _ = ExecuteScriptSafelyAsync("switchTab('trades');", "Trade confirmations navigation");
+            string script = TradeConfirmationClassifier.IsSelectableTab(confirmationTab)
+                ? $"openTradeConfirmations({JsonConvert.SerializeObject(confirmationTab)});"
+                : "switchTab('trades');";
+            _ = ExecuteScriptSafelyAsync(script, "Trade confirmations navigation");
+        }
+
+        internal bool PersistTradeConfirmationSelectedTab(string tabName)
+        {
+            if (manifest == null || !TradeConfirmationClassifier.IsSelectableTab(tabName))
+                return false;
+
+            if (String.Equals(manifest.TradeConfirmationSelectedTab, tabName, StringComparison.Ordinal))
+                return true;
+
+            StorageResult saveResult = manifest.SaveSettingsWithResult(staged =>
+            {
+                staged.TradeConfirmationSelectedTab = tabName;
+            });
+            if (!saveResult.Succeeded)
+            {
+                DiagnosticErrorLogger.Log(
+                    "Trade confirmation tab",
+                    saveResult.Exception,
+                    saveResult.UserMessage ?? "The selected confirmation tab could not be saved.");
+                return false;
+            }
+
+            return true;
         }
 
         private async Task FetchLoginActionsForManualRefreshAsync()
@@ -3802,6 +3824,8 @@ namespace Steam_Desktop_Authenticator
                 // Set autostart checkbox
                 bool isAutoStart = WindowsStartup.IsEnabled();
                 _ = ExecuteScriptSafelyAsync($"setAutoStart({isAutoStart.ToString().ToLowerInvariant()});", "Startup setting UI");
+                string savedConfirmationTab = TradeConfirmationClassifier.NormalizeSelectableTab(manifest?.TradeConfirmationSelectedTab);
+                _ = ExecuteScriptSafelyAsync($"hydrateConfirmationTab({JsonConvert.SerializeObject(savedConfirmationTab)});", "Trade confirmation tab UI");
                 _ = PublishAvailableUpdateAsync();
                 _ = PublishUpdateCheckStateAsync(isCheckingForUpdates, updateCheckStatusMessage, updateCheckStatusTone);
 
@@ -4373,6 +4397,15 @@ namespace Steam_Desktop_Authenticator
                     return;
                 if (tabName == "authenticator" || tabName == "trades" || tabName == "login-actions" || tabName == "settings")
                     activeWebTab = tabName;
+            }
+            else if (action == "confirmation_tab_changed")
+            {
+                if (!TryGetWebMessageString(payload, "tabName", 32, out string tabName, true))
+                    return;
+                bool persisted = PersistTradeConfirmationSelectedTab(tabName);
+                _ = ExecuteScriptSafelyAsync(
+                    $"confirmationTabPersistCompleted({JsonConvert.SerializeObject(tabName)}, {persisted.ToString().ToLowerInvariant()});",
+                    "Trade confirmation tab persistence");
             }
             else if (action == "load_trades_cache")
             {

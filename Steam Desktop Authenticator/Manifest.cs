@@ -48,6 +48,10 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("auto_confirm_trades")]
         public bool AutoConfirmTrades { get; set; } = false;
 
+        [JsonProperty("trade_confirmation_selected_tab")]
+        [JsonConverter(typeof(SafeTradeConfirmationTabJsonConverter))]
+        public string TradeConfirmationSelectedTab { get; set; } = TradeConfirmationClassifier.CategoryAll;
+
         [JsonProperty("minimize_to_tray")]
         public bool MinimizeToTray { get; set; } = true;
 
@@ -260,6 +264,7 @@ namespace Steam_Desktop_Authenticator
             newManifest.TradeConfirmationCheckInterval = 15;
             newManifest.AutoConfirmMarketTransactions = false;
             newManifest.AutoConfirmTrades = false;
+            newManifest.TradeConfirmationSelectedTab = TradeConfirmationClassifier.CategoryAll;
             newManifest.MinimizeToTray = true;
             newManifest.LoginActionMonitoringEnabled = true;
             newManifest.LoginActionMode = LoginActionModes.Manual;
@@ -1203,6 +1208,7 @@ namespace Steam_Desktop_Authenticator
             destination.TradeConfirmationCheckInterval = TradeConfirmationCheckInterval;
             destination.AutoConfirmMarketTransactions = AutoConfirmMarketTransactions;
             destination.AutoConfirmTrades = AutoConfirmTrades;
+            destination.TradeConfirmationSelectedTab = TradeConfirmationSelectedTab;
             destination.MinimizeToTray = MinimizeToTray;
             destination.CheckForUpdates = CheckForUpdates;
             destination.DiagnosticErrorLoggingEnabled = DiagnosticErrorLoggingEnabled;
@@ -1845,6 +1851,7 @@ namespace Steam_Desktop_Authenticator
         public void NormalizeTradeConfirmationSettings()
         {
             TradeConfirmationCheckInterval = Math.Clamp(TradeConfirmationCheckInterval, 3, 3600);
+            TradeConfirmationSelectedTab = TradeConfirmationClassifier.NormalizeSelectableTab(TradeConfirmationSelectedTab);
         }
 
         private bool MigrateLegacyTradeConfirmationSettings(JObject manifestJson)
