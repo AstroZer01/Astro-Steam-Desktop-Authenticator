@@ -344,8 +344,74 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Contains("<input type=\"password\" id=\"input-box\"", html);
             Assert.Contains("id=\"input-box\" aria-labelledby=\"label-text\" placeholder=\"...\" disabled", html);
             Assert.Contains("id=\"btn-accept\" class=\"btn-primary flex-1 shadow-lg shadow-[#00E5FF]/20\" disabled", html);
-            Assert.Contains("input.disabled = false;", html);
-            Assert.Contains("acceptButton.disabled = false;", html);
+
+            int observeIndex = html.IndexOf("resizeObserver.observe(panel);", StringComparison.Ordinal);
+            int inputEnableIndex = html.IndexOf("input.disabled = false;", StringComparison.Ordinal);
+            int buttonEnableIndex = html.IndexOf("acceptButton.disabled = false;", StringComparison.Ordinal);
+            int returnTrueIndex = html.IndexOf("return true;", StringComparison.Ordinal);
+
+            Assert.True(observeIndex >= 0, "Expected resizeObserver.observe(panel) in setupInput.");
+            Assert.True(inputEnableIndex > observeIndex, "Expected input to stay disabled until setup finishes.");
+            Assert.True(buttonEnableIndex > inputEnableIndex, "Expected accept button to enable after input.");
+            Assert.True(returnTrueIndex > buttonEnableIndex, "Expected setupInput to return true after enabling controls.");
+        }
+
+        [Theory]
+        [InlineData("true", true)]
+        [InlineData("null", false)]
+        [InlineData("false", false)]
+        [InlineData("\"true\"", false)]
+        [InlineData("", false)]
+        [InlineData(null, false)]
+        public void InputForm_IsScriptTrueResultRequiresExactBooleanTrue(string scriptResult, bool expected)
+        {
+            Assert.Equal(expected, InputForm.IsScriptTrueResult(scriptResult));
+        }
+
+        [Fact]
+        public void PromptSetupPassKey_DeferredCommitDoesNotEncryptOrPersistManifest()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            string manifestPath = Path.Combine(Manifest.GetExecutableDir(), "maFiles", "manifest.json");
+            List<(string Label, bool IsPassword)> prompts = new List<(string, bool)>();
+            List<string> messages = new List<string>();
+
+            string passKey = manifest.PromptSetupPassKey(
+                LoginForm.SetupPassKeyPromptLabel,
+                commitImmediately: false,
+                (label, isPassword) =>
+                {
+                    prompts.Add((label, isPassword));
+                    return (false, "deferred-passkey");
+                },
+                message => messages.Add(message));
+
+            Assert.Equal("deferred-passkey", passKey);
+            Assert.False(manifest.Encrypted);
+            Assert.Empty(messages);
+            Assert.Equal(2, prompts.Count);
+            Assert.All(prompts, prompt => Assert.True(prompt.IsPassword));
+            Assert.False(File.Exists(manifestPath));
+        }
+
+        [Fact]
+        public void SaveAccount_AllowsUnencryptedFirstSaveWhenEmptyManifestWasMarkedEncrypted()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.ChangeEncryptionKey(null, "orphan-passkey").Succeeded);
+            Assert.True(manifest.Encrypted);
+            Assert.Empty(manifest.Entries);
+
+            SteamGuardAccount firstAccount = CreateAccount(76561198000001005UL, "recovered-unencrypted-user");
+            StorageResult firstSave = manifest.SaveAccount(firstAccount, false, null);
+            Assert.True(firstSave.Succeeded, firstSave.UserMessage);
+            Assert.False(manifest.Encrypted);
+
+            // Once an encrypted vault has entries, unencrypted saves remain rejected.
+            Assert.True(manifest.ChangeEncryptionKey(null, "active-vault-passkey").Succeeded);
+            Assert.True(manifest.Encrypted);
+            StorageResult rejectedSave = manifest.SaveAccount(CreateAccount(76561198000001006UL, "must-be-encrypted"), false, null);
+            Assert.False(rejectedSave.Succeeded);
         }
 
         private static Manifest CreateEncryptedManifestWithAccount(string passKey)

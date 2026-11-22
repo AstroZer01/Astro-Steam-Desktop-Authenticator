@@ -114,7 +114,12 @@ namespace Steam_Desktop_Authenticator
             base.OnFormClosed(e);
         }
 
-        private async Task<bool> ExecuteScriptSafelyAsync(string script, string operation)
+        internal static bool IsScriptTrueResult(string scriptResult)
+        {
+            return String.Equals(scriptResult, "true", StringComparison.Ordinal);
+        }
+
+        private async Task<bool> ExecuteScriptSafelyAsync(string script, string operation, bool requireTrueResult = false)
         {
             if (IsDisposed || Disposing || webView == null)
                 return false;
@@ -124,7 +129,15 @@ namespace Steam_Desktop_Authenticator
                 CoreWebView2 coreWebView = webView.CoreWebView2;
                 if (coreWebView == null)
                     return false;
-                await coreWebView.ExecuteScriptAsync(script);
+                string result = await coreWebView.ExecuteScriptAsync(script);
+                if (requireTrueResult && !IsScriptTrueResult(result))
+                {
+                    DiagnosticErrorLogger.Log(
+                        operation,
+                        new InvalidOperationException("The WebView2 script did not report successful completion."),
+                        "The WebView2 operation could not be completed.");
+                    return false;
+                }
                 return true;
             }
             catch (Exception ex)
@@ -263,7 +276,7 @@ namespace Steam_Desktop_Authenticator
 
                 string jsLabel = JsonConvert.SerializeObject(label);
                 string isPassStr = isPassword ? "true" : "false";
-                bool setupSucceeded = await ExecuteScriptSafelyAsync($"setupInput({jsLabel}, {isPassStr})", "Input dialog UI");
+                bool setupSucceeded = await ExecuteScriptSafelyAsync($"setupInput({jsLabel}, {isPassStr})", "Input dialog UI", requireTrueResult: true);
                 if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null)
                     return;
                 if (!setupSucceeded)

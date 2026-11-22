@@ -374,35 +374,52 @@ namespace Steam_Desktop_Authenticator
 
         internal string PromptSetupPassKey(string initialPrompt, bool commitImmediately)
         {
-            string newPassKey;
-            using (InputForm newPassKeyForm = new InputForm(initialPrompt, true))
-            {
-                newPassKeyForm.ShowInputDialog();
-                if (newPassKeyForm.Canceled || newPassKeyForm.txtBox.Text.Length == 0)
+            return PromptSetupPassKey(
+                initialPrompt,
+                commitImmediately,
+                (promptLabel, isPassword) =>
                 {
-                    AstroMessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
-                    return null;
-                }
+                    using (InputForm passKeyForm = new InputForm(promptLabel, isPassword))
+                    {
+                        passKeyForm.ShowInputDialog();
+                        return (passKeyForm.Canceled, passKeyForm.txtBox.Text);
+                    }
+                },
+                message => AstroMessageBox.Show(message));
+        }
 
-                newPassKey = newPassKeyForm.txtBox.Text;
+        internal string PromptSetupPassKey(
+            string initialPrompt,
+            bool commitImmediately,
+            Func<string, bool, (bool Canceled, string Value)> promptForPassKey,
+            Action<string> showMessage)
+        {
+            if (promptForPassKey == null)
+                throw new ArgumentNullException(nameof(promptForPassKey));
+            if (showMessage == null)
+                throw new ArgumentNullException(nameof(showMessage));
+
+            (bool Canceled, string Value) initialResponse = promptForPassKey(initialPrompt, true);
+            if (initialResponse.Canceled || String.IsNullOrEmpty(initialResponse.Value))
+            {
+                showMessage("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
+                return null;
             }
 
-            string confirmPassKey;
-            using (InputForm newPassKeyForm2 = new InputForm("Confirm new passkey.", true))
-            {
-                newPassKeyForm2.ShowInputDialog();
-                if (newPassKeyForm2.Canceled)
-                {
-                    AstroMessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
-                    return null;
-                }
+            string newPassKey = initialResponse.Value;
 
-                confirmPassKey = newPassKeyForm2.txtBox.Text;
+            (bool Canceled, string Value) confirmResponse = promptForPassKey("Confirm new passkey.", true);
+            if (confirmResponse.Canceled)
+            {
+                showMessage("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
+                return null;
             }
+
+            string confirmPassKey = confirmResponse.Value;
 
             if (newPassKey != confirmPassKey)
             {
-                AstroMessageBox.Show("Passkeys do not match.");
+                showMessage("Passkeys do not match.");
                 return null;
             }
 
@@ -415,12 +432,12 @@ namespace Steam_Desktop_Authenticator
             if (!encryptionResult.Succeeded)
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", encryptionResult.Exception, "Setting an encryption passkey failed.");
-                AstroMessageBox.Show(encryptionResult.UserMessage ?? "Unable to set passkey.");
+                showMessage(encryptionResult.UserMessage ?? "Unable to set passkey.");
                 return null;
             }
             else
             {
-                AstroMessageBox.Show("Passkey successfully set.");
+                showMessage("Passkey successfully set.");
             }
 
             return newPassKey;
@@ -991,7 +1008,7 @@ namespace Steam_Desktop_Authenticator
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account data changed while the session was being refreshed.");
                 if (encrypt && String.IsNullOrEmpty(passKey))
                     return StorageResult.Failure(StorageFailureKind.Validation, "An encryption passkey is required to save this account.");
-                if (!encrypt && this.Encrypted)
+                if (!encrypt && this.Encrypted && this.Entries.Count > 0)
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account must be saved using the existing encryption passkey.");
 
                 try
@@ -1037,7 +1054,9 @@ namespace Steam_Desktop_Authenticator
                     stagedManifest.Entries[index] = newEntry;
                 }
 
-                stagedManifest.Encrypted = encrypt || stagedManifest.Encrypted;
+                stagedManifest.Encrypted = this.Entries.Count == 0
+                    ? encrypt
+                    : (encrypt || stagedManifest.Encrypted);
                 StorageResult result = CommitStorageTransaction(
                     stagedManifest,
                     new Dictionary<string, string> { { filename, jsonAccount } },
