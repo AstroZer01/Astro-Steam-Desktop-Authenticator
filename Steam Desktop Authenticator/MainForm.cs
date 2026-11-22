@@ -3211,10 +3211,18 @@ namespace Steam_Desktop_Authenticator
 
                     int from = listAccounts.SelectedIndex;
                     int to = from - (e.KeyCode == Keys.Up ? 1 : -1);
-                    if (from < 0 || to < 0 || from >= listAccounts.Items.Count || to >= listAccounts.Items.Count)
+                    string[] visibleNames = listAccounts.Items.Cast<object>().Select(item => item?.ToString()).ToArray();
+                    SteamGuardAccount[] accountsSnapshot;
+                    lock (accountGenerationLock)
+                    {
+                        accountsSnapshot = allAccounts;
+                    }
+
+                    if (!TryResolveAccountsForReorder(accountsSnapshot, visibleNames, from, to, out ulong sourceSteamId, out ulong targetSteamId))
                         return;
 
-                    StorageResult moveResult = manifest.MoveEntryWithResult(from, to);
+                    long revisionBefore = manifest.StorageRevision;
+                    StorageResult moveResult = manifest.MoveEntryBySteamIdWithResult(sourceSteamId, targetSteamId);
                     if (!moveResult.Succeeded)
                     {
                         DiagnosticErrorLogger.Log("Account reordering", moveResult.Exception, "The updated account order could not be saved.");
@@ -3224,6 +3232,9 @@ namespace Steam_Desktop_Authenticator
                             return;
                         }
 
+                        if (manifest.StorageRevision != revisionBefore)
+                            loadAccountsList(sourceSteamId);
+
                         AstroMessageBox.Show(
                             moveResult.UserMessage ?? "The account order could not be saved.",
                             "Account Order",
@@ -3232,7 +3243,7 @@ namespace Steam_Desktop_Authenticator
                         return;
                     }
 
-                    loadAccountsList();
+                    loadAccountsList(sourceSteamId);
                 }
                 return;
             }
@@ -3245,6 +3256,66 @@ namespace Steam_Desktop_Authenticator
             txtAccSearch.Focus();
             txtAccSearch.Text = e.KeyCode.ToString();
             txtAccSearch.SelectionStart = 1;
+        }
+
+        internal static bool TryResolveAccountsForReorder(
+            SteamGuardAccount[] accounts,
+            IReadOnlyList<string> visibleAccountNames,
+            int selectedIndex,
+            int targetIndex,
+            out ulong sourceSteamId,
+            out ulong targetSteamId)
+        {
+            sourceSteamId = 0;
+            targetSteamId = 0;
+
+            if (accounts == null || visibleAccountNames == null ||
+                selectedIndex < 0 || targetIndex < 0 ||
+                selectedIndex >= visibleAccountNames.Count || targetIndex >= visibleAccountNames.Count ||
+                selectedIndex == targetIndex)
+            {
+                return false;
+            }
+
+            if (!TryResolveUniqueSteamIdByAccountName(accounts, visibleAccountNames[selectedIndex], out sourceSteamId) ||
+                !TryResolveUniqueSteamIdByAccountName(accounts, visibleAccountNames[targetIndex], out targetSteamId) ||
+                sourceSteamId == targetSteamId)
+            {
+                sourceSteamId = 0;
+                targetSteamId = 0;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool TryResolveUniqueSteamIdByAccountName(
+            SteamGuardAccount[] accounts,
+            string accountName,
+            out ulong steamId)
+        {
+            steamId = 0;
+            if (String.IsNullOrEmpty(accountName))
+                return false;
+
+            ulong matchedSteamId = 0;
+            foreach (SteamGuardAccount account in accounts)
+            {
+                if (account?.Session == null || account.Session.SteamID == 0)
+                    continue;
+                if (!String.Equals(account.AccountName, accountName, StringComparison.Ordinal))
+                    continue;
+
+                if (matchedSteamId != 0)
+                    return false;
+                matchedSteamId = account.Session.SteamID;
+            }
+
+            if (matchedSteamId == 0)
+                return false;
+
+            steamId = matchedSteamId;
+            return true;
         }
 
         private static bool IsKeyAChar(Keys key)

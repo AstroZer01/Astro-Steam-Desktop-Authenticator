@@ -863,33 +863,138 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public async Task ConcurrentMoveEntryAndSaveAccount_PreservesAllAccountsWithoutCorruption()
+        public void MoveEntryWithResult_SyncsInMemoryOrderWhenPostCommitCleanupFails()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
             ulong firstId = 76561198000000000UL;
             ulong secondId = 76561198000000001UL;
-            ulong thirdId = 76561198000000002UL;
             Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
             Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
 
-            Task<StorageResult> reorderTask = Task.Run(() =>
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-obsolete.maFile");
+            File.WriteAllText(obsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", "retained-obsolete.maFile", null);
+
+            long revisionBefore = manifest.StorageRevision;
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
             {
-                for (int i = 0; i < 10; i++)
-                {
-                    StorageResult moveResult = manifest.MoveEntryWithResult(0, 1);
-                    if (!moveResult.Succeeded)
-                        return moveResult;
-                }
-                return StorageResult.Success();
-            });
-            Task<StorageResult> saveTask = Task.Run(() => manifest.SaveAccount(CreateAccount(thirdId), false));
+                StorageResult result = manifest.MoveEntryWithResultCore(0, 1, (_, __) => false);
 
-            StorageResult[] results = await Task.WhenAll(reorderTask, saveTask);
+                Assert.False(result.Succeeded);
+                Assert.Equal(StorageFailureKind.Io, result.FailureKind);
+                Assert.Equal(new[] { secondId, firstId }, manifest.Entries.Select(e => e.SteamID).ToArray());
+                Assert.Equal(revisionBefore + 1, manifest.StorageRevision);
+            }
 
-            Assert.All(results, result => Assert.True(result.Succeeded));
+            // Simulate cleanup completing and a later settings save: the committed reorder must not be reverted.
+            File.Delete(Path.Combine(maDirectory, ".asda-storage-transaction.json"));
+            File.Delete(obsoletePath);
+            Assert.True(manifest.SaveSettingsWithResult(staged => staged.MinimizeToTray = !staged.MinimizeToTray).Succeeded);
+
             Manifest reloaded = Manifest.GetManifest(true);
-            Assert.Equal(3, reloaded.Entries.Count);
-            Assert.Equal(new[] { firstId, secondId, thirdId }, reloaded.Entries.Select(e => e.SteamID).OrderBy(id => id).ToArray());
+            Assert.Equal(new[] { secondId, firstId }, reloaded.Entries.Select(e => e.SteamID).ToArray());
+        }
+
+        [Fact]
+        public void MoveEntryBySteamIdWithResult_MovesResolvedSortedAndFilteredAccountsAccurately()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount accountZ = CreateAccount(76561198000000000UL);
+            accountZ.AccountName = "zulu";
+            SteamGuardAccount accountA = CreateAccount(76561198000000001UL);
+            accountA.AccountName = "alpha";
+            SteamGuardAccount accountB = CreateAccount(76561198000000002UL);
+            accountB.AccountName = "bravo";
+
+            Assert.True(manifest.SaveAccount(accountZ, false).Succeeded);
+            Assert.True(manifest.SaveAccount(accountA, false).Succeeded);
+            Assert.True(manifest.SaveAccount(accountB, false).Succeeded);
+
+            // Stored order is [zulu, alpha, bravo], while sorted display is [alpha, bravo, zulu].
+            string[] sortedDisplay = new[] { "alpha", "bravo", "zulu" };
+            SteamGuardAccount[] loadedAccounts = manifest.GetAllAccounts();
+            Assert.True(MainForm.TryResolveAccountsForReorder(loadedAccounts, sortedDisplay, 1, 0, out ulong sourceId, out ulong targetId));
+            Assert.Equal(accountB.Session.SteamID, sourceId);
+            Assert.Equal(accountA.Session.SteamID, targetId);
+
+            StorageResult moveResult = manifest.MoveEntryBySteamIdWithResult(sourceId, targetId);
+            Assert.True(moveResult.Succeeded);
+            Assert.Equal(
+                new[] { accountZ.Session.SteamID, accountB.Session.SteamID, accountA.Session.SteamID },
+                Manifest.GetManifest(true).Entries.Select(e => e.SteamID).ToArray());
+
+            // Ambiguous duplicate names must be rejected rather than guessing.
+            SteamGuardAccount duplicateA = CreateAccount(76561198000000003UL);
+            duplicateA.AccountName = "alpha";
+            Assert.False(MainForm.TryResolveAccountsForReorder(
+                new[] { accountZ, accountA, accountB, duplicateA },
+                sortedDisplay,
+                1,
+                0,
+                out _,
+                out _));
+
+            // Removed or unknown SteamIDs return a validation failure.
+            StorageResult missingResult = manifest.MoveEntryBySteamIdWithResult(76561198000000099UL, accountA.Session.SteamID);
+            Assert.False(missingResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, missingResult.FailureKind);
+        }
+
+        [Fact]
+        public async Task ConcurrentMoveEntryAndSaveAccount_PreservesReorderAndSavedAccount()
+        {
+            for (int round = 0; round < 5; round++)
+            {
+                Manifest manifest = Manifest.GenerateNewManifest(false);
+                ulong firstId = 76561198000000100UL + (ulong)(round * 10);
+                ulong secondId = firstId + 1;
+                ulong thirdId = firstId + 2;
+                Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+                Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+
+                using (System.Threading.Barrier startBarrier = new System.Threading.Barrier(2))
+                {
+                    Task<StorageResult> reorderTask = Task.Run(() =>
+                    {
+                        startBarrier.SignalAndWait();
+                        StorageResult result = StorageResult.Success();
+                        // Odd number of moves leaves secondId ahead of firstId regardless of interleaving with thirdId.
+                        for (int i = 0; i < 5; i++)
+                        {
+                            result = manifest.MoveEntryBySteamIdWithResult(
+                                i % 2 == 0 ? secondId : firstId,
+                                i % 2 == 0 ? firstId : secondId);
+                            if (!result.Succeeded)
+                                return result;
+                        }
+                        return result;
+                    });
+
+                    Task<StorageResult> saveTask = Task.Run(() =>
+                    {
+                        startBarrier.SignalAndWait();
+                        SteamGuardAccount third = CreateAccount(thirdId);
+                        third.Session.AccessToken = "concurrent-token-" + round;
+                        return manifest.SaveAccount(third, false);
+                    });
+
+                    StorageResult[] results = await Task.WhenAll(reorderTask, saveTask);
+                    Assert.All(results, result => Assert.True(result.Succeeded));
+                }
+
+                Manifest reloaded = Manifest.GetManifest(true);
+                ulong[] persistedOrder = reloaded.Entries.Select(e => e.SteamID).ToArray();
+                Assert.Equal(3, persistedOrder.Length);
+                Assert.Contains(thirdId, persistedOrder);
+                Assert.True(
+                    Array.IndexOf(persistedOrder, secondId) < Array.IndexOf(persistedOrder, firstId),
+                    $"Expected {secondId} before {firstId}, got [{String.Join(", ", persistedOrder)}]");
+                Assert.Equal(
+                    "concurrent-token-" + round,
+                    Assert.Single(reloaded.GetAllAccounts(), account => account.Session.SteamID == thirdId).Session.AccessToken);
+            }
         }
 
         public void Dispose()

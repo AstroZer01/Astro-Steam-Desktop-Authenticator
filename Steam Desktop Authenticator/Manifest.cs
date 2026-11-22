@@ -1059,6 +1059,14 @@ namespace Steam_Desktop_Authenticator
 
         public StorageResult SaveWithResult()
         {
+            return SaveWithResult(out _);
+        }
+
+        private StorageResult SaveWithResult(
+            out bool manifestPersisted,
+            Func<string, string, bool> rebaseRetainedTransaction = null)
+        {
+            manifestPersisted = false;
             lock (storageLock)
             {
                 try
@@ -1078,9 +1086,13 @@ namespace Steam_Desktop_Authenticator
                         throw new InvalidDataException("The account manifest is larger than the supported size limit.");
                     string backupFilename = Path.Combine(maDir, SettingsBackupFilename);
                     WriteAllTextAtomically(manifestFilename, contents, backupFilename);
+                    manifestPersisted = true;
                     if (retainedObsoleteFilenames.Count > 0)
                     {
-                        if (!RebaseRetainedStorageTransaction(maDir, contents) ||
+                        bool rebased = rebaseRetainedTransaction != null
+                            ? rebaseRetainedTransaction(maDir, contents)
+                            : RebaseRetainedStorageTransaction(maDir, contents);
+                        if (!rebased ||
                             !RecoverPendingStorageTransaction(maDir, manifestFilename))
                         {
                             return StorageResult.Failure(
@@ -1888,7 +1900,34 @@ namespace Steam_Desktop_Authenticator
             return MoveEntryWithResult(from, to).Succeeded;
         }
 
+        public StorageResult MoveEntryBySteamIdWithResult(ulong sourceSteamId, ulong targetSteamId)
+        {
+            if (sourceSteamId == 0 || targetSteamId == 0)
+                return StorageResult.Failure(StorageFailureKind.Validation, "The selected account identity is invalid.");
+
+            lock (storageLock)
+            {
+                if (Entries == null)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The selected account position is out of range.");
+
+                int from = Entries.FindIndex(entry => entry != null && entry.SteamID == sourceSteamId);
+                int to = Entries.FindIndex(entry => entry != null && entry.SteamID == targetSteamId);
+                if (from < 0 || to < 0)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is no longer available to reorder.");
+
+                return MoveEntryWithResult(from, to);
+            }
+        }
+
         public StorageResult MoveEntryWithResult(int from, int to)
+        {
+            return MoveEntryWithResultCore(from, to, null);
+        }
+
+        internal StorageResult MoveEntryWithResultCore(
+            int from,
+            int to,
+            Func<string, string, bool> rebaseRetainedTransaction)
         {
             lock (storageLock)
             {
@@ -1903,8 +1942,8 @@ namespace Steam_Desktop_Authenticator
                     ManifestEntry selected = stagedManifest.Entries[from];
                     stagedManifest.Entries.RemoveAt(from);
                     stagedManifest.Entries.Insert(to, selected);
-                    StorageResult result = stagedManifest.SaveWithResult();
-                    if (result.Succeeded)
+                    StorageResult result = stagedManifest.SaveWithResult(out bool manifestPersisted, rebaseRetainedTransaction);
+                    if (result.Succeeded || manifestPersisted)
                         CopyStorageStateFrom(stagedManifest);
                     return result;
                 }
