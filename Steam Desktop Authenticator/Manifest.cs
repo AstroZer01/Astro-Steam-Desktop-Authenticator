@@ -1353,27 +1353,27 @@ namespace Steam_Desktop_Authenticator
 
             if (DeleteFilesBestEffort(maDir, createdFilenames, "A temporary authenticator file could not be removed after a failed save."))
             {
+                bool backupDeleted = String.IsNullOrWhiteSpace(backupFilename) ||
+                    DeleteFileBestEffort(backupFilename, "A manifest backup could not be removed after a failed save.");
+                if (!backupDeleted)
+                    return;
+
                 if (retainedObsoleteFilenames != null &&
                     retainedObsoleteFilenames.Count > 0 &&
                     !DeleteFilesBestEffort(maDir, retainedObsoleteFilenames, "A retained obsolete authenticator file could not be removed after a failed save."))
                 {
-                    bool backupDeleted = String.IsNullOrWhiteSpace(backupFilename) ||
-                        DeleteFileBestEffort(backupFilename, "A manifest backup could not be removed after a failed save.");
-                    string retainedBackupFilename = backupDeleted ? null : Path.GetFileName(backupFilename);
-                    PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsoleteFilenames, retainedBackupFilename);
+                    PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsoleteFilenames);
                     return;
                 }
 
                 DeleteFileBestEffort(journalFilename, "A storage journal could not be removed after a failed save.");
-                DeleteFileBestEffort(backupFilename, "A manifest backup could not be removed after a failed save.");
             }
         }
 
         private static bool PreserveRetainedObsoleteJournal(
             string manifestFilename,
             string journalFilename,
-            IReadOnlyList<string> retainedObsoleteFilenames,
-            string retainedBackupFilename = null)
+            IReadOnlyList<string> retainedObsoleteFilenames)
         {
             try
             {
@@ -1386,7 +1386,7 @@ namespace Steam_Desktop_Authenticator
                     ManifestHash = GetContentHash(currentManifestContents),
                     CreatedFilenames = new List<string>(),
                     ObsoleteFilenames = retainedObsoleteFilenames.ToList(),
-                    BackupFilename = retainedBackupFilename
+                    BackupFilename = null
                 };
                 WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings));
                 return true;
@@ -1432,52 +1432,53 @@ namespace Steam_Desktop_Authenticator
                         backupFilename,
                         manifestFilenames,
                         manifestCommitted);
-                    List<string> committedObsolete = manifestCommitted
-                        ? obsolete.Concat(retainedObsolete).ToList()
-                        : obsolete;
-                    bool cleanupSucceeded = manifestCommitted
-                        ? DeleteFilesBestEffort(maDir, committedObsolete, "An obsolete authenticator file could not be removed during storage recovery.")
-                        : DeleteFilesBestEffort(maDir, created, "A temporary authenticator file could not be removed during storage recovery.");
-
-                    if (!cleanupSucceeded)
+                    if (manifestCommitted)
                     {
-                        if (!manifestCommitted)
-                        {
-                            // The manifest still contains the original data, but the
-                            // created files are not safe to leave untracked. Keep the
-                            // journal and fail closed so recovery can retry them later.
-                            return false;
-                        }
-
-                        // The manifest is committed, so its newly created files are live.
-                        // Retain only the obsolete-file cleanup state before allowing a
-                        // later settings save to replace the manifest.
                         bool committedBackupDeleted = backupFilename == null ||
                             DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
-                        journal.BackupFilename = committedBackupDeleted ? null : Path.GetFileName(backupFilename);
-                        journal.CreatedFilenames = new List<string>();
-                        journal.ObsoleteFilenames = committedObsolete;
-                        journal.RetainedObsoleteFilenames = null;
-                        WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
                         if (!committedBackupDeleted)
                             return false;
-                        if (retainedObsoleteFilenames != null)
+
+                        List<string> committedObsolete = obsolete.Concat(retainedObsolete).ToList();
+                        if (!DeleteFilesBestEffort(maDir, committedObsolete, "An obsolete authenticator file could not be removed during storage recovery."))
                         {
-                            foreach (string filename in committedObsolete)
-                                retainedObsoleteFilenames.Add(filename);
+                            // The manifest is committed and its pre-commit backup is already gone,
+                            // so its newly created files are live. Retain only obsolete-file cleanup
+                            // state before allowing a later settings save to replace the manifest.
+                            journal.BackupFilename = null;
+                            journal.CreatedFilenames = new List<string>();
+                            journal.ObsoleteFilenames = committedObsolete;
+                            journal.RetainedObsoleteFilenames = null;
+                            WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
+                            if (retainedObsoleteFilenames != null)
+                            {
+                                foreach (string filename in committedObsolete)
+                                    retainedObsoleteFilenames.Add(filename);
+                            }
+                            return true;
                         }
-                        return true;
+
+                        bool committedJournalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.");
+                        return committedJournalDeleted && !File.Exists(journalFilename);
                     }
 
-                    if (!manifestCommitted && retainedObsolete.Count > 0 &&
+                    if (!DeleteFilesBestEffort(maDir, created, "A temporary authenticator file could not be removed during storage recovery."))
+                    {
+                        // The manifest still contains the original data, but the
+                        // created files are not safe to leave untracked. Keep the
+                        // journal and fail closed so recovery can retry them later.
+                        return false;
+                    }
+
+                    bool uncommittedBackupDeleted = backupFilename == null ||
+                        DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
+                    if (!uncommittedBackupDeleted)
+                        return false;
+
+                    if (retainedObsolete.Count > 0 &&
                         !DeleteFilesBestEffort(maDir, retainedObsolete, "A retained obsolete authenticator file could not be removed during storage recovery."))
                     {
-                        bool uncommittedBackupDeleted = backupFilename == null ||
-                            DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
-                        string retainedBackupFilename = uncommittedBackupDeleted ? null : Path.GetFileName(backupFilename);
-                        if (!PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsolete, retainedBackupFilename))
-                            return false;
-                        if (!uncommittedBackupDeleted)
+                        if (!PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsolete))
                             return false;
                         if (retainedObsoleteFilenames != null)
                         {
@@ -1486,11 +1487,6 @@ namespace Steam_Desktop_Authenticator
                         }
                         return true;
                     }
-
-                    bool backupDeleted = backupFilename == null ||
-                        DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
-                    if (!backupDeleted)
-                        return false;
 
                     bool journalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.");
                     return journalDeleted && !File.Exists(journalFilename);

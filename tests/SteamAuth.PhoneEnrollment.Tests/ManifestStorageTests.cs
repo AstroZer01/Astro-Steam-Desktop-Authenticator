@@ -1010,6 +1010,43 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void StartupRecovery_CommittedBlockedBackupDoesNotClearCreatedFilenamesOrTouchObsoleteFiles()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string backupPath = Path.Combine(maDirectory, TestBackupFilename);
+            string obsoletePath = Path.Combine(maDirectory, "committed-obsolete.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string createdFilename = manifest.Entries[0].Filename;
+
+            // Pre-commit backup had zero entries; current manifest has the committed account.
+            File.WriteAllText(backupPath, JsonConvert.SerializeObject(Manifest.GenerateNewManifest(false)));
+            File.WriteAllText(obsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), createdFilename, "committed-obsolete.maFile", TestBackupFilename);
+
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            using (new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+                JObject journalWhileLocked = JObject.Parse(File.ReadAllText(journalPath));
+                Assert.Equal(new[] { createdFilename }, journalWhileLocked["created_filenames"].Values<string>().ToArray());
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(backupPath));
+            }
+
+            // Once unlocked, recovery deletes the backup before obsolete cleanup and preserves the committed account.
+            Manifest recovered = Manifest.GetManifest(true);
+            Assert.Single(recovered.Entries);
+            Assert.Equal(createdFilename, recovered.Entries[0].Filename);
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(backupPath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
         public void FailedImportOverlappingRetainedObsoleteFile_PreservesCleanupOnRestart()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
