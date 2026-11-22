@@ -408,7 +408,13 @@
 
     function switchTab(tabId) {
         if (!validTabIds.has(tabId)) return;
-        if (activeTabId === tabId) return;
+        if (activeTabId === tabId) {
+            if (tabId === 'settings' && settingsSavePending) {
+                pendingSettingsNavigation = null;
+                pendingConfirmationTab = null;
+            }
+            return;
+        }
         if (activeTabId === 'settings' && tabId !== 'settings' && (settingsDirty || settingsSavePending)) {
             if (tabId !== 'trades') pendingConfirmationTab = null;
             pendingSettingsNavigation = tabId;
@@ -1771,8 +1777,7 @@
         }
         const navigationTarget = saveContext === 'exit' || activeTabId !== 'settings'
             ? null
-            : (pendingSettingsNavigation ||
-                (saveContext && saveContext.startsWith('tab:') ? saveContext.substring(4) : null));
+            : pendingSettingsNavigation;
         pendingSettingsNavigation = null;
         if (navigationTarget && validTabIds.has(navigationTarget)) {
             performTabSwitch(navigationTarget);
