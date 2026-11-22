@@ -211,6 +211,195 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public async Task ManualCheckDuringAbortedOptOutIdlePublishRunsAndDoesNotStickBusyState()
+        {
+            FixedUpdateResponseHandler handler = new FixedUpdateResponseHandler(CreateReleaseResponse("99.99.99", AvailableReleaseUrl));
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.CheckForUpdates = true;
+            TaskCompletionSource<bool> preRequestPublishStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> releasePreRequestPublish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> abortIdlePublishStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> releaseAbortIdlePublish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            System.Collections.Generic.List<(bool Checking, string Message, string Tone)> publishedStates =
+                new System.Collections.Generic.List<(bool Checking, string Message, string Tone)>();
+            int promptCount = 0;
+
+            using (HttpClient client = new HttpClient(handler))
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                client,
+                promptForUpdate: (_, __) =>
+                {
+                    promptCount++;
+                    return (DialogResult.No, false);
+                },
+                publishUpdateCheckStateAsync: async (checking, message, tone) =>
+                {
+                    publishedStates.Add((checking, message, tone));
+                    if (checking && !preRequestPublishStarted.Task.IsCompleted)
+                    {
+                        preRequestPublishStarted.SetResult(true);
+                        await releasePreRequestPublish.Task;
+                    }
+                    else if (!checking &&
+                        String.Equals(message, "Automatic update checks are disabled. You can check manually anytime.", StringComparison.Ordinal) &&
+                        !abortIdlePublishStarted.Task.IsCompleted)
+                    {
+                        abortIdlePublishStarted.SetResult(true);
+                        await releaseAbortIdlePublish.Task;
+                    }
+                }))
+            {
+                Task startupCheck = form.CheckForUpdatesAsync(true);
+                await preRequestPublishStarted.Task;
+
+                await form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: false,
+                    proxyEnabled: false,
+                    autoConfirmMarket: false));
+
+                releasePreRequestPublish.SetResult(true);
+                await abortIdlePublishStarted.Task;
+
+                Task manualCheck = form.CheckForUpdatesAsync(false);
+                releaseAbortIdlePublish.SetResult(true);
+
+                await Task.WhenAll(startupCheck, manualCheck);
+
+                Assert.Equal(1, handler.RequestCount);
+                Assert.Equal(1, promptCount);
+                Assert.False(GetPrivateField<bool>(form, "isCheckingForUpdates"));
+                Assert.Equal(new Version("99.99.99"), GetPrivateField<Version>(form, "availableUpdateVersion"));
+                Assert.Equal("Version 99.99.99 is available.", GetPrivateField<string>(form, "updateCheckStatusMessage"));
+                Assert.Equal("success", GetPrivateField<string>(form, "updateCheckStatusTone"));
+                Assert.DoesNotContain(publishedStates, state => state.Message == "A check for updates is already in progress.");
+                Assert.Equal((false, "Version 99.99.99 is available.", "success"), publishedStates[publishedStates.Count - 1]);
+            }
+        }
+
+        [Fact]
+        public async Task ReEnablingDuringAbortedOptOutIdlePublishClearsDisabledNotice()
+        {
+            FixedUpdateResponseHandler handler = new FixedUpdateResponseHandler(CreateReleaseResponse("99.99.99", AvailableReleaseUrl));
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.CheckForUpdates = true;
+            TaskCompletionSource<bool> preRequestPublishStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> releasePreRequestPublish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> abortIdlePublishStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> releaseAbortIdlePublish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            System.Collections.Generic.List<(bool Checking, string Message, string Tone)> publishedStates =
+                new System.Collections.Generic.List<(bool Checking, string Message, string Tone)>();
+
+            using (HttpClient client = new HttpClient(handler))
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                client,
+                promptForUpdate: (_, __) => (DialogResult.No, false),
+                publishUpdateCheckStateAsync: async (checking, message, tone) =>
+                {
+                    publishedStates.Add((checking, message, tone));
+                    if (checking && !preRequestPublishStarted.Task.IsCompleted)
+                    {
+                        preRequestPublishStarted.SetResult(true);
+                        await releasePreRequestPublish.Task;
+                    }
+                    else if (!checking &&
+                        String.Equals(message, "Automatic update checks are disabled. You can check manually anytime.", StringComparison.Ordinal) &&
+                        !abortIdlePublishStarted.Task.IsCompleted)
+                    {
+                        abortIdlePublishStarted.SetResult(true);
+                        await releaseAbortIdlePublish.Task;
+                    }
+                }))
+            {
+                Task startupCheck = form.CheckForUpdatesAsync(true);
+                await preRequestPublishStarted.Task;
+
+                await form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: false,
+                    proxyEnabled: false,
+                    autoConfirmMarket: false));
+
+                releasePreRequestPublish.SetResult(true);
+                await abortIdlePublishStarted.Task;
+
+                await form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: true,
+                    proxyEnabled: false,
+                    autoConfirmMarket: false));
+
+                releaseAbortIdlePublish.SetResult(true);
+                await startupCheck;
+
+                Assert.Equal(0, handler.RequestCount);
+                Assert.True(manifest.CheckForUpdates);
+                Assert.False(GetPrivateField<bool>(form, "isCheckingForUpdates"));
+                Assert.Equal(String.Empty, GetPrivateField<string>(form, "updateCheckStatusMessage"));
+                Assert.Equal("info", GetPrivateField<string>(form, "updateCheckStatusTone"));
+                Assert.Equal((false, String.Empty, "info"), publishedStates[publishedStates.Count - 1]);
+            }
+        }
+
+        [Fact]
+        public async Task OptingOutDuringPreRequestStatusPublishRestoresPriorCheckResult()
+        {
+            FixedUpdateResponseHandler handler = new FixedUpdateResponseHandler(CreateReleaseResponse("99.99.99", AvailableReleaseUrl));
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.CheckForUpdates = true;
+            TaskCompletionSource<bool> secondPreRequestPublishStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> releaseSecondPreRequestPublish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            System.Collections.Generic.List<(bool Checking, string Message, string Tone)> publishedStates =
+                new System.Collections.Generic.List<(bool Checking, string Message, string Tone)>();
+            int busyPublishes = 0;
+
+            using (HttpClient client = new HttpClient(handler))
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                client,
+                promptForUpdate: (_, __) => (DialogResult.No, false),
+                publishUpdateCheckStateAsync: async (checking, message, tone) =>
+                {
+                    publishedStates.Add((checking, message, tone));
+                    if (checking && ++busyPublishes == 2)
+                    {
+                        secondPreRequestPublishStarted.SetResult(true);
+                        await releaseSecondPreRequestPublish.Task;
+                    }
+                }))
+            {
+                await form.CheckForUpdatesAsync(false);
+                Assert.Equal(1, handler.RequestCount);
+                Assert.Equal("Version 99.99.99 is available.", GetPrivateField<string>(form, "updateCheckStatusMessage"));
+
+                Task activationCheck = form.CheckForUpdatesAsync(true);
+                await secondPreRequestPublishStarted.Task;
+
+                await form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: false,
+                    proxyEnabled: false,
+                    autoConfirmMarket: false));
+
+                releaseSecondPreRequestPublish.SetResult(true);
+                await activationCheck;
+
+                Assert.Equal(1, handler.RequestCount);
+                Assert.False(GetPrivateField<bool>(form, "isCheckingForUpdates"));
+                Assert.Equal("Version 99.99.99 is available.", GetPrivateField<string>(form, "updateCheckStatusMessage"));
+                Assert.Equal("success", GetPrivateField<string>(form, "updateCheckStatusTone"));
+                Assert.Equal((false, "Version 99.99.99 is available.", "success"), publishedStates[publishedStates.Count - 1]);
+            }
+        }
+
+        [Fact]
         public async Task OptingOutWhileStartupRequestIsInFlightSuppressesLaunchPrompt()
         {
             TaskCompletionSource<HttpResponseMessage> pendingResponse = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);

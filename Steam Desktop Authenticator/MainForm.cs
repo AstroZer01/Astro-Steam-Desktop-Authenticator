@@ -3382,6 +3382,7 @@ namespace Steam_Desktop_Authenticator
 
             string previousStatusMessage = updateCheckStatusMessage;
             string previousStatusTone = updateCheckStatusTone;
+            bool restoreIdleStateAfterAbort = false;
             isCheckingForUpdates = true;
 
             try
@@ -3392,55 +3393,52 @@ namespace Steam_Desktop_Authenticator
 
                 if (!ShouldRunUpdateCheck(isStartupCheck, manifest.CheckForUpdates))
                 {
-                    bool hasPreviousStatus = !String.IsNullOrEmpty(previousStatusMessage);
-                    await PublishUpdateCheckStateAsync(
-                        false,
-                        hasPreviousStatus ? previousStatusMessage : AutomaticUpdateChecksDisabledMessage,
-                        hasPreviousStatus ? previousStatusTone : "info");
-                    return;
+                    restoreIdleStateAfterAbort = true;
                 }
-
-                using (CancellationTokenSource updateTimeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
-                using (var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest"))
+                else
                 {
-                    updateTimeoutSource.CancelAfter(UpdateRequestTimeout);
-                    CancellationToken requestCancellationToken = updateTimeoutSource.Token;
-                    request.Headers.Add("User-Agent", "Astro Steam Desktop Assistant");
-                    request.Headers.Add("Accept", "application/json");
-                
-                    using (HttpResponseMessage response = await updateClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, requestCancellationToken))
+                    using (CancellationTokenSource updateTimeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                    using (var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest"))
                     {
-                        response.EnsureSuccessStatusCode();
-                        if (response.Content == null || response.Content.Headers.ContentLength > MaximumUpdateResponseBytes)
-                            throw new InvalidDataException("The update service returned an oversized response.");
-                
-                        string responseBody = await ReadResponseBodyWithLimitAsync(response.Content, requestCancellationToken);
-                        requestCancellationToken.ThrowIfCancellationRequested();
-
-                        JObject resultObject;
-                        using (StringReader stringReader = new StringReader(responseBody))
-                        using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                        updateTimeoutSource.CancelAfter(UpdateRequestTimeout);
+                        CancellationToken requestCancellationToken = updateTimeoutSource.Token;
+                        request.Headers.Add("User-Agent", "Astro Steam Desktop Assistant");
+                        request.Headers.Add("Accept", "application/json");
+                    
+                        using (HttpResponseMessage response = await updateClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, requestCancellationToken))
                         {
-                            resultObject = JObject.Load(jsonReader);
+                            response.EnsureSuccessStatusCode();
+                            if (response.Content == null || response.Content.Headers.ContentLength > MaximumUpdateResponseBytes)
+                                throw new InvalidDataException("The update service returned an oversized response.");
+                    
+                            string responseBody = await ReadResponseBodyWithLimitAsync(response.Content, requestCancellationToken);
+                            requestCancellationToken.ThrowIfCancellationRequested();
+
+                            JObject resultObject;
+                            using (StringReader stringReader = new StringReader(responseBody))
+                            using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                            {
+                                resultObject = JObject.Load(jsonReader);
+                            }
+
+                            string tagName = resultObject.Value<string>("tag_name")?.Trim();
+                            if (String.IsNullOrWhiteSpace(tagName) || tagName.Length > 64)
+                                throw new InvalidDataException("The update service returned an invalid version.");
+                            if (tagName.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+                                tagName = tagName.Substring(1);
+                            if (!Version.TryParse(tagName, out Version parsedVersion) || parsedVersion < new Version(0, 0))
+                                throw new InvalidDataException("The update service returned an invalid version.");
+
+                            JArray assets = resultObject["assets"] as JArray;
+                            string downloadUrl = assets?.OfType<JObject>()
+                                .Select(asset => asset.Value<string>("browser_download_url"))
+                                .FirstOrDefault(IsTrustedUpdateUrl);
+                            if (String.IsNullOrWhiteSpace(downloadUrl))
+                                throw new InvalidDataException("The update service returned no trusted download.");
+
+                            Version installedVersion = new Version(Application.ProductVersion);
+                            await ShowUpdateResultAsync(parsedVersion, installedVersion, downloadUrl, isStartupCheck, cancellationToken);
                         }
-
-                        string tagName = resultObject.Value<string>("tag_name")?.Trim();
-                        if (String.IsNullOrWhiteSpace(tagName) || tagName.Length > 64)
-                            throw new InvalidDataException("The update service returned an invalid version.");
-                        if (tagName.StartsWith("v", StringComparison.OrdinalIgnoreCase))
-                            tagName = tagName.Substring(1);
-                        if (!Version.TryParse(tagName, out Version parsedVersion) || parsedVersion < new Version(0, 0))
-                            throw new InvalidDataException("The update service returned an invalid version.");
-
-                        JArray assets = resultObject["assets"] as JArray;
-                        string downloadUrl = assets?.OfType<JObject>()
-                            .Select(asset => asset.Value<string>("browser_download_url"))
-                            .FirstOrDefault(IsTrustedUpdateUrl);
-                        if (String.IsNullOrWhiteSpace(downloadUrl))
-                            throw new InvalidDataException("The update service returned no trusted download.");
-
-                        Version installedVersion = new Version(Application.ProductVersion);
-                        await ShowUpdateResultAsync(parsedVersion, installedVersion, downloadUrl, isStartupCheck, cancellationToken);
                     }
                 }
             }
@@ -3458,6 +3456,15 @@ namespace Steam_Desktop_Authenticator
             finally
             {
                 isCheckingForUpdates = false;
+            }
+
+            if (restoreIdleStateAfterAbort)
+            {
+                bool hasPreviousStatus = !String.IsNullOrEmpty(previousStatusMessage);
+                await PublishUpdateCheckStateAsync(
+                    false,
+                    hasPreviousStatus ? previousStatusMessage : AutomaticUpdateChecksDisabledMessage,
+                    hasPreviousStatus ? previousStatusTone : "info");
             }
         }
 
