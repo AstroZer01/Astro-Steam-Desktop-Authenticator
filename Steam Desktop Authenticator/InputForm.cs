@@ -21,7 +21,10 @@ namespace Steam_Desktop_Authenticator
     {
         public bool Canceled = false;
         private bool userClosed = true;
+        private int navigationGeneration = 0;
         internal bool IsPasswordMasked { get; }
+        internal bool Accepted { get; private set; }
+        internal bool UiReady { get; private set; }
         internal bool LoadFailed { get; private set; }
 
         public InputForm(string label, bool password = false)
@@ -37,6 +40,7 @@ namespace Steam_Desktop_Authenticator
 
             this.labelText.Text = label;
             this.IsPasswordMasked = password;
+            this.UiReady = !initializeModernUi;
 
             if (password)
             {
@@ -157,8 +161,51 @@ namespace Steam_Desktop_Authenticator
             this.btnCancel.Enabled = false;
         }
 
-        private void MarkModernUiLoadFailed(Panel loadingPanel, Label lblLoading)
+        internal bool CanAcceptWebMessage(bool isWebViewVisible)
         {
+            return UiReady && !LoadFailed && isWebViewVisible;
+        }
+
+        internal void BeginModernUiNavigation(Panel loadingPanel = null, Label lblLoading = null)
+        {
+            navigationGeneration++;
+            this.UiReady = false;
+            this.LoadFailed = false;
+            if (!IsDisposed && !Disposing)
+            {
+                if (webView != null)
+                    webView.Visible = false;
+                if (lblLoading != null)
+                    lblLoading.Text = "Loading...";
+                if (loadingPanel != null)
+                {
+                    loadingPanel.Visible = true;
+                    loadingPanel.BringToFront();
+                }
+            }
+        }
+
+        internal void CompleteModernUiLoad(Panel loadingPanel = null)
+        {
+            this.LoadFailed = false;
+            this.UiReady = true;
+            if (!IsDisposed && !Disposing)
+            {
+                if (loadingPanel != null)
+                    loadingPanel.Visible = false;
+                foreach (Control c in this.Controls)
+                {
+                    if (c != webView && c != loadingPanel)
+                        c.Visible = false;
+                }
+                if (webView != null)
+                    webView.Visible = true;
+            }
+        }
+
+        internal void MarkModernUiLoadFailed(Panel loadingPanel = null, Label lblLoading = null)
+        {
+            this.UiReady = false;
             this.LoadFailed = true;
             if (!IsDisposed && !Disposing)
             {
@@ -172,6 +219,27 @@ namespace Steam_Desktop_Authenticator
                     loadingPanel.BringToFront();
                 }
             }
+        }
+
+        internal void SubmitInput(string value)
+        {
+            this.txtBox.Text = value ?? String.Empty;
+            btnAccept_Click(this, EventArgs.Empty);
+        }
+
+        internal void CancelInput()
+        {
+            btnCancel_Click(this, EventArgs.Empty);
+        }
+
+        internal Manifest.PassKeyPromptResult ToPassKeyPromptResult()
+        {
+            return new Manifest.PassKeyPromptResult(
+                canceled: this.Canceled,
+                value: this.txtBox.Text,
+                uiReady: this.UiReady,
+                loadFailed: this.LoadFailed,
+                accepted: this.Accepted);
         }
 
         private async void SetupModernUI(string label, bool isPassword)
@@ -199,6 +267,8 @@ namespace Steam_Desktop_Authenticator
             this.Controls.Add(webView);
             webView.BringToFront();
 
+            BeginModernUiNavigation(loadingPanel, lblLoading);
+
             try
             {
                 await webView.EnsureCoreWebView2Async(await WebViewEnvironmentProvider.GetAsync());
@@ -210,8 +280,13 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
+            if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested)
                 return;
+            if (webView?.CoreWebView2 == null)
+            {
+                MarkModernUiLoadFailed(loadingPanel, lblLoading);
+                return;
+            }
 
             string htmlPath = Path.GetFullPath(Path.Combine(ApplicationPaths.UiDirectory, "input.html"));
 
@@ -221,7 +296,10 @@ namespace Steam_Desktop_Authenticator
             webView.NavigationStarting += (sender, args) =>
             {
                 if (WebViewSecurityPolicy.IsTrustedLocalDocument(args.Uri, htmlPath))
+                {
+                    BeginModernUiNavigation(loadingPanel, lblLoading);
                     return;
+                }
 
                 args.Cancel = true;
                 DiagnosticErrorLogger.Log(
@@ -257,7 +335,7 @@ namespace Steam_Desktop_Authenticator
 
                 if (action == "accept")
                 {
-                    if (LoadFailed || webView == null || !webView.Visible)
+                    if (!CanAcceptWebMessage(webView != null && webView.Visible))
                         return;
                     if (payload["value"]?.Type != JTokenType.String)
                         return;
@@ -269,6 +347,8 @@ namespace Steam_Desktop_Authenticator
                 }
                 else if (action == "cancel")
                 {
+                    if (!CanAcceptWebMessage(webView != null && webView.Visible))
+                        return;
                     btnCancel_Click(this, EventArgs.Empty);
                 }
                 else if (action == "resize")
@@ -284,7 +364,8 @@ namespace Steam_Desktop_Authenticator
 
             webView.NavigationCompleted += async (sender, args) =>
             {
-                if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
+                int expectedGeneration = navigationGeneration;
+                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
                     return;
                 if (!args.IsSuccess)
                 {
@@ -304,7 +385,7 @@ namespace Steam_Desktop_Authenticator
                 string jsLabel = JsonConvert.SerializeObject(label);
                 string isPassStr = isPassword ? "true" : "false";
                 bool setupSucceeded = await ExecuteScriptSafelyAsync($"setupInput({jsLabel}, {isPassStr})", "Input dialog UI", requireTrueResult: true);
-                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null)
+                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null || navigationGeneration != expectedGeneration)
                     return;
                 if (!setupSucceeded)
                 {
@@ -312,23 +393,26 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                this.LoadFailed = false;
-                loadingPanel.Visible = false;
-                foreach (Control c in this.Controls)
-                {
-                    if (c != webView && c != loadingPanel)
-                        c.Visible = false;
-                }
-                webView.Visible = true;
+                CompleteModernUiLoad(loadingPanel);
             };
 
-            if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView == null)
+            if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null)
                 return;
-            webView.Source = new Uri(htmlPath);
+            try
+            {
+                BeginModernUiNavigation(loadingPanel, lblLoading);
+                webView.Source = new Uri(htmlPath);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Input UI", ex, "The WebView2 input dialog could not navigate to its packaged UI.");
+                MarkModernUiLoadFailed(loadingPanel, lblLoading);
+            }
         }
 
         private void btnAccept_Click(object sender, EventArgs e)
         {
+            this.Accepted = true;
             if (string.IsNullOrEmpty(this.txtBox.Text))
             {
                 this.Canceled = true;
@@ -345,6 +429,7 @@ namespace Steam_Desktop_Authenticator
 
         private void btnCancel_Click(object sender, EventArgs e)
         {
+            this.Accepted = false;
             this.Canceled = true;
             this.userClosed = false;
             this.Close();
@@ -355,6 +440,7 @@ namespace Steam_Desktop_Authenticator
             if (this.userClosed)
             {
                 // Set Canceled = true when the user hits the X button.
+                this.Accepted = false;
                 this.Canceled = true;
             }
         }

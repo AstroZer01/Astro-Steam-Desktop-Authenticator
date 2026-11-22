@@ -349,7 +349,7 @@ namespace Steam_Desktop_Authenticator
                 using (InputForm passKeyForm = new InputForm("Please enter your encryption passkey.", true))
                 {
                     passKeyForm.ShowInputDialog();
-                    if (!passKeyForm.Canceled)
+                    if (!passKeyForm.Canceled && passKeyForm.UiReady && !passKeyForm.LoadFailed)
                     {
                         passKey = passKeyForm.txtBox.Text;
                         passKeyValid = this.VerifyPasskey(passKey);
@@ -374,6 +374,24 @@ namespace Steam_Desktop_Authenticator
             Failed
         }
 
+        internal readonly struct PassKeyPromptResult
+        {
+            public PassKeyPromptResult(bool canceled, string value, bool uiReady, bool loadFailed, bool accepted)
+            {
+                Canceled = canceled;
+                Value = value;
+                UiReady = uiReady;
+                LoadFailed = loadFailed;
+                Accepted = accepted;
+            }
+
+            public bool Canceled { get; }
+            public string Value { get; }
+            public bool UiReady { get; }
+            public bool LoadFailed { get; }
+            public bool Accepted { get; }
+        }
+
         public string PromptSetupPassKey(string initialPrompt = "Enter passkey, or hit cancel to remain unencrypted.")
         {
             return PromptSetupPassKey(initialPrompt, commitImmediately: true);
@@ -395,7 +413,7 @@ namespace Steam_Desktop_Authenticator
                     using (InputForm passKeyForm = new InputForm(promptLabel, isPassword))
                     {
                         passKeyForm.ShowInputDialog();
-                        return (passKeyForm.Canceled, passKeyForm.txtBox.Text, passKeyForm.LoadFailed);
+                        return passKeyForm.ToPassKeyPromptResult();
                     }
                 },
                 message => AstroMessageBox.Show(message),
@@ -405,7 +423,7 @@ namespace Steam_Desktop_Authenticator
         internal SetupPassKeyStatus TryPromptSetupPassKey(
             string initialPrompt,
             bool commitImmediately,
-            Func<string, bool, (bool Canceled, string Value, bool LoadFailed)> promptForPassKey,
+            Func<string, bool, PassKeyPromptResult> promptForPassKey,
             Action<string> showMessage,
             out string passKey)
         {
@@ -416,10 +434,15 @@ namespace Steam_Desktop_Authenticator
 
             passKey = null;
 
-            (bool Canceled, string Value, bool LoadFailed) initialResponse = promptForPassKey(initialPrompt, true);
+            PassKeyPromptResult initialResponse = promptForPassKey(initialPrompt, true);
             if (initialResponse.LoadFailed)
             {
                 showMessage("The passkey prompt could not be loaded. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
+            }
+            if (!initialResponse.UiReady)
+            {
+                showMessage("The passkey prompt closed before it finished loading. No encryption changes were applied.");
                 return SetupPassKeyStatus.Failed;
             }
             if (initialResponse.Canceled || String.IsNullOrEmpty(initialResponse.Value))
@@ -430,21 +453,25 @@ namespace Steam_Desktop_Authenticator
 
             string newPassKey = initialResponse.Value;
 
-            (bool Canceled, string Value, bool LoadFailed) confirmResponse = promptForPassKey("Confirm new passkey.", true);
+            PassKeyPromptResult confirmResponse = promptForPassKey("Confirm new passkey.", true);
             if (confirmResponse.LoadFailed)
             {
                 showMessage("The passkey confirmation prompt could not be loaded. No encryption changes were applied.");
                 return SetupPassKeyStatus.Failed;
             }
-            if (confirmResponse.Canceled)
+            if (!confirmResponse.UiReady)
             {
-                showMessage("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
-                return SetupPassKeyStatus.DeclinedUnencrypted;
+                showMessage("The passkey confirmation prompt closed before it finished loading. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
+            }
+            if (confirmResponse.Canceled && !confirmResponse.Accepted)
+            {
+                showMessage("Passkey setup was canceled. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
             }
 
-            string confirmPassKey = confirmResponse.Value;
-
-            if (newPassKey != confirmPassKey)
+            string confirmPassKey = confirmResponse.Value ?? String.Empty;
+            if (!String.Equals(newPassKey, confirmPassKey, StringComparison.Ordinal))
             {
                 showMessage("Passkeys do not match.");
                 return SetupPassKeyStatus.Failed;

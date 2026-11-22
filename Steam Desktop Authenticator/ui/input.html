@@ -40,7 +40,7 @@ input::-ms-reveal { display: none; }
     </div>
 
     <div class="flex gap-4 mt-2">
-        <button id="btn-cancel" class="btn-secondary flex-1 shadow-lg">CANCEL</button>
+        <button id="btn-cancel" class="btn-secondary flex-1 shadow-lg" disabled>CANCEL</button>
         <button id="btn-accept" class="btn-primary flex-1 shadow-lg shadow-[#00E5FF]/20" disabled>ACCEPT</button>
     </div>
 </div>
@@ -53,6 +53,8 @@ input::-ms-reveal { display: none; }
     });
     
     document.getElementById('btn-cancel').addEventListener('click', () => {
+        const cancelButton = document.getElementById('btn-cancel');
+        if (cancelButton.disabled) return;
         window.chrome.webview.postMessage({ action: 'cancel' });
     });
 
@@ -72,6 +74,7 @@ input::-ms-reveal { display: none; }
     function setupInput(label, isPassword) {
         document.getElementById('label-text').innerText = label;
         const input = document.getElementById('input-box');
+        const cancelButton = document.getElementById('btn-cancel');
         const acceptButton = document.getElementById('btn-accept');
         const toggle = document.getElementById('password-toggle');
         const passwordField = document.getElementById('password-field');
@@ -83,6 +86,7 @@ input::-ms-reveal { display: none; }
         toggle.setAttribute('aria-pressed', 'false');
         resizeObserver.observe(panel);
         input.disabled = false;
+        cancelButton.disabled = false;
         acceptButton.disabled = false;
         input.focus();
         return true;

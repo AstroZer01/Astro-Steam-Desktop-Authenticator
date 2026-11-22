@@ -837,7 +837,7 @@ namespace Steam_Desktop_Authenticator
                 : new InputForm(promptLabel, false))
             {
                 passKeyForm.ShowInputDialog(this);
-                return (passKeyForm.Canceled || passKeyForm.LoadFailed, passKeyForm.txtBox.Text);
+                return (passKeyForm.Canceled || !passKeyForm.UiReady || passKeyForm.LoadFailed, passKeyForm.txtBox.Text);
             }
         }
 
@@ -862,7 +862,7 @@ namespace Steam_Desktop_Authenticator
             if (manifest.Entries.Count == 0)
             {
                 (Manifest.SetupPassKeyStatus status, string setupPassKey) = promptSetupPassKey(SetupPassKeyPromptLabel);
-                if (status == Manifest.SetupPassKeyStatus.Failed)
+                if (status != Manifest.SetupPassKeyStatus.Set && status != Manifest.SetupPassKeyStatus.DeclinedUnencrypted)
                     return false;
 
                 resolvedPassKey = status == Manifest.SetupPassKeyStatus.Set ? setupPassKey : null;

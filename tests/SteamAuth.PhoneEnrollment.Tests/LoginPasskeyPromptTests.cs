@@ -425,17 +425,88 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             Assert.Contains("<input type=\"password\" id=\"input-box\"", html);
             Assert.Contains("id=\"input-box\" aria-labelledby=\"label-text\" placeholder=\"...\" disabled", html);
+            Assert.Contains("id=\"btn-cancel\" class=\"btn-secondary flex-1 shadow-lg\" disabled", html);
             Assert.Contains("id=\"btn-accept\" class=\"btn-primary flex-1 shadow-lg shadow-[#00E5FF]/20\" disabled", html);
 
             int observeIndex = html.IndexOf("resizeObserver.observe(panel);", StringComparison.Ordinal);
             int inputEnableIndex = html.IndexOf("input.disabled = false;", StringComparison.Ordinal);
+            int cancelEnableIndex = html.IndexOf("cancelButton.disabled = false;", StringComparison.Ordinal);
             int buttonEnableIndex = html.IndexOf("acceptButton.disabled = false;", StringComparison.Ordinal);
             int returnTrueIndex = html.IndexOf("return true;", StringComparison.Ordinal);
 
             Assert.True(observeIndex >= 0, "Expected resizeObserver.observe(panel) in setupInput.");
             Assert.True(inputEnableIndex > observeIndex, "Expected input to stay disabled until setup finishes.");
-            Assert.True(buttonEnableIndex > inputEnableIndex, "Expected accept button to enable after input.");
+            Assert.True(cancelEnableIndex > inputEnableIndex, "Expected cancel button to enable after input.");
+            Assert.True(buttonEnableIndex > cancelEnableIndex, "Expected accept button to enable after cancel button.");
             Assert.True(returnTrueIndex > buttonEnableIndex, "Expected setupInput to return true after enabling controls.");
+        }
+
+        [Fact]
+        public void InputForm_TracksUiReadinessAcrossNavigationReloadAndFailure()
+        {
+            using (InputForm form = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
+            {
+                Assert.True(form.UiReady);
+                Assert.False(form.LoadFailed);
+
+                form.BeginModernUiNavigation();
+                Assert.False(form.UiReady);
+                Assert.False(form.LoadFailed);
+                Assert.False(form.CanAcceptWebMessage(isWebViewVisible: true));
+
+                form.CompleteModernUiLoad();
+                Assert.True(form.UiReady);
+                Assert.False(form.LoadFailed);
+                Assert.True(form.CanAcceptWebMessage(isWebViewVisible: true));
+                Assert.False(form.CanAcceptWebMessage(isWebViewVisible: false));
+
+                // Starting a reload clears readiness until the new navigation completes.
+                form.BeginModernUiNavigation();
+                Assert.False(form.UiReady);
+                Assert.False(form.LoadFailed);
+                Assert.False(form.CanAcceptWebMessage(isWebViewVisible: true));
+
+                form.MarkModernUiLoadFailed();
+                Assert.False(form.UiReady);
+                Assert.True(form.LoadFailed);
+                Assert.False(form.CanAcceptWebMessage(isWebViewVisible: true));
+            }
+        }
+
+        [Fact]
+        public void InputForm_DistinguishesBlankAcceptFromCancel()
+        {
+            using (InputForm blankAcceptForm = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
+            {
+                blankAcceptForm.SubmitInput(string.Empty);
+                Manifest.PassKeyPromptResult result = blankAcceptForm.ToPassKeyPromptResult();
+                Assert.True(result.Canceled);
+                Assert.True(result.Accepted);
+                Assert.True(result.UiReady);
+                Assert.False(result.LoadFailed);
+                Assert.Equal(string.Empty, result.Value);
+            }
+
+            using (InputForm canceledForm = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
+            {
+                canceledForm.CancelInput();
+                Manifest.PassKeyPromptResult result = canceledForm.ToPassKeyPromptResult();
+                Assert.True(result.Canceled);
+                Assert.False(result.Accepted);
+                Assert.True(result.UiReady);
+                Assert.False(result.LoadFailed);
+            }
+
+            using (InputForm acceptedForm = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
+            {
+                acceptedForm.SubmitInput("secret-passkey");
+                Manifest.PassKeyPromptResult result = acceptedForm.ToPassKeyPromptResult();
+                Assert.False(result.Canceled);
+                Assert.True(result.Accepted);
+                Assert.True(result.UiReady);
+                Assert.False(result.LoadFailed);
+                Assert.Equal("secret-passkey", result.Value);
+            }
         }
 
         [Theory]
@@ -464,7 +535,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 (label, isPassword) =>
                 {
                     prompts.Add((label, isPassword));
-                    return (false, "deferred-passkey", false);
+                    return new Manifest.PassKeyPromptResult(canceled: false, value: "deferred-passkey", uiReady: true, loadFailed: false, accepted: true);
                 },
                 message => messages.Add(message),
                 out string passKey);
@@ -495,9 +566,71 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     Assert.True(isPassword);
                     promptIndex++;
                     if (promptIndex == 1)
-                        return initialLoadFailed ? (true, string.Empty, true) : (false, "valid-passkey", false);
+                    {
+                        return initialLoadFailed
+                            ? new Manifest.PassKeyPromptResult(canceled: true, value: string.Empty, uiReady: false, loadFailed: true, accepted: false)
+                            : new Manifest.PassKeyPromptResult(canceled: false, value: "valid-passkey", uiReady: true, loadFailed: false, accepted: true);
+                    }
 
-                    return confirmLoadFailed ? (true, string.Empty, true) : (false, "valid-passkey", false);
+                    return confirmLoadFailed
+                        ? new Manifest.PassKeyPromptResult(canceled: true, value: string.Empty, uiReady: false, loadFailed: true, accepted: false)
+                        : new Manifest.PassKeyPromptResult(canceled: false, value: "valid-passkey", uiReady: true, loadFailed: false, accepted: true);
+                },
+                message => messages.Add(message),
+                out string passKey);
+
+            Assert.Equal(Manifest.SetupPassKeyStatus.Failed, status);
+            Assert.Null(passKey);
+            Assert.False(manifest.Encrypted);
+            string message = Assert.Single(messages);
+            Assert.DoesNotContain("WARNING: You chose to not encrypt", message);
+        }
+
+        [Theory]
+        [InlineData(true, false)]
+        [InlineData(false, true)]
+        public void TryPromptSetupPassKey_ReturnsFailedWhenPromptClosesBeforeUiReady(bool initialClosedEarly, bool confirmClosedEarly)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            int promptIndex = 0;
+            List<string> messages = new List<string>();
+
+            Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                LoginForm.SetupPassKeyPromptLabel,
+                commitImmediately: false,
+                (label, isPassword) =>
+                {
+                    Assert.True(isPassword);
+                    promptIndex++;
+                    using (InputForm form = new InputForm(label, isPassword, initializeModernUi: false))
+                    {
+                        if (promptIndex == 1)
+                        {
+                            if (initialClosedEarly)
+                            {
+                                form.BeginModernUiNavigation();
+                                form.Canceled = true;
+                            }
+                            else
+                            {
+                                form.SubmitInput("valid-passkey");
+                            }
+                        }
+                        else
+                        {
+                            if (confirmClosedEarly)
+                            {
+                                form.BeginModernUiNavigation();
+                                form.Canceled = true;
+                            }
+                            else
+                            {
+                                form.SubmitInput("valid-passkey");
+                            }
+                        }
+
+                        return form.ToPassKeyPromptResult();
+                    }
                 },
                 message => messages.Add(message),
                 out string passKey);
@@ -523,8 +656,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 {
                     promptIndex++;
                     return promptIndex == 1
-                        ? (false, "passkey-one", false)
-                        : (false, "passkey-two", false);
+                        ? new Manifest.PassKeyPromptResult(canceled: false, value: "passkey-one", uiReady: true, loadFailed: false, accepted: true)
+                        : new Manifest.PassKeyPromptResult(canceled: false, value: "passkey-two", uiReady: true, loadFailed: false, accepted: true);
                 },
                 message => messages.Add(message),
                 out string passKey);
@@ -532,6 +665,100 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Equal(Manifest.SetupPassKeyStatus.Failed, status);
             Assert.Null(passKey);
             Assert.Equal("Passkeys do not match.", Assert.Single(messages));
+        }
+
+        [Fact]
+        public void TryPromptSetupPassKey_ReturnsFailedWithMismatchWhenConfirmationSubmittedBlank()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            int promptIndex = 0;
+            List<string> messages = new List<string>();
+
+            Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                LoginForm.SetupPassKeyPromptLabel,
+                commitImmediately: false,
+                (label, isPassword) =>
+                {
+                    promptIndex++;
+                    using (InputForm form = new InputForm(label, isPassword, initializeModernUi: false))
+                    {
+                        form.SubmitInput(promptIndex == 1 ? "passkey-one" : string.Empty);
+                        return form.ToPassKeyPromptResult();
+                    }
+                },
+                message => messages.Add(message),
+                out string passKey);
+
+            Assert.Equal(Manifest.SetupPassKeyStatus.Failed, status);
+            Assert.Null(passKey);
+            Assert.False(manifest.Encrypted);
+            Assert.Equal("Passkeys do not match.", Assert.Single(messages));
+        }
+
+        [Fact]
+        public void TryPromptSetupPassKey_ReturnsFailedWhenConfirmationIsCanceled()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            int promptIndex = 0;
+            List<string> messages = new List<string>();
+
+            Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                LoginForm.SetupPassKeyPromptLabel,
+                commitImmediately: false,
+                (label, isPassword) =>
+                {
+                    promptIndex++;
+                    using (InputForm form = new InputForm(label, isPassword, initializeModernUi: false))
+                    {
+                        if (promptIndex == 1)
+                            form.SubmitInput("passkey-one");
+                        else
+                            form.CancelInput();
+
+                        return form.ToPassKeyPromptResult();
+                    }
+                },
+                message => messages.Add(message),
+                out string passKey);
+
+            Assert.Equal(Manifest.SetupPassKeyStatus.Failed, status);
+            Assert.Null(passKey);
+            Assert.False(manifest.Encrypted);
+            string message = Assert.Single(messages);
+            Assert.DoesNotContain("WARNING: You chose to not encrypt", message);
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void TryPromptSetupPassKey_ReturnsDeclinedUnencryptedOnlyWhenLoadedInitialPromptIsDeclined(bool submitBlank)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            List<string> messages = new List<string>();
+
+            Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                LoginForm.SetupPassKeyPromptLabel,
+                commitImmediately: false,
+                (label, isPassword) =>
+                {
+                    using (InputForm form = new InputForm(label, isPassword, initializeModernUi: false))
+                    {
+                        if (submitBlank)
+                            form.SubmitInput(string.Empty);
+                        else
+                            form.CancelInput();
+
+                        return form.ToPassKeyPromptResult();
+                    }
+                },
+                message => messages.Add(message),
+                out string passKey);
+
+            Assert.Equal(Manifest.SetupPassKeyStatus.DeclinedUnencrypted, status);
+            Assert.Null(passKey);
+            Assert.False(manifest.Encrypted);
+            string message = Assert.Single(messages);
+            Assert.Contains("WARNING: You chose to not encrypt", message);
         }
 
         [Fact]
