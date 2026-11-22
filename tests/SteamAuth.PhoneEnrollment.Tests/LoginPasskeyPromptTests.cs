@@ -223,10 +223,129 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 InvokePrivateMethod(form, "btnSteamLogin_Click", form, EventArgs.Empty);
 
                 Assert.Equal(newPassKey, GetPrivateField<string>(form, "passKey"));
+                Button manageEncryptionButton = GetPrivateField<Button>(form, "btnManageEncryption");
+                Assert.Equal("Remove Encryption", manageEncryptionButton.Text);
+                Assert.True(manageEncryptionButton.Enabled);
                 SteamGuardAccount[] loaded = GetPrivateField<SteamGuardAccount[]>(form, "allAccounts");
                 SteamGuardAccount single = Assert.Single(loaded);
                 Assert.Equal(newAccount.Session.SteamID, single.Session.SteamID);
             }
+        }
+
+        [Fact]
+        public void MainForm_AddAccountDoesNotAdoptPassKeyWhenFirstSaveFailsOrLeavesEmptyVault()
+        {
+            const string attemptedPassKey = "failed-first-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount invalidAccount = new SteamGuardAccount
+            {
+                AccountName = "incomplete-account",
+                Session = new SessionData { SteamID = 0 }
+            };
+
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                showAddAccountLoginDialog: _ =>
+                {
+                    StorageResult failedSave = manifest.SaveAccount(invalidAccount, true, attemptedPassKey);
+                    Assert.False(failedSave.Succeeded);
+                    return null;
+                }))
+            {
+                InvokePrivateMethod(form, "btnSteamLogin_Click", form, EventArgs.Empty);
+
+                Assert.False(manifest.Encrypted);
+                Assert.Empty(manifest.Entries);
+                Assert.Null(GetPrivateField<string>(form, "passKey"));
+                Button manageEncryptionButton = GetPrivateField<Button>(form, "btnManageEncryption");
+                Assert.NotEqual("Remove Encryption", manageEncryptionButton.Text);
+
+                // Retrying in the same process without encryption must succeed cleanly.
+                SteamGuardAccount retryAccount = CreateAccount(76561198000001003UL, "unencrypted-retry");
+                Assert.True(manifest.SaveAccount(retryAccount, false, null).Succeeded);
+                Assert.False(manifest.Encrypted);
+            }
+        }
+
+        [Fact]
+        public void MainForm_AddAccountDoesNotAdoptPassKeyWhenFirstEnrollmentCancelsAndRemovesEntry()
+        {
+            const string tempPassKey = "canceled-first-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001004UL, "canceled-enrollment-user");
+
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                showAddAccountLoginDialog: _ =>
+                {
+                    Assert.True(manifest.SaveAccount(pendingAccount, true, tempPassKey).Succeeded);
+                    Assert.True(manifest.Encrypted);
+                    Assert.True(manifest.RemoveAccount(pendingAccount));
+                    Assert.False(manifest.Encrypted);
+                    return tempPassKey;
+                }))
+            {
+                InvokePrivateMethod(form, "btnSteamLogin_Click", form, EventArgs.Empty);
+
+                Assert.False(manifest.Encrypted);
+                Assert.Empty(manifest.Entries);
+                Assert.Null(GetPrivateField<string>(form, "passKey"));
+                Button manageEncryptionButton = GetPrivateField<Button>(form, "btnManageEncryption");
+                Assert.NotEqual("Remove Encryption", manageEncryptionButton.Text);
+            }
+        }
+
+        [Fact]
+        public void MainForm_AdoptResolvedPassKeyUpdatesStaleKeyForSubsequentReloads()
+        {
+            const string correctedPassKey = "corrected-refresh-passkey";
+            Manifest manifest = CreateEncryptedManifestWithAccount(correctedPassKey);
+
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { }))
+            {
+                form.SetEncryptionKey("stale-passkey");
+                form.AdoptResolvedPassKey(correctedPassKey);
+
+                Assert.Equal(correctedPassKey, GetPrivateField<string>(form, "passKey"));
+                InvokePrivateMethod(form, "loadAccountsList", new object[] { null });
+                SteamGuardAccount[] loaded = GetPrivateField<SteamGuardAccount[]>(form, "allAccounts");
+                Assert.Single(loaded);
+            }
+        }
+
+        [Fact]
+        public void CreateCurrentPassKeyPrompt_CreatesMaskedInputForm()
+        {
+            using (InputForm form = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
+            {
+                Assert.True(form.IsPasswordMasked);
+                Assert.Equal('*', form.txtBox.PasswordChar);
+                Assert.Equal(LoginForm.CurrentPassKeyPromptLabel, GetPrivateField<Label>(form, "labelText").Text);
+            }
+        }
+
+        [Fact]
+        public void InputHtml_DefaultsToDisabledPasswordInputUntilSetupRuns()
+        {
+            string inputHtmlPath = Path.Combine(AppContext.BaseDirectory, "app", "ui", "input.html");
+            Assert.True(File.Exists(inputHtmlPath), "Expected packaged input.html at " + inputHtmlPath);
+            string html = File.ReadAllText(inputHtmlPath);
+
+            Assert.Contains("<input type=\"password\" id=\"input-box\"", html);
+            Assert.Contains("id=\"input-box\" aria-labelledby=\"label-text\" placeholder=\"...\" disabled", html);
+            Assert.Contains("id=\"btn-accept\" class=\"btn-primary flex-1 shadow-lg shadow-[#00E5FF]/20\" disabled", html);
+            Assert.Contains("input.disabled = false;", html);
+            Assert.Contains("acceptButton.disabled = false;", html);
         }
 
         private static Manifest CreateEncryptedManifestWithAccount(string passKey)

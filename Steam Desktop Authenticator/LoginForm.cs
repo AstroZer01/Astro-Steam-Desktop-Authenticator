@@ -541,10 +541,9 @@ namespace Steam_Desktop_Authenticator
                 this.Close();
                 return;
             }
-            ResolvedPassKey = passKey;
 
             //Save the file immediately; losing this would be bad.
-            bool encrypt = manifest.Encrypted || (manifest.Entries.Count == 0 && passKey != null);
+            bool encrypt = (manifest.Entries.Count > 0 && manifest.Encrypted) || passKey != null;
             StorageResult initialSaveResult = manifest.SaveAccount(linker.LinkedAccount, encrypt, passKey);
             if (IsDisposed || Disposing)
                 return;
@@ -555,6 +554,7 @@ namespace Steam_Desktop_Authenticator
                 this.Close();
                 return;
             }
+            ResolvedPassKey = encrypt ? passKey : null;
 
             ShowRecoveryCode(linker.LinkedAccount, "The mobile authenticator is not linked yet. Save this recovery code before continuing.", true);
 
@@ -585,6 +585,8 @@ namespace Steam_Desktop_Authenticator
                             ResetLoginButton(cancellationToken);
                             return;
                         }
+                        if (!manifest.Encrypted)
+                            ResolvedPassKey = null;
                         this.Close();
                         return;
                     }
@@ -626,6 +628,8 @@ namespace Steam_Desktop_Authenticator
                     case AuthenticatorLinker.FinalizeResult.UnableToGenerateCorrectCodes:
                         AstroMessageBox.Show("Unable to generate the proper codes to finalize this authenticator. The authenticator should not have been linked. In the off-chance it was, please write down your revocation code, as this is the last chance to see it: " + linker.LinkedAccount.RevocationCode);
                         manifest.RemoveAccount(linker.LinkedAccount);
+                        if (!manifest.Encrypted)
+                            ResolvedPassKey = null;
                         this.Close();
                         return;
 
@@ -811,15 +815,22 @@ namespace Steam_Desktop_Authenticator
             return TryResolveManifestPassKey(
                 manifest,
                 currentPassKey,
-                prompt => manifest.PromptSetupPassKey(prompt),
+                prompt => manifest.PromptSetupPassKey(prompt, commitImmediately: false),
                 PromptForCurrentPassKey,
                 message => AstroMessageBox.Show(message, "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error),
                 out resolvedPassKey);
         }
 
+        internal static InputForm CreateCurrentPassKeyPrompt(string promptLabel = CurrentPassKeyPromptLabel, bool initializeModernUi = true)
+        {
+            return new InputForm(promptLabel, password: true, initializeModernUi: initializeModernUi);
+        }
+
         private (bool Canceled, string Value) PromptForCurrentPassKey(string promptLabel, bool maskInput)
         {
-            using (InputForm passKeyForm = new InputForm(promptLabel, maskInput))
+            using (InputForm passKeyForm = maskInput
+                ? CreateCurrentPassKeyPrompt(promptLabel)
+                : new InputForm(promptLabel, false))
             {
                 passKeyForm.ShowInputDialog(this);
                 return (passKeyForm.Canceled, passKeyForm.txtBox.Text);
@@ -886,9 +897,8 @@ namespace Steam_Desktop_Authenticator
             {
                 return false;
             }
-            ResolvedPassKey = passKey;
 
-            bool encrypt = man.Encrypted || (man.Entries.Count == 0 && passKey != null);
+            bool encrypt = (man.Entries.Count > 0 && man.Encrypted) || passKey != null;
             StorageResult saveResult = man.SaveAccount(account, encrypt, passKey);
             if (!saveResult.Succeeded)
             {
@@ -900,6 +910,7 @@ namespace Steam_Desktop_Authenticator
                     : "The finalized authenticator record could not be saved."), "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return false;
             }
+            ResolvedPassKey = encrypt ? passKey : null;
             if (IsRefreshing)
             {
                 AstroMessageBox.Show("Your session was refreshed.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Information);

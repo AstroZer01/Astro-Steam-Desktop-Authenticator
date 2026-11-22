@@ -369,6 +369,11 @@ namespace Steam_Desktop_Authenticator
 
         public string PromptSetupPassKey(string initialPrompt = "Enter passkey, or hit cancel to remain unencrypted.")
         {
+            return PromptSetupPassKey(initialPrompt, commitImmediately: true);
+        }
+
+        internal string PromptSetupPassKey(string initialPrompt, bool commitImmediately)
+        {
             string newPassKey;
             using (InputForm newPassKeyForm = new InputForm(initialPrompt, true))
             {
@@ -399,6 +404,11 @@ namespace Steam_Desktop_Authenticator
             {
                 AstroMessageBox.Show("Passkeys do not match.");
                 return null;
+            }
+
+            if (!commitImmediately)
+            {
+                return newPassKey;
             }
 
             StorageResult encryptionResult = this.ChangeEncryptionKey(null, newPassKey);

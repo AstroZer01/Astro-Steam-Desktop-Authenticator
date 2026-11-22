@@ -21,21 +21,31 @@ namespace Steam_Desktop_Authenticator
     {
         public bool Canceled = false;
         private bool userClosed = true;
+        internal bool IsPasswordMasked { get; }
 
         public InputForm(string label, bool password = false)
+            : this(label, password, initializeModernUi: true)
+        {
+        }
+
+        internal InputForm(string label, bool password, bool initializeModernUi)
         {
             InitializeComponent();
             AstroTheme.ApplyTheme(this);
             StartPosition = FormStartPosition.CenterScreen;
 
             this.labelText.Text = label;
+            this.IsPasswordMasked = password;
 
             if (password)
             {
                 this.txtBox.PasswordChar = '*';
             }
-            
-            SetupModernUI(label, password);
+
+            if (initializeModernUi)
+            {
+                SetupModernUI(label, password);
+            }
         }
 
         public DialogResult ShowInputDialog()
@@ -104,21 +114,23 @@ namespace Steam_Desktop_Authenticator
             base.OnFormClosed(e);
         }
 
-        private async Task ExecuteScriptSafelyAsync(string script, string operation)
+        private async Task<bool> ExecuteScriptSafelyAsync(string script, string operation)
         {
             if (IsDisposed || Disposing || webView == null)
-                return;
+                return false;
 
             try
             {
                 CoreWebView2 coreWebView = webView.CoreWebView2;
                 if (coreWebView == null)
-                    return;
+                    return false;
                 await coreWebView.ExecuteScriptAsync(script);
+                return true;
             }
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log(operation, ex, "The WebView2 operation could not be completed.");
+                return false;
             }
         }
 
@@ -228,7 +240,7 @@ namespace Steam_Desktop_Authenticator
                 }
             };
 
-            webView.NavigationCompleted += (sender, args) =>
+            webView.NavigationCompleted += async (sender, args) =>
             {
                 if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
                     return;
@@ -249,6 +261,17 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
+                string jsLabel = JsonConvert.SerializeObject(label);
+                string isPassStr = isPassword ? "true" : "false";
+                bool setupSucceeded = await ExecuteScriptSafelyAsync($"setupInput({jsLabel}, {isPassStr})", "Input dialog UI");
+                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null)
+                    return;
+                if (!setupSucceeded)
+                {
+                    lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                    return;
+                }
+
                 loadingPanel.Visible = false;
                 foreach (Control c in this.Controls)
                 {
@@ -256,10 +279,6 @@ namespace Steam_Desktop_Authenticator
                         c.Visible = false;
                 }
                 webView.Visible = true;
-
-                string jsLabel = JsonConvert.SerializeObject(label);
-                string isPassStr = isPassword ? "true" : "false";
-                _ = ExecuteScriptSafelyAsync($"setupInput({jsLabel}, {isPassStr})", "Input dialog UI");
             };
 
             if (IsDisposed || uiCancellationSource.IsCancellationRequested || webView == null)

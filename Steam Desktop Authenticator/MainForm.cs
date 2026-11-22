@@ -959,13 +959,21 @@ namespace Steam_Desktop_Authenticator
         private void btnSteamLogin_Click(object sender, EventArgs e)
         {
             string resolvedPassKey = showAddAccountLoginDialog(passKey);
-            if (manifest != null && manifest.Encrypted && !String.IsNullOrEmpty(resolvedPassKey))
-            {
-                passKey = resolvedPassKey;
-                btnManageEncryption.Text = "Remove Encryption";
-                btnManageEncryption.Enabled = manifest.Entries.Count > 0;
-            }
+            AdoptResolvedPassKey(resolvedPassKey);
             this.loadAccountsList();
+        }
+
+        internal void AdoptResolvedPassKey(string resolvedPassKey)
+        {
+            if (manifest == null || !manifest.Encrypted || manifest.Entries == null || manifest.Entries.Count == 0 ||
+                String.IsNullOrEmpty(resolvedPassKey))
+            {
+                return;
+            }
+
+            passKey = resolvedPassKey;
+            btnManageEncryption.Text = "Remove Encryption";
+            btnManageEncryption.Enabled = true;
         }
 
         private void SetQrScanWaitingState(bool isWaiting, int remainingSeconds = 0)
@@ -3048,6 +3056,10 @@ namespace Steam_Desktop_Authenticator
                 {
                     loginForm.ShowDialog(this);
                     bool succeeded = loginForm.RefreshSucceeded;
+                    if (succeeded)
+                    {
+                        AdoptResolvedPassKey(loginForm.ResolvedPassKey);
+                    }
                     if (succeeded && account.Session != null)
                     {
                         ClearSessionRecoveryState(account);
