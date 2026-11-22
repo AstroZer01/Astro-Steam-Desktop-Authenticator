@@ -197,6 +197,33 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public async Task PrepareInitialEnrollmentAsync_DoesNotPromptWhenAlreadyCanceled()
+        {
+            using (CancellationTokenSource cts = new CancellationTokenSource())
+            {
+                cts.Cancel();
+                int resolveCalls = 0;
+                int startCalls = 0;
+
+                await Assert.ThrowsAsync<OperationCanceledException>(() => LoginForm.PrepareInitialEnrollmentAsync(
+                    () =>
+                    {
+                        resolveCalls++;
+                        return (true, "unused");
+                    },
+                    _ =>
+                    {
+                        startCalls++;
+                        return Task.FromResult(new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.AwaitingFinalization));
+                    },
+                    cts.Token));
+
+                Assert.Equal(0, resolveCalls);
+                Assert.Equal(0, startCalls);
+            }
+        }
+
+        [Fact]
         public async Task PrepareInitialEnrollmentAsync_SkipsSteamEnrollmentWhenPassKeyResolutionFails()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);

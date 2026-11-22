@@ -857,6 +857,7 @@ namespace Steam_Desktop_Authenticator
             if (startEnrollmentAsync == null)
                 throw new ArgumentNullException(nameof(startEnrollmentAsync));
 
+            cancellationToken.ThrowIfCancellationRequested();
             (bool resolved, string passKey) = resolvePassKey();
             if (!resolved)
                 return new InitialEnrollmentPreparation(false, null, null);
