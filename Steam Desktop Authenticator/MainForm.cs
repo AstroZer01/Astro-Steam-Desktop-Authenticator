@@ -3209,8 +3209,8 @@ namespace Steam_Desktop_Authenticator
                     if (manifest == null)
                         return;
 
-                    int from = listAccounts.SelectedIndex;
-                    int to = from - (e.KeyCode == Keys.Up ? 1 : -1);
+                    int selectedIndex = listAccounts.SelectedIndex;
+                    int delta = e.KeyCode == Keys.Up ? -1 : 1;
                     string[] visibleNames = listAccounts.Items.Cast<object>().Select(item => item?.ToString()).ToArray();
                     SteamGuardAccount[] accountsSnapshot;
                     lock (accountGenerationLock)
@@ -3218,22 +3218,19 @@ namespace Steam_Desktop_Authenticator
                         accountsSnapshot = allAccounts;
                     }
 
-                    if (!TryResolveAccountsForReorder(accountsSnapshot, visibleNames, from, to, out ulong sourceSteamId, out ulong targetSteamId))
+                    if (!TryResolveAccountForReorder(accountsSnapshot, visibleNames, selectedIndex, out ulong sourceSteamId))
                         return;
 
                     long revisionBefore = manifest.StorageRevision;
-                    StorageResult moveResult = manifest.MoveEntryBySteamIdWithResult(sourceSteamId, targetSteamId);
+                    StorageResult moveResult = manifest.MoveEntryBySteamIdOffsetWithResult(sourceSteamId, delta);
                     if (!moveResult.Succeeded)
                     {
                         DiagnosticErrorLogger.Log("Account reordering", moveResult.Exception, "The updated account order could not be saved.");
                         if (moveResult.FailureKind == StorageFailureKind.Validation)
                         {
-                            loadAccountsList();
+                            RefreshAccountListPreservingFilter(sourceSteamId);
                             return;
                         }
-
-                        if (manifest.StorageRevision != revisionBefore)
-                            loadAccountsList(sourceSteamId);
 
                         AstroMessageBox.Show(
                             moveResult.UserMessage ?? "The account order could not be saved.",
@@ -3243,7 +3240,8 @@ namespace Steam_Desktop_Authenticator
                         return;
                     }
 
-                    loadAccountsList(sourceSteamId);
+                    if (manifest.StorageRevision != revisionBefore)
+                        RefreshAccountListPreservingFilter(sourceSteamId);
                 }
                 return;
             }
@@ -3258,35 +3256,39 @@ namespace Steam_Desktop_Authenticator
             txtAccSearch.SelectionStart = 1;
         }
 
-        internal static bool TryResolveAccountsForReorder(
+        private void RefreshAccountListPreservingFilter(ulong? preferredSteamId)
+        {
+            loadAccountsList(preferredSteamId);
+            if (!String.IsNullOrEmpty(txtAccSearch.Text))
+            {
+                txtAccSearch_TextChanged(this, EventArgs.Empty);
+                string preferredName = preferredSteamId.HasValue
+                    ? allAccounts.FirstOrDefault(account => account.Session?.SteamID == preferredSteamId.Value)?.AccountName
+                    : null;
+                if (!String.IsNullOrWhiteSpace(preferredName))
+                {
+                    int filteredIndex = listAccounts.Items.IndexOf(preferredName);
+                    if (filteredIndex >= 0)
+                        listAccounts.SelectedIndex = filteredIndex;
+                }
+            }
+        }
+
+        internal static bool TryResolveAccountForReorder(
             SteamGuardAccount[] accounts,
             IReadOnlyList<string> visibleAccountNames,
             int selectedIndex,
-            int targetIndex,
-            out ulong sourceSteamId,
-            out ulong targetSteamId)
+            out ulong steamId)
         {
-            sourceSteamId = 0;
-            targetSteamId = 0;
+            steamId = 0;
 
             if (accounts == null || visibleAccountNames == null ||
-                selectedIndex < 0 || targetIndex < 0 ||
-                selectedIndex >= visibleAccountNames.Count || targetIndex >= visibleAccountNames.Count ||
-                selectedIndex == targetIndex)
+                selectedIndex < 0 || selectedIndex >= visibleAccountNames.Count)
             {
                 return false;
             }
 
-            if (!TryResolveUniqueSteamIdByAccountName(accounts, visibleAccountNames[selectedIndex], out sourceSteamId) ||
-                !TryResolveUniqueSteamIdByAccountName(accounts, visibleAccountNames[targetIndex], out targetSteamId) ||
-                sourceSteamId == targetSteamId)
-            {
-                sourceSteamId = 0;
-                targetSteamId = 0;
-                return false;
-            }
-
-            return true;
+            return TryResolveUniqueSteamIdByAccountName(accounts, visibleAccountNames[selectedIndex], out steamId);
         }
 
         private static bool TryResolveUniqueSteamIdByAccountName(
@@ -3298,20 +3300,21 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrEmpty(accountName))
                 return false;
 
+            bool matched = false;
             ulong matchedSteamId = 0;
             foreach (SteamGuardAccount account in accounts)
             {
-                if (account?.Session == null || account.Session.SteamID == 0)
-                    continue;
-                if (!String.Equals(account.AccountName, accountName, StringComparison.Ordinal))
+                if (account == null || !String.Equals(account.AccountName, accountName, StringComparison.Ordinal))
                     continue;
 
-                if (matchedSteamId != 0)
+                if (matched || account.Session == null || account.Session.SteamID == 0)
                     return false;
+
+                matched = true;
                 matchedSteamId = account.Session.SteamID;
             }
 
-            if (matchedSteamId == 0)
+            if (!matched)
                 return false;
 
             steamId = matchedSteamId;
