@@ -101,6 +101,7 @@ namespace Steam_Desktop_Authenticator
         private readonly Func<string, DialogResult> confirmAutomaticLoginAction;
         private readonly Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate;
         private readonly Func<bool, string, string, Task> publishUpdateCheckStateAsync;
+        private readonly Func<string, string> showAddAccountLoginDialog;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -504,7 +505,8 @@ namespace Steam_Desktop_Authenticator
             HttpClient updateClient = null,
             Func<string, DialogResult> confirmAutomaticLoginAction = null,
             Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate = null,
-            Func<bool, string, string, Task> publishUpdateCheckStateAsync = null)
+            Func<bool, string, string, Task> publishUpdateCheckStateAsync = null,
+            Func<string, string> showAddAccountLoginDialog = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
@@ -518,6 +520,16 @@ namespace Steam_Desktop_Authenticator
             this.confirmAutomaticLoginAction = confirmAutomaticLoginAction ?? ShowAutomaticLoginActionConfirmation;
             this.promptForUpdate = promptForUpdate ?? ShowUpdateAvailablePrompt;
             this.publishUpdateCheckStateAsync = publishUpdateCheckStateAsync;
+            this.showAddAccountLoginDialog = showAddAccountLoginDialog ?? ShowAddAccountLoginDialog;
+        }
+
+        private string ShowAddAccountLoginDialog(string currentPassKey)
+        {
+            using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Initial, null, currentPassKey))
+            {
+                loginForm.ShowDialog(this);
+                return loginForm.ResolvedPassKey;
+            }
         }
 
         private static (DialogResult Result, bool DisableStartupChecks) ShowUpdateAvailablePrompt(Version latestVersion, string checkboxText)
@@ -946,9 +958,12 @@ namespace Steam_Desktop_Authenticator
 
         private void btnSteamLogin_Click(object sender, EventArgs e)
         {
-            using (LoginForm loginForm = new LoginForm())
+            string resolvedPassKey = showAddAccountLoginDialog(passKey);
+            if (manifest != null && manifest.Encrypted && !String.IsNullOrEmpty(resolvedPassKey))
             {
-                loginForm.ShowDialog(this);
+                passKey = resolvedPassKey;
+                btnManageEncryption.Text = "Remove Encryption";
+                btnManageEncryption.Enabled = manifest.Entries.Count > 0;
             }
             this.loadAccountsList();
         }

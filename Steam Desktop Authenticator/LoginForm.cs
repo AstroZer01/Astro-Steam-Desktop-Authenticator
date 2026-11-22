@@ -21,6 +21,10 @@ namespace Steam_Desktop_Authenticator
         public LoginType LoginReason;
         public SessionData Session;
         public bool RefreshSucceeded { get; private set; }
+        internal string ResolvedPassKey { get; private set; }
+
+        internal const string CurrentPassKeyPromptLabel = "Please enter your current encryption passkey.";
+        internal const string SetupPassKeyPromptLabel = "Please enter an encryption passkey. Leave blank or hit cancel to not encrypt (VERY INSECURE).";
 
         private readonly string suppliedPassKey;
 
@@ -532,39 +536,16 @@ namespace Steam_Desktop_Authenticator
             }
 
             Manifest manifest = Manifest.GetManifest();
-            string passKey = null;
-            if (manifest.Entries.Count == 0)
+            if (!TryResolveManifestPassKey(manifest, suppliedPassKey, out string passKey))
             {
-                passKey = manifest.PromptSetupPassKey("Please enter an encryption passkey. Leave blank or hit cancel to not encrypt (VERY INSECURE).");
+                this.Close();
+                return;
             }
-            else if (manifest.Entries.Count > 0 && manifest.Encrypted)
-            {
-                bool passKeyValid = false;
-                while (!passKeyValid)
-                {
-                    using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey."))
-                    {
-                        passKeyForm.ShowInputDialog(this);
-                        if (!passKeyForm.Canceled)
-                        {
-                            passKey = passKeyForm.txtBox.Text;
-                            passKeyValid = manifest.VerifyPasskey(passKey);
-                            if (!passKeyValid)
-                            {
-                                AstroMessageBox.Show("That passkey is invalid. Please enter the same passkey you used for your other accounts.");
-                            }
-                        }
-                        else
-                        {
-                            this.Close();
-                            return;
-                        }
-                    }
-                }
-            }
+            ResolvedPassKey = passKey;
 
             //Save the file immediately; losing this would be bad.
-            StorageResult initialSaveResult = manifest.SaveAccount(linker.LinkedAccount, passKey != null, passKey);
+            bool encrypt = manifest.Encrypted || (manifest.Entries.Count == 0 && passKey != null);
+            StorageResult initialSaveResult = manifest.SaveAccount(linker.LinkedAccount, encrypt, passKey);
             if (IsDisposed || Disposing)
                 return;
             if (!initialSaveResult.Succeeded)
@@ -670,7 +651,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             // Linked, finally. Do not report success until the finalized record is durable.
-            StorageResult finalSaveResult = manifest.SaveAccount(linker.LinkedAccount, passKey != null, passKey);
+            StorageResult finalSaveResult = manifest.SaveAccount(linker.LinkedAccount, encrypt, passKey);
             if (IsDisposed || Disposing)
                 return;
             if (!finalSaveResult.Succeeded)
@@ -825,37 +806,87 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private bool TryResolveManifestPassKey(Manifest manifest, string currentPassKey, out string resolvedPassKey)
+        {
+            return TryResolveManifestPassKey(
+                manifest,
+                currentPassKey,
+                prompt => manifest.PromptSetupPassKey(prompt),
+                PromptForCurrentPassKey,
+                message => AstroMessageBox.Show(message, "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error),
+                out resolvedPassKey);
+        }
+
+        private (bool Canceled, string Value) PromptForCurrentPassKey(string promptLabel, bool maskInput)
+        {
+            using (InputForm passKeyForm = new InputForm(promptLabel, maskInput))
+            {
+                passKeyForm.ShowInputDialog(this);
+                return (passKeyForm.Canceled, passKeyForm.txtBox.Text);
+            }
+        }
+
+        internal static bool TryResolveManifestPassKey(
+            Manifest manifest,
+            string suppliedPassKey,
+            Func<string, string> promptSetupPassKey,
+            Func<string, bool, (bool Canceled, string Value)> promptCurrentPassKey,
+            Action<string> showInvalidPassKeyMessage,
+            out string resolvedPassKey)
+        {
+            if (manifest == null)
+                throw new ArgumentNullException(nameof(manifest));
+            if (promptSetupPassKey == null)
+                throw new ArgumentNullException(nameof(promptSetupPassKey));
+            if (promptCurrentPassKey == null)
+                throw new ArgumentNullException(nameof(promptCurrentPassKey));
+            if (showInvalidPassKeyMessage == null)
+                throw new ArgumentNullException(nameof(showInvalidPassKeyMessage));
+
+            resolvedPassKey = null;
+            if (manifest.Entries.Count == 0)
+            {
+                resolvedPassKey = promptSetupPassKey(SetupPassKeyPromptLabel);
+                return true;
+            }
+
+            if (!manifest.Encrypted)
+            {
+                return true;
+            }
+
+            if (!String.IsNullOrEmpty(suppliedPassKey) && manifest.VerifyPasskey(suppliedPassKey))
+            {
+                resolvedPassKey = suppliedPassKey;
+                return true;
+            }
+
+            while (true)
+            {
+                (bool Canceled, string Value) promptResult = promptCurrentPassKey(CurrentPassKeyPromptLabel, true);
+                if (promptResult.Canceled)
+                {
+                    resolvedPassKey = null;
+                    return false;
+                }
+
+                if (!String.IsNullOrEmpty(promptResult.Value) && manifest.VerifyPasskey(promptResult.Value))
+                {
+                    resolvedPassKey = promptResult.Value;
+                    return true;
+                }
+
+                showInvalidPassKeyMessage("That passkey is invalid. Please enter the same passkey you used for your other accounts.");
+            }
+        }
+
         private bool HandleManifest(Manifest man, bool IsRefreshing = false, string suppliedPassKey = null)
         {
-            string passKey = man.Encrypted ? suppliedPassKey : null;
-            if (man.Entries.Count == 0)
+            if (!TryResolveManifestPassKey(man, suppliedPassKey, out string passKey))
             {
-                passKey = man.PromptSetupPassKey("Please enter an encryption passkey. Leave blank or hit cancel to not encrypt (VERY INSECURE).");
+                return false;
             }
-            else if (man.Entries.Count > 0 && man.Encrypted)
-            {
-                bool passKeyValid = !String.IsNullOrEmpty(passKey) && man.VerifyPasskey(passKey);
-                while (!passKeyValid)
-                {
-                    using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey."))
-                    {
-                        passKeyForm.ShowInputDialog(this);
-                        if (!passKeyForm.Canceled)
-                        {
-                            passKey = passKeyForm.txtBox.Text;
-                            passKeyValid = man.VerifyPasskey(passKey);
-                            if (!passKeyValid)
-                            {
-                                AstroMessageBox.Show("That passkey is invalid. Please enter the same passkey you used for your other accounts.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            }
-                        }
-                        else
-                        {
-                            return false;
-                        }
-                    }
-                }
-            }
+            ResolvedPassKey = passKey;
 
             bool encrypt = man.Encrypted || (man.Entries.Count == 0 && passKey != null);
             StorageResult saveResult = man.SaveAccount(account, encrypt, passKey);
