@@ -1243,6 +1243,8 @@ namespace Steam_Desktop_Authenticator
                     .ToList();
                 bool manifestCommitted = false;
                 bool manifestCommitStarted = false;
+                bool journalWritten = false;
+                List<string> trackedRetainedObsoleteFilenames = new List<string>();
 
                 try
                 {
@@ -1254,11 +1256,15 @@ namespace Steam_Desktop_Authenticator
                         return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data transaction could not be recovered safely. No account data was changed.");
                     }
 
-                    foreach (string filename in retainedObsoleteFilenames)
+                    trackedRetainedObsoleteFilenames = retainedObsoleteFilenames
+                        .Where(filename => !String.IsNullOrWhiteSpace(filename) &&
+                            !createdFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    if (trackedRetainedObsoleteFilenames.Count > 0)
                     {
-                        if (!createdFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase) &&
-                            !obsoleteFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase))
-                            obsoleteFilenames.Add(filename);
+                        HashSet<string> trackedRetainedSet = new HashSet<string>(trackedRetainedObsoleteFilenames, StringComparer.OrdinalIgnoreCase);
+                        obsoleteFilenames.RemoveAll(filename => trackedRetainedSet.Contains(filename));
                     }
 
                     CopySettingsInto(stagedManifest);
@@ -1272,6 +1278,9 @@ namespace Steam_Desktop_Authenticator
                     foreach (string filename in obsoleteFilenames)
                         ValidateStorageFilename(filename);
 
+                    foreach (string filename in trackedRetainedObsoleteFilenames)
+                        ValidateStorageFilename(filename);
+
                     foreach (string filename in createdFilenames)
                         ValidateStorageFilename(filename);
 
@@ -1280,9 +1289,11 @@ namespace Steam_Desktop_Authenticator
                         ManifestHash = GetContentHash(manifestContents),
                         CreatedFilenames = createdFilenames,
                         ObsoleteFilenames = obsoleteFilenames,
+                        RetainedObsoleteFilenames = trackedRetainedObsoleteFilenames.Count > 0 ? trackedRetainedObsoleteFilenames : null,
                         BackupFilename = Path.GetFileName(backupFilename)
                     };
                     WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
+                    journalWritten = true;
 
                     foreach (KeyValuePair<string, string> stagedFile in stagedFiles)
                     {
@@ -1295,8 +1306,12 @@ namespace Steam_Desktop_Authenticator
                     WriteAllTextAtomically(manifestFilename, manifestContents, backupFilename);
                     manifestCommitted = true;
 
-                    bool cleanupSucceeded = DeleteFilesBestEffort(maDir, obsoleteFilenames, "The replaced authenticator file could not be removed after the manifest was committed.");
-                    if (cleanupSucceeded && DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed."))
+                    bool backupDeleted = DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
+                    if (backupDeleted &&
+                        DeleteFilesBestEffort(
+                            maDir,
+                            obsoleteFilenames.Concat(trackedRetainedObsoleteFilenames),
+                            "The replaced authenticator file could not be removed after the manifest was committed."))
                     {
                         DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed.");
                     }
@@ -1304,14 +1319,14 @@ namespace Steam_Desktop_Authenticator
                 }
                 catch (JsonException ex)
                 {
-                    if (!manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, manifestCommitStarted);
+                    if (journalWritten && !manifestCommitted)
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted);
                     return StorageResult.Failure(StorageFailureKind.Serialization, "The account data could not be prepared for saving.", ex);
                 }
                 catch (NotSupportedException ex)
                 {
-                    if (!manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, manifestCommitStarted);
+                    if (journalWritten && !manifestCommitted)
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted);
                     return StorageResult.Failure(
                         StorageFailureKind.Io,
                         "The selected data folder does not support the safe atomic saves required for authenticator data. Move the data folder to a local drive and try again.",
@@ -1319,8 +1334,8 @@ namespace Steam_Desktop_Authenticator
                 }
                 catch (Exception ex)
                 {
-                    if (!manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, manifestCommitStarted);
+                    if (journalWritten && !manifestCommitted)
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted);
                     return StorageResult.Failure(
                         manifestCommitStarted ? StorageFailureKind.Manifest : StorageFailureKind.Io,
                         manifestCommitStarted
@@ -1331,15 +1346,63 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static void RollBackUncommittedTransaction(string maDir, string manifestFilename, string journalFilename, string backupFilename, IEnumerable<string> createdFilenames, bool manifestCommitStarted)
+        private static void RollBackUncommittedTransaction(
+            string maDir,
+            string manifestFilename,
+            string journalFilename,
+            string backupFilename,
+            IEnumerable<string> createdFilenames,
+            IReadOnlyList<string> retainedObsoleteFilenames,
+            bool manifestCommitStarted)
         {
             if (manifestCommitStarted && !RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, true))
                 return;
 
             if (DeleteFilesBestEffort(maDir, createdFilenames, "A temporary authenticator file could not be removed after a failed save."))
             {
+                bool backupDeleted = String.IsNullOrWhiteSpace(backupFilename) ||
+                    DeleteFileBestEffort(backupFilename, "A manifest backup could not be removed after a failed save.");
+                if (!backupDeleted)
+                    return;
+
+                if (retainedObsoleteFilenames != null &&
+                    retainedObsoleteFilenames.Count > 0 &&
+                    !DeleteFilesBestEffort(maDir, retainedObsoleteFilenames, "A retained obsolete authenticator file could not be removed after a failed save."))
+                {
+                    PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsoleteFilenames);
+                    return;
+                }
+
                 DeleteFileBestEffort(journalFilename, "A storage journal could not be removed after a failed save.");
-                DeleteFileBestEffort(backupFilename, "A manifest backup could not be removed after a failed save.");
+            }
+        }
+
+        private static bool PreserveRetainedObsoleteJournal(
+            string manifestFilename,
+            string journalFilename,
+            IReadOnlyList<string> retainedObsoleteFilenames)
+        {
+            try
+            {
+                if (!File.Exists(manifestFilename))
+                    return false;
+
+                string currentManifestContents = ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes);
+                StorageTransactionJournal retainedJournal = new StorageTransactionJournal()
+                {
+                    ManifestHash = GetContentHash(currentManifestContents),
+                    CreatedFilenames = new List<string>(),
+                    ObsoleteFilenames = new List<string>(),
+                    RetainedObsoleteFilenames = retainedObsoleteFilenames.ToList(),
+                    BackupFilename = null
+                };
+                WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "Retained authenticator cleanup state could not be preserved after a failed save.");
+                return false;
             }
         }
 
@@ -1359,7 +1422,8 @@ namespace Steam_Desktop_Authenticator
 
                     List<string> created = journal.CreatedFilenames ?? new List<string>();
                     List<string> obsolete = journal.ObsoleteFilenames ?? new List<string>();
-                    foreach (string filename in created.Concat(obsolete))
+                    List<string> retainedObsolete = journal.RetainedObsoleteFilenames ?? new List<string>();
+                    foreach (string filename in created.Concat(obsolete).Concat(retainedObsolete))
                         ValidateStorageFilename(filename);
 
                     string backupFilename = GetValidatedStorageBackupPath(maDir, journal.BackupFilename);
@@ -1372,43 +1436,66 @@ namespace Steam_Desktop_Authenticator
                     ValidateStorageTransactionFileOwnership(
                         created,
                         obsolete,
+                        retainedObsolete,
                         backupFilename,
                         manifestFilenames,
                         manifestCommitted);
-                    bool cleanupSucceeded = manifestCommitted
-                        ? DeleteFilesBestEffort(maDir, obsolete, "An obsolete authenticator file could not be removed during storage recovery.")
-                        : DeleteFilesBestEffort(maDir, created, "A temporary authenticator file could not be removed during storage recovery.");
-
-                    if (!cleanupSucceeded)
+                    if (manifestCommitted)
                     {
-                        if (!manifestCommitted)
-                        {
-                            // The manifest still contains the original data, but the
-                            // created files are not safe to leave untracked. Keep the
-                            // journal and fail closed so recovery can retry them later.
+                        bool committedBackupDeleted = backupFilename == null ||
+                            DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
+                        if (!committedBackupDeleted)
                             return false;
+
+                        List<string> committedObsolete = obsolete.Concat(retainedObsolete).ToList();
+                        if (!DeleteFilesBestEffort(maDir, committedObsolete, "An obsolete authenticator file could not be removed during storage recovery."))
+                        {
+                            // The manifest is committed and its pre-commit backup is already gone,
+                            // so its newly created files are live. Store pending deletions in
+                            // retained_obsolete_filenames so they survive a subsequent manifest
+                            // update even if the process exits before rebasing the journal hash.
+                            journal.BackupFilename = null;
+                            journal.CreatedFilenames = new List<string>();
+                            journal.ObsoleteFilenames = new List<string>();
+                            journal.RetainedObsoleteFilenames = committedObsolete;
+                            WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
+                            if (retainedObsoleteFilenames != null)
+                            {
+                                foreach (string filename in committedObsolete)
+                                    retainedObsoleteFilenames.Add(filename);
+                            }
+                            return true;
                         }
 
-                        // The manifest is committed, so its newly created files are live.
-                        // Retain only the obsolete-file cleanup state before allowing a
-                        // later settings save to replace the manifest.
-                        if (backupFilename != null)
-                            DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
-                        journal.BackupFilename = null;
-                        journal.CreatedFilenames = new List<string>();
-                        WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
+                        bool committedJournalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.");
+                        return committedJournalDeleted && !File.Exists(journalFilename);
+                    }
+
+                    if (!DeleteFilesBestEffort(maDir, created, "A temporary authenticator file could not be removed during storage recovery."))
+                    {
+                        // The manifest still contains the original data, but the
+                        // created files are not safe to leave untracked. Keep the
+                        // journal and fail closed so recovery can retry them later.
+                        return false;
+                    }
+
+                    bool uncommittedBackupDeleted = backupFilename == null ||
+                        DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
+                    if (!uncommittedBackupDeleted)
+                        return false;
+
+                    if (retainedObsolete.Count > 0 &&
+                        !DeleteFilesBestEffort(maDir, retainedObsolete, "A retained obsolete authenticator file could not be removed during storage recovery."))
+                    {
+                        if (!PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsolete))
+                            return false;
                         if (retainedObsoleteFilenames != null)
                         {
-                            foreach (string filename in obsolete)
+                            foreach (string filename in retainedObsolete)
                                 retainedObsoleteFilenames.Add(filename);
                         }
                         return true;
                     }
-
-                    bool backupDeleted = backupFilename == null ||
-                        DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.");
-                    if (!backupDeleted)
-                        return false;
 
                     bool journalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.");
                     return journalDeleted && !File.Exists(journalFilename);
@@ -1435,15 +1522,25 @@ namespace Steam_Desktop_Authenticator
                     if (journal == null || String.IsNullOrWhiteSpace(journal.ManifestHash))
                         throw new InvalidDataException("The retained storage journal is invalid.");
 
-                    foreach (string filename in (journal.ObsoleteFilenames ?? new List<string>()))
+                    List<string> pendingRetainedObsolete = (journal.ObsoleteFilenames ?? new List<string>())
+                        .Concat(journal.RetainedObsoleteFilenames ?? new List<string>())
+                        .Where(filename => !String.IsNullOrWhiteSpace(filename))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    foreach (string filename in pendingRetainedObsolete)
                         ValidateStorageFilename(filename);
 
                     string backupFilename = GetValidatedStorageBackupPath(maDir, journal.BackupFilename);
-                    if (backupFilename != null)
-                        DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed while rebasing retained storage cleanup.");
+                    if (backupFilename != null &&
+                        !DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed while rebasing retained storage cleanup."))
+                    {
+                        return false;
+                    }
 
                     journal.ManifestHash = GetContentHash(manifestContents);
                     journal.CreatedFilenames = new List<string>();
+                    journal.ObsoleteFilenames = new List<string>();
+                    journal.RetainedObsoleteFilenames = pendingRetainedObsolete.Count > 0 ? pendingRetainedObsolete : null;
                     journal.BackupFilename = null;
                     WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
                     return true;
@@ -1516,12 +1613,13 @@ namespace Steam_Desktop_Authenticator
         private static void ValidateStorageTransactionFileOwnership(
             IEnumerable<string> created,
             IEnumerable<string> obsolete,
+            IEnumerable<string> retainedObsolete,
             string backupFilename,
             HashSet<string> manifestFilenames,
             bool manifestCommitted)
         {
             HashSet<string> transactionFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string filename in created.Concat(obsolete))
+            foreach (string filename in created.Concat(obsolete).Concat(retainedObsolete))
             {
                 if (!transactionFilenames.Add(filename))
                     throw new InvalidDataException("A storage transaction reused a filename across its file lists.");
@@ -1530,7 +1628,7 @@ namespace Steam_Desktop_Authenticator
             if (backupFilename != null && transactionFilenames.Contains(Path.GetFileName(backupFilename)))
                 throw new InvalidDataException("A storage transaction reused its manifest backup filename.");
 
-            IEnumerable<string> filesThatWouldBeDeleted = manifestCommitted ? obsolete : created;
+            IEnumerable<string> filesThatWouldBeDeleted = (manifestCommitted ? obsolete : created).Concat(retainedObsolete);
             foreach (string filename in filesThatWouldBeDeleted)
             {
                 if (manifestFilenames.Contains(filename))
@@ -1798,6 +1896,9 @@ namespace Steam_Desktop_Authenticator
             [JsonProperty("obsolete_filenames")]
             public List<string> ObsoleteFilenames { get; set; }
 
+            [JsonProperty("retained_obsolete_filenames", NullValueHandling = NullValueHandling.Ignore)]
+            public List<string> RetainedObsoleteFilenames { get; set; }
+
             [JsonProperty("backup_filename")]
             public string BackupFilename { get; set; }
         }
@@ -1890,13 +1991,63 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
-        public void MoveEntry(int from, int to)
+        public bool MoveEntry(int from, int to)
         {
-            if (from < 0 || to < 0 || from >= Entries.Count || to >= Entries.Count) return;
-            ManifestEntry sel = Entries[from];
-            Entries.RemoveAt(from);
-            Entries.Insert(to, sel);
-            Save();
+            return MoveEntryWithResult(from, to).Succeeded;
+        }
+
+        public StorageResult MoveEntryBySteamIdOffsetWithResult(ulong steamId, int offset)
+        {
+            if (steamId == 0)
+                return StorageResult.Failure(StorageFailureKind.Validation, "The selected account identity is invalid.");
+
+            lock (storageLock)
+            {
+                if (Entries == null)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The selected account position is out of range.");
+
+                int from = Entries.FindIndex(entry => entry != null && entry.SteamID == steamId);
+                if (from < 0)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is no longer available to reorder.");
+                if (offset == 0)
+                    return StorageResult.Success();
+
+                int to = from + offset;
+                if (to < 0 || to >= Entries.Count)
+                    return StorageResult.Success();
+
+                return MoveEntryWithResult(from, to);
+            }
+        }
+
+        public StorageResult MoveEntryWithResult(int from, int to)
+        {
+            lock (storageLock)
+            {
+                if (Entries == null || from < 0 || to < 0 || from >= Entries.Count || to >= Entries.Count)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The selected account position is out of range.");
+                if (from == to)
+                    return StorageResult.Success();
+
+                try
+                {
+                    Manifest stagedManifest = CloneForStorage();
+                    ManifestEntry selected = stagedManifest.Entries[from];
+                    stagedManifest.Entries.RemoveAt(from);
+                    stagedManifest.Entries.Insert(to, selected);
+                    StorageResult result = CommitStorageTransaction(
+                        stagedManifest,
+                        new Dictionary<string, string>(),
+                        Enumerable.Empty<string>());
+                    if (result.Succeeded)
+                        CopyStorageStateFrom(stagedManifest);
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Manifest, "The account order could not be saved.", ex);
+                }
+            }
         }
 
         public class ManifestEntry

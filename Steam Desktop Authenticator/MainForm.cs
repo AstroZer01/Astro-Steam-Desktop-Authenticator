@@ -3228,9 +3228,45 @@ namespace Steam_Desktop_Authenticator
             {
                 if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
                 {
-                    int to = listAccounts.SelectedIndex - (e.KeyCode == Keys.Up ? 1 : -1);
-                    manifest.MoveEntry(listAccounts.SelectedIndex, to);
-                    loadAccountsList();
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+
+                    if (manifest == null)
+                        return;
+
+                    int selectedIndex = listAccounts.SelectedIndex;
+                    int delta = e.KeyCode == Keys.Up ? -1 : 1;
+                    string[] visibleNames = listAccounts.Items.Cast<object>().Select(item => item?.ToString()).ToArray();
+                    SteamGuardAccount[] accountsSnapshot;
+                    lock (accountGenerationLock)
+                    {
+                        accountsSnapshot = allAccounts;
+                    }
+
+                    if (!TryResolveAccountForReorder(accountsSnapshot, visibleNames, selectedIndex, out ulong sourceSteamId))
+                        return;
+
+                    long revisionBefore = manifest.StorageRevision;
+                    StorageResult moveResult = manifest.MoveEntryBySteamIdOffsetWithResult(sourceSteamId, delta);
+                    if (!moveResult.Succeeded)
+                    {
+                        DiagnosticErrorLogger.Log("Account reordering", moveResult.Exception, "The updated account order could not be saved.");
+                        if (moveResult.FailureKind == StorageFailureKind.Validation)
+                        {
+                            RefreshAccountListPreservingFilter(sourceSteamId);
+                            return;
+                        }
+
+                        AstroMessageBox.Show(
+                            moveResult.UserMessage ?? "The account order could not be saved.",
+                            "Account Order",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    if (manifest.StorageRevision != revisionBefore)
+                        RefreshAccountListPreservingFilter(sourceSteamId);
                 }
                 return;
             }
@@ -3243,6 +3279,72 @@ namespace Steam_Desktop_Authenticator
             txtAccSearch.Focus();
             txtAccSearch.Text = e.KeyCode.ToString();
             txtAccSearch.SelectionStart = 1;
+        }
+
+        private void RefreshAccountListPreservingFilter(ulong? preferredSteamId)
+        {
+            loadAccountsList(preferredSteamId);
+            if (!String.IsNullOrEmpty(txtAccSearch.Text))
+            {
+                txtAccSearch_TextChanged(this, EventArgs.Empty);
+                string preferredName = preferredSteamId.HasValue
+                    ? allAccounts.FirstOrDefault(account => account.Session?.SteamID == preferredSteamId.Value)?.AccountName
+                    : null;
+                int filteredIndex = !String.IsNullOrWhiteSpace(preferredName)
+                    ? listAccounts.Items.IndexOf(preferredName)
+                    : -1;
+                if (filteredIndex >= 0)
+                    listAccounts.SelectedIndex = filteredIndex;
+                else if (listAccounts.Items.Count > 0)
+                    listAccounts.SelectedIndex = 0;
+            }
+        }
+
+        internal static bool TryResolveAccountForReorder(
+            SteamGuardAccount[] accounts,
+            IReadOnlyList<string> visibleAccountNames,
+            int selectedIndex,
+            out ulong steamId)
+        {
+            steamId = 0;
+
+            if (accounts == null || visibleAccountNames == null ||
+                selectedIndex < 0 || selectedIndex >= visibleAccountNames.Count)
+            {
+                return false;
+            }
+
+            return TryResolveUniqueSteamIdByAccountName(accounts, visibleAccountNames[selectedIndex], out steamId);
+        }
+
+        private static bool TryResolveUniqueSteamIdByAccountName(
+            SteamGuardAccount[] accounts,
+            string accountName,
+            out ulong steamId)
+        {
+            steamId = 0;
+            if (String.IsNullOrEmpty(accountName))
+                return false;
+
+            bool matched = false;
+            ulong matchedSteamId = 0;
+            foreach (SteamGuardAccount account in accounts)
+            {
+                if (account == null || !String.Equals(account.AccountName, accountName, StringComparison.Ordinal))
+                    continue;
+
+                if (matched || account.Session == null || account.Session.SteamID == 0)
+                    return false;
+
+                matched = true;
+                matchedSteamId = account.Session.SteamID;
+            }
+
+            if (!matched)
+                return false;
+
+            steamId = matchedSteamId;
+            return true;
         }
 
         private static bool IsKeyAChar(Keys key)
