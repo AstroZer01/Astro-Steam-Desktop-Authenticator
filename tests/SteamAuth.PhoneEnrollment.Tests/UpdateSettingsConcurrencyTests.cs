@@ -72,14 +72,26 @@ namespace SteamAuth.PhoneEnrollment.Tests
             FixedUpdateResponseHandler handler = new FixedUpdateResponseHandler(CreateReleaseResponse("99.99.99", AvailableReleaseUrl));
             Manifest manifest = Manifest.GenerateNewManifest(false);
             manifest.CheckForUpdates = false;
+            int promptCount = 0;
 
             using (HttpClient client = new HttpClient(handler))
-            using (MainForm form = new MainForm(manifest, new UpdatePreferenceRevisionTracker(), null, _ => { }, client))
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                client,
+                promptForUpdate: (_, __) =>
+                {
+                    promptCount++;
+                    return (DialogResult.No, false);
+                }))
             {
                 await form.CheckForUpdatesAsync(true);
                 await form.CheckForUpdatesAsync(true);
 
                 Assert.Equal(0, handler.RequestCount);
+                Assert.Equal(0, promptCount);
                 Assert.Null(GetPrivateField<Version>(form, "availableUpdateVersion"));
                 Assert.Null(GetPrivateField<string>(form, "availableUpdateDownloadUrl"));
                 Assert.Equal(
@@ -113,6 +125,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     return (DialogResult.No, false);
                 }))
             {
+                await form.CheckForUpdatesAsync(true);
+                Assert.Equal(0, handler.RequestCount);
+                Assert.Equal(
+                    "Automatic update checks are disabled. You can check manually anytime.",
+                    GetPrivateField<string>(form, "updateCheckStatusMessage"));
+
                 await form.CheckForUpdatesAsync(false);
 
                 Assert.Equal(1, handler.RequestCount);
@@ -128,6 +146,157 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.Equal(1, handler.RequestCount);
                 Assert.Equal(new Version("99.99.99"), GetPrivateField<Version>(form, "availableUpdateVersion"));
                 Assert.Equal(AvailableReleaseUrl, GetPrivateField<string>(form, "availableUpdateDownloadUrl"));
+                Assert.Equal("Version 99.99.99 is available.", GetPrivateField<string>(form, "updateCheckStatusMessage"));
+                Assert.Equal("success", GetPrivateField<string>(form, "updateCheckStatusTone"));
+            }
+        }
+
+        [Fact]
+        public async Task OptingOutDuringPreRequestStatusPublishSkipsNetworkRequestAndRestoresIdleState()
+        {
+            FixedUpdateResponseHandler handler = new FixedUpdateResponseHandler(CreateReleaseResponse("99.99.99", AvailableReleaseUrl));
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.CheckForUpdates = true;
+            TaskCompletionSource<bool> preRequestPublishStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> releasePreRequestPublish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            System.Collections.Generic.List<(bool Checking, string Message, string Tone)> publishedStates =
+                new System.Collections.Generic.List<(bool Checking, string Message, string Tone)>();
+            int promptCount = 0;
+
+            using (HttpClient client = new HttpClient(handler))
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                client,
+                promptForUpdate: (_, __) =>
+                {
+                    promptCount++;
+                    return (DialogResult.No, false);
+                },
+                publishUpdateCheckStateAsync: async (checking, message, tone) =>
+                {
+                    publishedStates.Add((checking, message, tone));
+                    if (checking && !preRequestPublishStarted.Task.IsCompleted)
+                    {
+                        preRequestPublishStarted.SetResult(true);
+                        await releasePreRequestPublish.Task;
+                    }
+                }))
+            {
+                Task startupCheck = form.CheckForUpdatesAsync(true);
+                await preRequestPublishStarted.Task;
+
+                await form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: false,
+                    proxyEnabled: false,
+                    autoConfirmMarket: false));
+                Assert.False(manifest.CheckForUpdates);
+
+                releasePreRequestPublish.SetResult(true);
+                await startupCheck;
+
+                Assert.Equal(0, handler.RequestCount);
+                Assert.Equal(0, promptCount);
+                Assert.False(GetPrivateField<bool>(form, "isCheckingForUpdates"));
+                Assert.Equal(
+                    "Automatic update checks are disabled. You can check manually anytime.",
+                    GetPrivateField<string>(form, "updateCheckStatusMessage"));
+                Assert.Equal("info", GetPrivateField<string>(form, "updateCheckStatusTone"));
+                Assert.Equal(2, publishedStates.Count);
+                Assert.True(publishedStates[0].Checking);
+                Assert.Equal((false, "Automatic update checks are disabled. You can check manually anytime.", "info"), publishedStates[1]);
+            }
+        }
+
+        [Fact]
+        public async Task OptingOutWhileStartupRequestIsInFlightSuppressesLaunchPrompt()
+        {
+            TaskCompletionSource<HttpResponseMessage> pendingResponse = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            FixedUpdateResponseHandler handler = new FixedUpdateResponseHandler((_, __) => pendingResponse.Task);
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.CheckForUpdates = true;
+            int promptCount = 0;
+
+            using (HttpClient client = new HttpClient(handler))
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                client,
+                promptForUpdate: (_, __) =>
+                {
+                    promptCount++;
+                    return (DialogResult.No, false);
+                }))
+            {
+                Task startupCheck = form.CheckForUpdatesAsync(true);
+                Assert.Equal(1, handler.RequestCount);
+
+                await form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: false,
+                    proxyEnabled: false,
+                    autoConfirmMarket: false));
+                Assert.False(manifest.CheckForUpdates);
+
+                pendingResponse.SetResult(CreateHttpResponse(CreateReleaseResponse("99.99.99", AvailableReleaseUrl)));
+                await startupCheck;
+
+                Assert.Equal(1, handler.RequestCount);
+                Assert.Equal(0, promptCount);
+                Assert.Equal(new Version("99.99.99"), GetPrivateField<Version>(form, "availableUpdateVersion"));
+                Assert.False(GetPrivateField<bool>(form, "isCheckingForUpdates"));
+            }
+        }
+
+        [Fact]
+        public async Task ReEnablingAutomaticUpdateChecksClearsDisabledNoticeButPreservesActualCheckResults()
+        {
+            FixedUpdateResponseHandler handler = new FixedUpdateResponseHandler(CreateReleaseResponse("99.99.99", AvailableReleaseUrl));
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.CheckForUpdates = false;
+            System.Collections.Generic.List<(bool Checking, string Message, string Tone)> publishedStates =
+                new System.Collections.Generic.List<(bool Checking, string Message, string Tone)>();
+
+            using (HttpClient client = new HttpClient(handler))
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                client,
+                promptForUpdate: (_, __) => (DialogResult.No, false),
+                publishUpdateCheckStateAsync: (checking, message, tone) =>
+                {
+                    publishedStates.Add((checking, message, tone));
+                    return Task.CompletedTask;
+                }))
+            {
+                await form.CheckForUpdatesAsync(true);
+                Assert.Equal(
+                    "Automatic update checks are disabled. You can check manually anytime.",
+                    GetPrivateField<string>(form, "updateCheckStatusMessage"));
+
+                await form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: true,
+                    proxyEnabled: false,
+                    autoConfirmMarket: false));
+
+                Assert.True(manifest.CheckForUpdates);
+                Assert.Equal(String.Empty, GetPrivateField<string>(form, "updateCheckStatusMessage"));
+                Assert.Equal("info", GetPrivateField<string>(form, "updateCheckStatusTone"));
+                Assert.Equal((false, String.Empty, "info"), publishedStates[publishedStates.Count - 1]);
+
+                await form.CheckForUpdatesAsync(false);
+                Assert.Equal("Version 99.99.99 is available.", GetPrivateField<string>(form, "updateCheckStatusMessage"));
+
+                await form.SaveSettingsAsync(CreateSettingsPayload(
+                    checkForUpdates: true,
+                    proxyEnabled: false,
+                    autoConfirmMarket: true));
+
                 Assert.Equal("Version 99.99.99 is available.", GetPrivateField<string>(form, "updateCheckStatusMessage"));
                 Assert.Equal("success", GetPrivateField<string>(form, "updateCheckStatusTone"));
             }
@@ -315,6 +484,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             FixedUpdateResponseHandler handler = new FixedUpdateResponseHandler((_, __) => pendingResponse.Task);
             Manifest manifest = Manifest.GenerateNewManifest(false);
             manifest.CheckForUpdates = true;
+            int promptCount = 0;
 
             using (HttpClient client = new HttpClient(handler))
             using (MainForm form = new MainForm(
@@ -323,7 +493,11 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 null,
                 _ => { },
                 client,
-                promptForUpdate: (_, __) => (DialogResult.No, false)))
+                promptForUpdate: (_, __) =>
+                {
+                    promptCount++;
+                    return (DialogResult.No, false);
+                }))
             {
                 CancellationTokenSource lifetimeSource = GetPrivateField<CancellationTokenSource>(form, "lifetimeCancellationSource");
                 Task updateCheck = form.CheckForUpdatesAsync(true);
@@ -335,6 +509,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 await updateCheck;
 
                 Assert.True(lifetimeSource.IsCancellationRequested);
+                Assert.Equal(0, promptCount);
                 Assert.Null(GetPrivateField<Version>(form, "availableUpdateVersion"));
                 Assert.Null(GetPrivateField<string>(form, "availableUpdateDownloadUrl"));
                 Assert.False(GetPrivateField<bool>(form, "isCheckingForUpdates"));

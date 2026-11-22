@@ -100,6 +100,7 @@ namespace Steam_Desktop_Authenticator
         private readonly HttpClient updateClient;
         private readonly Func<string, DialogResult> confirmAutomaticLoginAction;
         private readonly Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate;
+        private readonly Func<bool, string, string, Task> publishUpdateCheckStateAsync;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -502,7 +503,8 @@ namespace Steam_Desktop_Authenticator
             Action<ProxyConfiguration> applyProxy,
             HttpClient updateClient = null,
             Func<string, DialogResult> confirmAutomaticLoginAction = null,
-            Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate = null)
+            Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate = null,
+            Func<bool, string, string, Task> publishUpdateCheckStateAsync = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
@@ -515,6 +517,7 @@ namespace Steam_Desktop_Authenticator
             this.updateClient = updateClient ?? defaultUpdateClient;
             this.confirmAutomaticLoginAction = confirmAutomaticLoginAction ?? ShowAutomaticLoginActionConfirmation;
             this.promptForUpdate = promptForUpdate ?? ShowUpdateAvailablePrompt;
+            this.publishUpdateCheckStateAsync = publishUpdateCheckStateAsync;
         }
 
         private static (DialogResult Result, bool DisableStartupChecks) ShowUpdateAvailablePrompt(Version latestVersion, string checkboxText)
@@ -3346,6 +3349,7 @@ namespace Steam_Desktop_Authenticator
         // Logic for version checking
         private static readonly HttpClient defaultUpdateClient = new HttpClient();
         private const int MaximumUpdateResponseBytes = 1024 * 1024;
+        private const string AutomaticUpdateChecksDisabledMessage = "Automatic update checks are disabled. You can check manually anytime.";
         private static readonly TimeSpan UpdateRequestTimeout = TimeSpan.FromSeconds(20);
         private bool isCheckingForUpdates = false;
         private string updateCheckStatusMessage = String.Empty;
@@ -3372,15 +3376,30 @@ namespace Steam_Desktop_Authenticator
             if (!ShouldRunUpdateCheck(isStartupCheck, manifest.CheckForUpdates))
             {
                 if (String.IsNullOrEmpty(updateCheckStatusMessage))
-                    await PublishUpdateCheckStateAsync(false, "Automatic update checks are disabled. You can check manually anytime.", "info");
+                    await PublishUpdateCheckStateAsync(false, AutomaticUpdateChecksDisabledMessage, "info");
                 return;
             }
 
+            string previousStatusMessage = updateCheckStatusMessage;
+            string previousStatusTone = updateCheckStatusTone;
             isCheckingForUpdates = true;
-            await PublishUpdateCheckStateAsync(true, "Checking for updates...", "info");
 
             try
             {
+                await PublishUpdateCheckStateAsync(true, "Checking for updates...", "info");
+                if (cancellationToken.IsCancellationRequested)
+                    return;
+
+                if (!ShouldRunUpdateCheck(isStartupCheck, manifest.CheckForUpdates))
+                {
+                    bool hasPreviousStatus = !String.IsNullOrEmpty(previousStatusMessage);
+                    await PublishUpdateCheckStateAsync(
+                        false,
+                        hasPreviousStatus ? previousStatusMessage : AutomaticUpdateChecksDisabledMessage,
+                        hasPreviousStatus ? previousStatusTone : "info");
+                    return;
+                }
+
                 using (CancellationTokenSource updateTimeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                 using (var request = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/AstroZer01/Astro-Steam-Desktop-Authenticator/releases/latest"))
                 {
@@ -3531,6 +3550,12 @@ namespace Steam_Desktop_Authenticator
         {
             updateCheckStatusMessage = message ?? String.Empty;
             updateCheckStatusTone = tone ?? "info";
+
+            if (publishUpdateCheckStateAsync != null)
+            {
+                await publishUpdateCheckStateAsync(checking, updateCheckStatusMessage, updateCheckStatusTone);
+                return;
+            }
 
             if (GetCoreWebView2IfAvailable() == null)
                 return;
@@ -4048,6 +4073,12 @@ namespace Steam_Desktop_Authenticator
                 ConfigureLoginActionsMonitor();
                 settingsDirty = false;
                 SendSettingsToWebView();
+                if (manifest.CheckForUpdates &&
+                    !isCheckingForUpdates &&
+                    String.Equals(updateCheckStatusMessage, AutomaticUpdateChecksDisabledMessage, StringComparison.Ordinal))
+                {
+                    await PublishUpdateCheckStateAsync(false, String.Empty, "info");
+                }
                 string jsContext = JsonConvert.SerializeObject(saveContext);
                 await ExecuteScriptSafelyAsync($"settingsSaved({jsContext});", "Settings UI");
 
@@ -4089,6 +4120,7 @@ namespace Steam_Desktop_Authenticator
             return !isStartupCheck || checkForUpdates;
         }
 
+        // Also re-evaluated after an in-flight startup request finishes in case the user opted out mid-request.
         internal static bool ShouldShowUpdateNotification(bool isStartupCheck, bool checkForUpdates)
         {
             return ShouldRunUpdateCheck(isStartupCheck, checkForUpdates);
