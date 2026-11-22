@@ -100,6 +100,7 @@ namespace Steam_Desktop_Authenticator
         private static Manifest _manifest { get; set; }
         private static readonly object storageLock = new object();
         private static long storageDirectoryValidationCount;
+        private static long canonicalDirectoryVerificationCount;
         private long storageRevision;
         // Refresh persistence only needs to reject changes to the account it
         // captured. A manifest-wide revision would make an unrelated account
@@ -134,6 +135,7 @@ namespace Steam_Desktop_Authenticator
         }
 
         internal static long StorageDirectoryValidationCount => Interlocked.Read(ref storageDirectoryValidationCount);
+        internal static long CanonicalDirectoryVerificationCount => Interlocked.Read(ref canonicalDirectoryVerificationCount);
 
         public long GetAccountStorageRevision(ulong steamId)
         {
@@ -1331,7 +1333,10 @@ namespace Steam_Desktop_Authenticator
                     if (Encoding.UTF8.GetByteCount(manifestContents) > MaximumManifestFileSizeBytes)
                         throw new InvalidDataException("The account manifest is larger than the supported size limit.");
                     if (!Directory.Exists(maDir))
+                    {
+                        ValidateStorageDirectory(maDir);
                         Directory.CreateDirectory(maDir);
+                    }
                     ValidateStorageDirectory(maDir);
 
                     foreach (string filename in obsoleteFilenames)
@@ -1871,6 +1876,7 @@ namespace Steam_Desktop_Authenticator
 
         internal static string GetValidatedCanonicalDirectoryPath(string directoryPath)
         {
+            Interlocked.Increment(ref canonicalDirectoryVerificationCount);
             if (String.IsNullOrWhiteSpace(directoryPath))
                 throw new InvalidDataException("The account-data directory path is invalid.");
 
@@ -1907,13 +1913,13 @@ namespace Steam_Desktop_Authenticator
 
         private static void VerifyCanonicalDirectoryMatchesExpectedPath(string fullPath, string canonicalDirectoryPath)
         {
-            string longFullPath = GetLongPathNameOrThrow(fullPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string longFullPath = GetLongPathNameOrThrow(fullPath);
             string pathRoot = Path.GetPathRoot(longFullPath);
             if (String.IsNullOrWhiteSpace(pathRoot))
                 throw new InvalidDataException("The account-data directory root could not be verified.");
 
             string relativePath = longFullPath.Length > pathRoot.Length
-                ? longFullPath.Substring(pathRoot.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                ? longFullPath.Substring(pathRoot.Length).Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                 : String.Empty;
 
             string canonicalRoot;

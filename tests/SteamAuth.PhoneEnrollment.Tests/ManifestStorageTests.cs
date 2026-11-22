@@ -1311,10 +1311,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
 
             long beforeGetAll = Manifest.StorageDirectoryValidationCount;
+            long beforeGetAllCanonical = Manifest.CanonicalDirectoryVerificationCount;
             SteamGuardAccount[] loaded = manifest.GetAllAccounts();
             long getAllValidations = Manifest.StorageDirectoryValidationCount - beforeGetAll;
             Assert.Equal(accountCount, loaded.Length);
             Assert.Equal(1, getAllValidations);
+            Assert.Equal(1, Manifest.CanonicalDirectoryVerificationCount - beforeGetAllCanonical);
 
             long beforeSaveWithResult = Manifest.StorageDirectoryValidationCount;
             Assert.True(manifest.SaveWithResult().Succeeded);
@@ -1346,14 +1348,19 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(reloaded.Save());
 
             long beforeNormalize = Manifest.StorageDirectoryValidationCount;
+            long beforeNormalizeCanonical = Manifest.CanonicalDirectoryVerificationCount;
             Assert.True(reloaded.NormalizeAccountFilenames().Succeeded);
             // 1 in NormalizeAccountFilenames + 2 (pre/post-recovery) in CommitStorageTransaction.
             Assert.Equal(3, Manifest.StorageDirectoryValidationCount - beforeNormalize);
+            Assert.Equal(1, Manifest.CanonicalDirectoryVerificationCount - beforeNormalizeCanonical);
 
             long beforeEncrypt = Manifest.StorageDirectoryValidationCount;
+            long beforeEncryptCanonical = Manifest.CanonicalDirectoryVerificationCount;
             Assert.True(reloaded.ChangeEncryptionKey(null, "test-passkey").Succeeded);
             // 1 in ChangeEncryptionKey + 2 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 2 in its commit.
             Assert.Equal(6, Manifest.StorageDirectoryValidationCount - beforeEncrypt);
+            // 1 in ChangeEncryptionKey + 1 in NormalizeAccountFilenames (constant across all 8 accounts).
+            Assert.Equal(2, Manifest.CanonicalDirectoryVerificationCount - beforeEncryptCanonical);
             Assert.Equal(accountCount, reloaded.GetAllAccounts("test-passkey").Length);
 
             // Verify ImportUnmanagedMaFiles and sessionless RemoveAccount also perform O(1) directory validations.
@@ -1369,9 +1376,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Equal(3, importCandidates.Count);
 
             long beforeImport = Manifest.StorageDirectoryValidationCount;
+            long beforeImportCanonical = Manifest.CanonicalDirectoryVerificationCount;
             Assert.True(reloaded.ImportUnmanagedMaFiles(importCandidates).Succeeded);
             // 1 in ImportUnmanagedMaFiles + 2 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 2 in its commit.
             Assert.Equal(6, Manifest.StorageDirectoryValidationCount - beforeImport);
+            // 1 in ImportUnmanagedMaFiles + 1 in NormalizeAccountFilenames (constant across all imported accounts).
+            Assert.Equal(2, Manifest.CanonicalDirectoryVerificationCount - beforeImportCanonical);
 
             SteamGuardAccount uniqueNamed = CreateAccount(76561198000003000UL);
             uniqueNamed.AccountName = "unique-removal-target";
@@ -1379,9 +1389,11 @@ namespace SteamAuth.PhoneEnrollment.Tests
             SteamGuardAccount sessionlessTarget = new SteamGuardAccount { AccountName = "unique-removal-target", Session = null };
 
             long beforeRemove = Manifest.StorageDirectoryValidationCount;
+            long beforeRemoveCanonical = Manifest.CanonicalDirectoryVerificationCount;
             Assert.True(reloaded.RemoveAccount(sessionlessTarget, (string)null));
             // 1 in FindEntryForRemoval + 2 in CommitStorageTransaction (independent of the 12 stored entries).
             Assert.Equal(3, Manifest.StorageDirectoryValidationCount - beforeRemove);
+            Assert.Equal(1, Manifest.CanonicalDirectoryVerificationCount - beforeRemoveCanonical);
         }
 
         [Fact]
@@ -1469,6 +1481,11 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.Throws<InvalidDataException>(() => Manifest.GetValidatedCanonicalDirectoryPath(directMaFilesJunction));
                 Assert.Throws<InvalidDataException>(() => Manifest.GetValidatedCanonicalDirectoryPath(Path.Combine(linkedDataDir, "nested")));
                 Assert.Throws<InvalidDataException>(() => Manifest.GetValidatedCanonicalDirectoryPath(Path.Combine(junctionRoot, "does-not-exist")));
+
+                string driveRoot = Path.GetPathRoot(dataDirectory);
+                Assert.False(String.IsNullOrEmpty(driveRoot));
+                Assert.False(String.IsNullOrEmpty(Manifest.GetValidatedCanonicalDirectoryPath(driveRoot)));
+                Assert.False(String.IsNullOrEmpty(Manifest.GetValidatedCanonicalDirectoryPath(@"\\?\" + driveRoot)));
 
                 string realMaFilesDir = Path.Combine(dataDirectory, "maFiles");
                 Directory.CreateDirectory(realMaFilesDir);
