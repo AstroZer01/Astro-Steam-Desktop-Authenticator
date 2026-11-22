@@ -3998,6 +3998,9 @@ namespace Steam_Desktop_Authenticator
                             }
                         }
 
+                        if (proxyConfiguration.Enabled)
+                            proxySaveSource.Token.ThrowIfCancellationRequested();
+
                         return StorageResult.Success();
                     },
                     staged =>
