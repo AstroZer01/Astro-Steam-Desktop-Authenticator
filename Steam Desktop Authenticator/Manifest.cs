@@ -49,6 +49,7 @@ namespace Steam_Desktop_Authenticator
         public bool AutoConfirmTrades { get; set; } = false;
 
         [JsonProperty("trade_confirmation_selected_tab")]
+        [JsonConverter(typeof(SafeTradeConfirmationTabJsonConverter))]
         public string TradeConfirmationSelectedTab { get; set; } = TradeConfirmationClassifier.CategoryAll;
 
         [JsonProperty("minimize_to_tray")]

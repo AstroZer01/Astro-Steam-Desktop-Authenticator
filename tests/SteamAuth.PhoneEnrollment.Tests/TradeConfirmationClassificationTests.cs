@@ -200,26 +200,30 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Equal(TradeConfirmationClassifier.CategoryAll, loadedLegacy.TradeConfirmationSelectedTab);
         }
 
-        [Fact]
-        public void InvalidPersistedConfirmationTab_NormalizesToAllOnLoad()
+        [Theory]
+        [InlineData("\"unexpected-value\"")]
+        [InlineData("[]")]
+        [InlineData("[\"market\"]")]
+        [InlineData("{}")]
+        [InlineData("{\"tab\":\"market\"}")]
+        [InlineData("123")]
+        [InlineData("true")]
+        [InlineData("null")]
+        public void MalformedOrInvalidPersistedConfirmationTab_NormalizesToAllWithoutCorruptingManifest(string rawJsonValue)
         {
             string maDir = Path.Combine(dataDirectory, "maFiles");
             Directory.CreateDirectory(maDir);
-            File.WriteAllText(
-                Path.Combine(maDir, "manifest.json"),
-                new JObject
-                {
-                    ["encrypted"] = false,
-                    ["entries"] = new JArray(),
-                    ["trade_confirmation_selected_tab"] = "unexpected-value"
-                }.ToString(Formatting.None));
+            string manifestJson = "{\"encrypted\":false,\"entries\":[],\"minimize_to_tray\":false,\"auto_confirm_trades\":true,\"trade_confirmation_selected_tab\":" + rawJsonValue + "}";
+            File.WriteAllText(Path.Combine(maDir, "manifest.json"), manifestJson);
 
             Manifest loaded = Manifest.GetManifest(true);
             Assert.Equal(TradeConfirmationClassifier.CategoryAll, loaded.TradeConfirmationSelectedTab);
+            Assert.False(loaded.MinimizeToTray);
+            Assert.True(loaded.AutoConfirmTrades);
         }
 
         [Fact]
-        public void SelectedConfirmationTab_PersistsAcrossReloadsAndUnrelatedSettingsSaves()
+        public void SelectedConfirmationTab_PersistsAcrossReloadsSettingsSavesAccountSavesAndResetToAll()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
             Assert.True(manifest.SaveWithResult().Succeeded);
@@ -238,16 +242,33 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             StorageResult unrelatedSave = reloaded.SaveSettingsWithResult(staged => staged.MinimizeToTray = !staged.MinimizeToTray);
             Assert.True(unrelatedSave.Succeeded);
+            Assert.Equal(TradeConfirmationClassifier.CategoryMarket, Manifest.GetManifest(true).TradeConfirmationSelectedTab);
 
-            Manifest reloadedAfterSettings = Manifest.GetManifest(true);
-            Assert.Equal(TradeConfirmationClassifier.CategoryMarket, reloadedAfterSettings.TradeConfirmationSelectedTab);
+            SteamGuardAccount account = new SteamGuardAccount
+            {
+                AccountName = "tab_persist_user",
+                SharedSecret = Convert.ToBase64String(new byte[20]),
+                IdentitySecret = Convert.ToBase64String(new byte[20]),
+                DeviceID = "android:00000000-0000-0000-0000-000000000001",
+                Session = new SessionData
+                {
+                    SteamID = 76561198000000123UL,
+                    AccessToken = "access-token",
+                    RefreshToken = "refresh-token"
+                }
+            };
+            Assert.True(reloaded.SaveAccount(account, false).Succeeded);
+            Assert.Equal(TradeConfirmationClassifier.CategoryMarket, Manifest.GetManifest(true).TradeConfirmationSelectedTab);
 
-            using (MainForm form = new MainForm(reloadedAfterSettings, new UpdatePreferenceRevisionTracker(), null, _ => { }))
+            Manifest reloadedAfterAccount = Manifest.GetManifest(true);
+            using (MainForm form = new MainForm(reloadedAfterAccount, new UpdatePreferenceRevisionTracker(), null, _ => { }))
             {
                 Assert.True(form.PersistTradeConfirmationSelectedTab(TradeConfirmationClassifier.CategoryTrades));
-            }
+                Assert.Equal(TradeConfirmationClassifier.CategoryTrades, Manifest.GetManifest(true).TradeConfirmationSelectedTab);
 
-            Assert.Equal(TradeConfirmationClassifier.CategoryTrades, Manifest.GetManifest(true).TradeConfirmationSelectedTab);
+                Assert.True(form.PersistTradeConfirmationSelectedTab(TradeConfirmationClassifier.CategoryAll));
+                Assert.Equal(TradeConfirmationClassifier.CategoryAll, Manifest.GetManifest(true).TradeConfirmationSelectedTab);
+            }
         }
 
         public void Dispose()

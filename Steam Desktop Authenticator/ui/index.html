@@ -113,7 +113,7 @@
                 </button>
             </div>
             <div id="trade-load-error" class="hidden rounded-xl border border-error/30 bg-error-container/20 p-3 text-sm text-error" role="alert"></div>
-            <div id="trades-panel" role="tabpanel" aria-labelledby="confirmation-tab-all" class="glass-panel rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col min-h-[300px]">
+            <div id="trades-panel" role="tabpanel" aria-labelledby="confirmation-tab-all" tabindex="0" class="glass-panel rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col min-h-[300px] focus:outline-hidden focus:ring-1 focus:ring-primary">
                 <div id="trades-container" class="flex-1 overflow-y-auto p-3 space-y-3"></div>
                 <div id="empty-state" class="hidden p-8 flex-col items-center justify-center text-center flex-1">
                     <svg class="ui-icon text-on-surface-variant w-8 h-8 mb-2" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v12H4zM3 5h18v3H3zM9 12h6"/></svg>
@@ -436,13 +436,21 @@
         });
 
         if (tabId === 'trades') {
+            if (pendingConfirmationTab && validConfirmationTabs.has(pendingConfirmationTab)) {
+                const targetConfirmationTab = pendingConfirmationTab;
+                pendingConfirmationTab = null;
+                setConfirmationTab(targetConfirmationTab, false, false);
+            }
             beginTradeLoad();
             window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: document.getElementById('trade-account-select').value || 'all' });
-        } else if (tabId === 'login-actions') {
-            window.chrome.webview.postMessage({ action: 'load_login_actions' });
-        } else if (tabId === 'settings') {
-            showSpinner();
-            window.chrome.webview.postMessage({ action: 'load_settings' });
+        } else {
+            pendingConfirmationTab = null;
+            if (tabId === 'login-actions') {
+                window.chrome.webview.postMessage({ action: 'load_login_actions' });
+            } else if (tabId === 'settings') {
+                showSpinner();
+                window.chrome.webview.postMessage({ action: 'load_settings' });
+            }
         }
     }
 
@@ -808,12 +816,21 @@
         const error = document.getElementById('trade-load-error');
         error.textContent = '';
         error.classList.add('hidden');
+        const selectedAccount = document.getElementById('trade-account-select').value || 'all';
+        if (cachedConfirmationsSelection !== null && cachedConfirmationsSelection !== selectedAccount) {
+            cachedConfirmations = [];
+            cachedConfirmationsSelection = null;
+            renderConfirmations();
+        }
     }
 
     const confirmationTabOrder = ['all', 'trades', 'market'];
     const validConfirmationTabs = new Set(confirmationTabOrder);
     let activeConfirmationTab = 'all';
+    let persistedConfirmationTab = 'all';
+    let pendingConfirmationTab = null;
     let cachedConfirmations = [];
+    let cachedConfirmationsSelection = null;
     let latestTradeRevision = 0;
     const tradeActionsInFlight = new Set();
 
@@ -882,12 +899,19 @@
         }
     }
 
+    function hydrateConfirmationTab(tabId) {
+        const normalized = validConfirmationTabs.has(tabId) ? tabId : 'all';
+        activeConfirmationTab = normalized;
+        persistedConfirmationTab = normalized;
+        renderConfirmations();
+    }
+
     function setConfirmationTab(tabId, focusTab = false, persist = true) {
         if (!validConfirmationTabs.has(tabId)) return;
-        const changed = activeConfirmationTab !== tabId;
         activeConfirmationTab = tabId;
         renderConfirmations();
-        if (persist && changed) {
+        if (persist && persistedConfirmationTab !== tabId) {
+            persistedConfirmationTab = tabId;
             window.chrome.webview.postMessage({ action: 'confirmation_tab_changed', tabName: tabId });
         }
         if (focusTab) {
@@ -897,8 +921,15 @@
     }
 
     function openTradeConfirmations(category = 'all') {
-        if (validConfirmationTabs.has(category)) {
-            setConfirmationTab(category, false, false);
+        const targetCategory = validConfirmationTabs.has(category) ? category : null;
+        if (activeTabId === 'settings' && settingsDirty) {
+            pendingConfirmationTab = targetCategory;
+            switchTab('trades');
+            return;
+        }
+        pendingConfirmationTab = null;
+        if (targetCategory) {
+            setConfirmationTab(targetCategory, false, false);
         }
         switchTab('trades');
     }
@@ -931,24 +962,27 @@
 
     function renderConfirmations() {
         const container = document.getElementById('trades-container');
+        const panel = document.getElementById('trades-panel');
         const emptyState = document.getElementById('empty-state');
         const emptyTitle = document.getElementById('empty-state-title');
         const emptyDescription = document.getElementById('empty-state-description');
         const count = document.getElementById('trade-confirmations-count');
+        const selectedAccount = document.getElementById('trade-account-select').value || 'all';
+        const activeConfirmations = cachedConfirmationsSelection === selectedAccount ? cachedConfirmations : [];
 
         const counts = {
-            all: cachedConfirmations.length,
+            all: activeConfirmations.length,
             trades: 0,
             market: 0
         };
-        cachedConfirmations.forEach(c => {
+        activeConfirmations.forEach(c => {
             const category = getConfirmationCategory(c);
             if (category === 'trades') counts.trades++;
             else if (category === 'market') counts.market++;
         });
         updateConfirmationTabUI(counts);
 
-        const filteredConfirmations = filterConfirmationsByTab(cachedConfirmations, activeConfirmationTab);
+        const filteredConfirmations = filterConfirmationsByTab(activeConfirmations, activeConfirmationTab);
         container.innerHTML = '';
 
         if (activeConfirmationTab === 'trades') {
@@ -976,12 +1010,14 @@
                 emptyTitle.textContent = 'No pending confirmations';
                 emptyDescription.textContent = 'Trade and market confirmations will appear here.';
             }
+            if (panel) panel.setAttribute('tabindex', '0');
             container.classList.add('hidden');
             emptyState.classList.remove('hidden');
             emptyState.classList.add('flex');
             return;
         }
 
+        if (panel) panel.removeAttribute('tabindex');
         container.classList.remove('hidden');
         emptyState.classList.add('hidden');
         emptyState.classList.remove('flex');
@@ -1010,8 +1046,9 @@
             headline.textContent = c.Headline || getConfirmationFallbackHeadline(c);
             headline.title = headline.textContent;
             const type = document.createElement('span');
-            type.className = 'shrink-0 rounded-full border border-white/10 bg-surface-variant px-2 py-0.5 text-xs text-on-surface-variant';
+            type.className = 'shrink-0 max-w-[40%] truncate rounded-full border border-white/10 bg-surface-variant px-2 py-0.5 text-xs text-on-surface-variant';
             type.textContent = getConfirmationTypeLabel(c);
+            type.title = type.textContent;
             top.appendChild(headline);
             top.appendChild(type);
             const account = document.createElement('p');
@@ -1052,6 +1089,7 @@
         if (revision < latestTradeRevision) return;
         latestTradeRevision = revision;
         hideRefreshSpinner('trades');
+        cachedConfirmationsSelection = selection;
         cachedConfirmations = Array.isArray(confirms) ? confirms : [];
         const error = document.getElementById('trade-load-error');
         error.textContent = errorMessage || '';
@@ -1617,6 +1655,7 @@
     });
     document.getElementById('btn-cancel-settings-navigation').addEventListener('click', () => {
         pendingSettingsNavigation = null;
+        pendingConfirmationTab = null;
         closeUnsavedSettingsModal();
     });
 
@@ -1717,6 +1756,7 @@
         testButton.disabled = false;
         testButton.innerText = 'Test Proxy';
         pendingSettingsNavigation = null;
+        pendingConfirmationTab = null;
         closeUnsavedSettingsModal();
         const status = document.getElementById('settings-save-status');
         status.innerText = message || 'Settings were not saved.';

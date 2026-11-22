@@ -1,8 +1,37 @@
 using System;
+using Newtonsoft.Json;
 using SteamAuth;
 
 namespace Steam_Desktop_Authenticator
 {
+    internal sealed class SafeTradeConfirmationTabJsonConverter : JsonConverter<string>
+    {
+        public override string ReadJson(
+            JsonReader reader,
+            Type objectType,
+            string existingValue,
+            bool hasExistingValue,
+            JsonSerializer serializer)
+        {
+            if (reader == null)
+                return TradeConfirmationClassifier.CategoryAll;
+
+            if (reader.TokenType == JsonToken.String)
+                return TradeConfirmationClassifier.NormalizeSelectableTab((string)reader.Value);
+
+            if (reader.TokenType == JsonToken.Null)
+                return TradeConfirmationClassifier.CategoryAll;
+
+            reader.Skip();
+            return TradeConfirmationClassifier.CategoryAll;
+        }
+
+        public override void WriteJson(JsonWriter writer, string value, JsonSerializer serializer)
+        {
+            writer.WriteValue(TradeConfirmationClassifier.NormalizeSelectableTab(value));
+        }
+    }
+
     internal static class TradeConfirmationClassifier
     {
         public const string CategoryAll = "all";

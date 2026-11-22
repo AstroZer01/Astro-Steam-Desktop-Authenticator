@@ -2115,7 +2115,7 @@ namespace Steam_Desktop_Authenticator
             trayIcon.BalloonTipIcon = ToolTipIcon.Info;
             trayIcon.ShowBalloonTip(10000);
 
-            var popup = new LoginNotificationPopup(title, message, ToolTipIcon.Info, "Click to open Trade Confirmations");
+            var popup = new LoginNotificationPopup(title, message, ToolTipIcon.Info, "Click to open Confirmations");
             popup.NotificationClicked += (sender, args) => OpenTradeConfirmationsFromNotification(notificationTab);
             popup.FormClosed += (sender, args) => activeLoginNotificationPopups.Remove(popup);
             activeLoginNotificationPopups.Add(popup);
@@ -3825,7 +3825,7 @@ namespace Steam_Desktop_Authenticator
                 bool isAutoStart = WindowsStartup.IsEnabled();
                 _ = ExecuteScriptSafelyAsync($"setAutoStart({isAutoStart.ToString().ToLowerInvariant()});", "Startup setting UI");
                 string savedConfirmationTab = TradeConfirmationClassifier.NormalizeSelectableTab(manifest?.TradeConfirmationSelectedTab);
-                _ = ExecuteScriptSafelyAsync($"setConfirmationTab({JsonConvert.SerializeObject(savedConfirmationTab)}, false, false);", "Trade confirmation tab UI");
+                _ = ExecuteScriptSafelyAsync($"hydrateConfirmationTab({JsonConvert.SerializeObject(savedConfirmationTab)});", "Trade confirmation tab UI");
                 _ = PublishAvailableUpdateAsync();
                 _ = PublishUpdateCheckStateAsync(isCheckingForUpdates, updateCheckStatusMessage, updateCheckStatusTone);
 
