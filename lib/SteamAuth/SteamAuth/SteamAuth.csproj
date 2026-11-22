@@ -18,6 +18,9 @@
     <DebugType>pdbonly</DebugType>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="SteamAuth.PhoneEnrollment.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Google.Protobuf" />
     <PackageReference Include="Grpc.Tools">
       <PrivateAssets>all</PrivateAssets>
