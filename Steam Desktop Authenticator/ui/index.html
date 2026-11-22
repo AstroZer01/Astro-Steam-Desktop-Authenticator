@@ -1584,6 +1584,10 @@
         document.getElementById('btn-save-settings-navigation').disabled = true;
         document.getElementById('btn-discard-settings-navigation').disabled = true;
         document.getElementById('btn-test-proxy').disabled = true;
+        const unsavedModal = document.getElementById('unsaved-settings-modal');
+        if (unsavedModal && !unsavedModal.classList.contains('hidden')) {
+            document.getElementById('btn-cancel-settings-navigation').focus();
+        }
         const saveStatus = document.getElementById('settings-save-status');
         saveStatus.classList.add('hidden');
         saveStatus.innerText = '';
@@ -1693,7 +1697,9 @@
         closeUnsavedSettingsModal();
     });
 
-    document.getElementById('unsaved-settings-modal').addEventListener('keydown', event => {
+    document.addEventListener('keydown', event => {
+        const modal = document.getElementById('unsaved-settings-modal');
+        if (!modal || modal.classList.contains('hidden')) return;
         if (event.key === 'Escape') {
             event.preventDefault();
             document.getElementById('btn-cancel-settings-navigation').click();
@@ -1701,11 +1707,14 @@
         }
         if (event.key !== 'Tab') return;
 
-        const focusable = Array.from(event.currentTarget.querySelectorAll('button:not([disabled])'));
+        const focusable = Array.from(modal.querySelectorAll('button:not([disabled])'));
         if (focusable.length === 0) return;
         const first = focusable[0];
         const last = focusable[focusable.length - 1];
-        if (event.shiftKey && document.activeElement === first) {
+        if (!modal.contains(document.activeElement)) {
+            event.preventDefault();
+            first.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
             event.preventDefault();
             last.focus();
         } else if (!event.shiftKey && document.activeElement === last) {
