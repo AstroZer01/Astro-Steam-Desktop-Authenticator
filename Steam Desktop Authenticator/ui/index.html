@@ -98,13 +98,27 @@
                     </button>
                 </div>
             </header>
+            <div id="confirmation-category-tabs" role="tablist" aria-label="Confirmation categories" class="grid grid-cols-3 gap-1 rounded-xl border border-white/10 bg-surface-container-low p-1">
+                <button type="button" role="tab" id="confirmation-tab-all" data-confirmation-tab="all" aria-controls="trades-panel" aria-selected="true" tabindex="0" class="confirmation-tab flex items-center justify-center gap-1.5 rounded-lg border border-secondary/30 bg-secondary-container/20 px-2 py-2 text-xs font-medium text-secondary transition-colors focus:outline-hidden focus:ring-1 focus:ring-primary">
+                    <span>All</span>
+                    <span id="confirmation-tab-count-all" class="rounded-full bg-secondary/20 px-1.5 py-0.5 font-mono text-[11px] leading-none text-secondary">0</span>
+                </button>
+                <button type="button" role="tab" id="confirmation-tab-trades" data-confirmation-tab="trades" aria-controls="trades-panel" aria-selected="false" tabindex="-1" class="confirmation-tab flex items-center justify-center gap-1.5 rounded-lg border border-transparent px-2 py-2 text-xs font-medium text-on-surface-variant hover:bg-surface-variant/60 hover:text-on-surface transition-colors focus:outline-hidden focus:ring-1 focus:ring-primary">
+                    <span>Trades</span>
+                    <span id="confirmation-tab-count-trades" class="rounded-full bg-surface-variant px-1.5 py-0.5 font-mono text-[11px] leading-none text-on-surface-variant">0</span>
+                </button>
+                <button type="button" role="tab" id="confirmation-tab-market" data-confirmation-tab="market" aria-controls="trades-panel" aria-selected="false" tabindex="-1" class="confirmation-tab flex items-center justify-center gap-1.5 rounded-lg border border-transparent px-2 py-2 text-xs font-medium text-on-surface-variant hover:bg-surface-variant/60 hover:text-on-surface transition-colors focus:outline-hidden focus:ring-1 focus:ring-primary">
+                    <span>Market</span>
+                    <span id="confirmation-tab-count-market" class="rounded-full bg-surface-variant px-1.5 py-0.5 font-mono text-[11px] leading-none text-on-surface-variant">0</span>
+                </button>
+            </div>
             <div id="trade-load-error" class="hidden rounded-xl border border-error/30 bg-error-container/20 p-3 text-sm text-error" role="alert"></div>
-            <div class="glass-panel rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col min-h-[300px]">
+            <div id="trades-panel" role="tabpanel" aria-labelledby="confirmation-tab-all" class="glass-panel rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col min-h-[300px]">
                 <div id="trades-container" class="flex-1 overflow-y-auto p-3 space-y-3"></div>
                 <div id="empty-state" class="hidden p-8 flex-col items-center justify-center text-center flex-1">
                     <svg class="ui-icon text-on-surface-variant w-8 h-8 mb-2" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v12H4zM3 5h18v3H3zM9 12h6"/></svg>
-                    <span class="text-on-surface font-medium">No pending confirmations</span>
-                    <span class="text-on-surface-variant text-sm mt-1">Trade and market confirmations will appear here.</span>
+                    <span id="empty-state-title" class="text-on-surface font-medium">No pending confirmations</span>
+                    <span id="empty-state-description" class="text-on-surface-variant text-sm mt-1">Trade and market confirmations will appear here.</span>
                 </div>
             </div>
         </section>
@@ -795,37 +809,184 @@
         error.textContent = '';
         error.classList.add('hidden');
     }
-    
-    let latestTradeRevision = 0;
 
-    function loadConfirmations(confirms, errorMessage, revision = 0, selection = 'all') {
-        const selectedAccount = document.getElementById('trade-account-select').value || 'all';
-        if (selection !== selectedAccount) return;
-        if (revision < latestTradeRevision) return;
-        latestTradeRevision = revision;
-        hideRefreshSpinner('trades');
-        confirms = Array.isArray(confirms) ? confirms : [];
+    const confirmationTabOrder = ['all', 'trades', 'market'];
+    const validConfirmationTabs = new Set(confirmationTabOrder);
+    let activeConfirmationTab = 'all';
+    let cachedConfirmations = [];
+    let latestTradeRevision = 0;
+    const tradeActionsInFlight = new Set();
+
+    function getConfirmationCategory(confirmation) {
+        if (confirmation && (confirmation.Category === 'trades' || confirmation.Category === 'market' || confirmation.Category === 'other')) {
+            return confirmation.Category;
+        }
+        if (confirmation && confirmation.Type === 'Trade') return 'trades';
+        if (confirmation && (confirmation.Type === 'MarketListing' || confirmation.Type === 'MarketPurchase')) return 'market';
+        return 'other';
+    }
+
+    function getConfirmationTypeLabel(confirmation) {
+        if (confirmation && typeof confirmation.TypeLabel === 'string' && confirmation.TypeLabel.trim()) {
+            return confirmation.TypeLabel.trim();
+        }
+        const category = getConfirmationCategory(confirmation);
+        if (category === 'trades') return 'Trade';
+        if (category === 'market') return 'Market';
+        return 'Confirmation';
+    }
+
+    function getConfirmationFallbackHeadline(confirmation) {
+        if (confirmation && confirmation.Type === 'MarketPurchase') return 'Market purchase';
+        if (confirmation && confirmation.Type === 'MarketListing') return 'Market listing';
+        const category = getConfirmationCategory(confirmation);
+        if (category === 'market') return 'Steam market';
+        if (category === 'trades') return 'Steam trade';
+        return 'Steam confirmation';
+    }
+
+    function filterConfirmationsByTab(confirms, tabId) {
+        if (tabId === 'trades') {
+            return confirms.filter(c => getConfirmationCategory(c) === 'trades');
+        }
+        if (tabId === 'market') {
+            return confirms.filter(c => getConfirmationCategory(c) === 'market');
+        }
+        return confirms;
+    }
+
+    function updateConfirmationTabUI(counts) {
+        const activeButtonClass = 'confirmation-tab flex items-center justify-center gap-1.5 rounded-lg border border-secondary/30 bg-secondary-container/20 px-2 py-2 text-xs font-medium text-secondary transition-colors focus:outline-hidden focus:ring-1 focus:ring-primary';
+        const inactiveButtonClass = 'confirmation-tab flex items-center justify-center gap-1.5 rounded-lg border border-transparent px-2 py-2 text-xs font-medium text-on-surface-variant hover:bg-surface-variant/60 hover:text-on-surface transition-colors focus:outline-hidden focus:ring-1 focus:ring-primary';
+        const activeBadgeClass = 'rounded-full bg-secondary/20 px-1.5 py-0.5 font-mono text-[11px] leading-none text-secondary';
+        const inactiveBadgeClass = 'rounded-full bg-surface-variant px-1.5 py-0.5 font-mono text-[11px] leading-none text-on-surface-variant';
+
+        confirmationTabOrder.forEach(tabId => {
+            const button = document.getElementById('confirmation-tab-' + tabId);
+            const badge = document.getElementById('confirmation-tab-count-' + tabId);
+            const isSelected = tabId === activeConfirmationTab;
+            if (button) {
+                button.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+                button.tabIndex = isSelected ? 0 : -1;
+                button.className = isSelected ? activeButtonClass : inactiveButtonClass;
+            }
+            if (badge) {
+                badge.textContent = String(counts[tabId] || 0);
+                badge.className = isSelected ? activeBadgeClass : inactiveBadgeClass;
+            }
+        });
+
+        const panel = document.getElementById('trades-panel');
+        if (panel) {
+            panel.setAttribute('aria-labelledby', 'confirmation-tab-' + activeConfirmationTab);
+        }
+    }
+
+    function setConfirmationTab(tabId, focusTab = false) {
+        if (!validConfirmationTabs.has(tabId)) return;
+        activeConfirmationTab = tabId;
+        renderConfirmations();
+        if (focusTab) {
+            const tabButton = document.getElementById('confirmation-tab-' + tabId);
+            if (tabButton) tabButton.focus();
+        }
+    }
+
+    function openTradeConfirmations(category = 'all') {
+        if (validConfirmationTabs.has(category)) {
+            setConfirmationTab(category);
+        }
+        switchTab('trades');
+    }
+
+    document.querySelectorAll('.confirmation-tab').forEach(tabButton => {
+        tabButton.addEventListener('click', () => {
+            setConfirmationTab(tabButton.dataset.confirmationTab);
+        });
+        tabButton.addEventListener('keydown', event => {
+            const currentIndex = confirmationTabOrder.indexOf(tabButton.dataset.confirmationTab);
+            if (currentIndex === -1) return;
+
+            let nextIndex = null;
+            if (event.key === 'ArrowRight') {
+                nextIndex = (currentIndex + 1) % confirmationTabOrder.length;
+            } else if (event.key === 'ArrowLeft') {
+                nextIndex = (currentIndex - 1 + confirmationTabOrder.length) % confirmationTabOrder.length;
+            } else if (event.key === 'Home') {
+                nextIndex = 0;
+            } else if (event.key === 'End') {
+                nextIndex = confirmationTabOrder.length - 1;
+            }
+
+            if (nextIndex !== null) {
+                event.preventDefault();
+                setConfirmationTab(confirmationTabOrder[nextIndex], true);
+            }
+        });
+    });
+
+    function renderConfirmations() {
         const container = document.getElementById('trades-container');
         const emptyState = document.getElementById('empty-state');
+        const emptyTitle = document.getElementById('empty-state-title');
+        const emptyDescription = document.getElementById('empty-state-description');
         const count = document.getElementById('trade-confirmations-count');
-        const error = document.getElementById('trade-load-error');
-        error.textContent = errorMessage || '';
-        error.classList.toggle('hidden', !errorMessage);
+
+        const counts = {
+            all: cachedConfirmations.length,
+            trades: 0,
+            market: 0
+        };
+        cachedConfirmations.forEach(c => {
+            const category = getConfirmationCategory(c);
+            if (category === 'trades') counts.trades++;
+            else if (category === 'market') counts.market++;
+        });
+        updateConfirmationTabUI(counts);
+
+        const filteredConfirmations = filterConfirmationsByTab(cachedConfirmations, activeConfirmationTab);
         container.innerHTML = '';
-        count.textContent = confirms.length === 1 ? '1 pending confirmation' : confirms.length + ' pending confirmations';
-        if (!confirms || confirms.length === 0) {
+
+        if (activeConfirmationTab === 'trades') {
+            count.textContent = filteredConfirmations.length === 1
+                ? '1 pending trade confirmation'
+                : filteredConfirmations.length + ' pending trade confirmations';
+        } else if (activeConfirmationTab === 'market') {
+            count.textContent = filteredConfirmations.length === 1
+                ? '1 pending market confirmation'
+                : filteredConfirmations.length + ' pending market confirmations';
+        } else {
+            count.textContent = filteredConfirmations.length === 1
+                ? '1 pending confirmation'
+                : filteredConfirmations.length + ' pending confirmations';
+        }
+
+        if (filteredConfirmations.length === 0) {
+            if (activeConfirmationTab === 'trades') {
+                emptyTitle.textContent = 'No pending trade confirmations';
+                emptyDescription.textContent = 'Incoming and sent player-to-player trade offers will appear here.';
+            } else if (activeConfirmationTab === 'market') {
+                emptyTitle.textContent = 'No pending market confirmations';
+                emptyDescription.textContent = 'Steam Community Market listings and purchases will appear here.';
+            } else {
+                emptyTitle.textContent = 'No pending confirmations';
+                emptyDescription.textContent = 'Trade and market confirmations will appear here.';
+            }
             container.classList.add('hidden');
             emptyState.classList.remove('hidden');
             emptyState.classList.add('flex');
             return;
         }
+
         container.classList.remove('hidden');
         emptyState.classList.add('hidden');
         emptyState.classList.remove('flex');
-        confirms.forEach(c => {
+        filteredConfirmations.forEach(c => {
+            const confirmationKey = String(c.Id || '');
+            const isActionInFlight = confirmationKey !== '' && tradeActionsInFlight.has(confirmationKey);
             const card = document.createElement('article');
             card.className = 'rounded-xl border border-white/10 bg-surface-container-low p-3 space-y-3';
-            card.dataset.tradeId = String(c.Id || '');
+            card.dataset.tradeId = confirmationKey;
             const content = document.createElement('div');
             content.className = 'flex gap-3 min-w-0';
             if (c.Icon) {
@@ -842,11 +1003,11 @@
             top.className = 'flex items-start justify-between gap-2';
             const headline = document.createElement('h2');
             headline.className = 'min-w-0 truncate font-medium text-on-surface';
-            headline.textContent = c.Headline || (c.Type === 'MarketListing' ? 'Market listing' : 'Steam trade');
+            headline.textContent = c.Headline || getConfirmationFallbackHeadline(c);
             headline.title = headline.textContent;
             const type = document.createElement('span');
             type.className = 'shrink-0 rounded-full border border-white/10 bg-surface-variant px-2 py-0.5 text-xs text-on-surface-variant';
-            type.textContent = c.Type === 'MarketListing' ? 'Market' : 'Trade';
+            type.textContent = getConfirmationTypeLabel(c);
             top.appendChild(headline);
             top.appendChild(type);
             const account = document.createElement('p');
@@ -863,12 +1024,14 @@
             actions.className = 'flex flex-col-reverse gap-2 sm:flex-row sm:justify-end';
             const cancel = document.createElement('button');
             cancel.type = 'button';
-            cancel.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-error-container/30 hover:bg-error-container/60 text-error text-sm font-medium transition-colors border border-error/30';
+            cancel.disabled = isActionInFlight;
+            cancel.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-error-container/30 hover:bg-error-container/60 text-error text-sm font-medium transition-colors border border-error/30 disabled:opacity-50 disabled:cursor-not-allowed';
             cancel.textContent = 'Cancel';
             cancel.onclick = () => sendTradeAction(c.Id, 'reject_trade', card);
             const accept = document.createElement('button');
             accept.type = 'button';
-            accept.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30';
+            accept.disabled = isActionInFlight;
+            accept.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30 disabled:opacity-50 disabled:cursor-not-allowed';
             accept.textContent = 'Accept';
             accept.onclick = () => sendTradeAction(c.Id, 'accept_trade', card);
             actions.appendChild(cancel);
@@ -879,6 +1042,19 @@
         });
     }
 
+    function loadConfirmations(confirms, errorMessage, revision = 0, selection = 'all') {
+        const selectedAccount = document.getElementById('trade-account-select').value || 'all';
+        if (selection !== selectedAccount) return;
+        if (revision < latestTradeRevision) return;
+        latestTradeRevision = revision;
+        hideRefreshSpinner('trades');
+        cachedConfirmations = Array.isArray(confirms) ? confirms : [];
+        const error = document.getElementById('trade-load-error');
+        error.textContent = errorMessage || '';
+        error.classList.toggle('hidden', !errorMessage);
+        renderConfirmations();
+    }
+
     function setTradePendingCount(value) {
         const count = Math.max(0, Number(value) || 0);
         const badge = document.getElementById('trade-pending-badge');
@@ -886,8 +1062,6 @@
         badge.classList.toggle('hidden', count === 0);
         badge.setAttribute('aria-label', count + (count === 1 ? ' pending trade confirmation' : ' pending trade confirmations'));
     }
-
-    const tradeActionsInFlight = new Set();
 
     function sendTradeAction(id, act, card) {
         const key = String(id || '');
