@@ -3206,6 +3206,9 @@ namespace Steam_Desktop_Authenticator
             {
                 if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
                 {
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+
                     if (manifest == null)
                         return;
 
@@ -3265,12 +3268,13 @@ namespace Steam_Desktop_Authenticator
                 string preferredName = preferredSteamId.HasValue
                     ? allAccounts.FirstOrDefault(account => account.Session?.SteamID == preferredSteamId.Value)?.AccountName
                     : null;
-                if (!String.IsNullOrWhiteSpace(preferredName))
-                {
-                    int filteredIndex = listAccounts.Items.IndexOf(preferredName);
-                    if (filteredIndex >= 0)
-                        listAccounts.SelectedIndex = filteredIndex;
-                }
+                int filteredIndex = !String.IsNullOrWhiteSpace(preferredName)
+                    ? listAccounts.Items.IndexOf(preferredName)
+                    : -1;
+                if (filteredIndex >= 0)
+                    listAccounts.SelectedIndex = filteredIndex;
+                else if (listAccounts.Items.Count > 0)
+                    listAccounts.SelectedIndex = 0;
             }
         }
 

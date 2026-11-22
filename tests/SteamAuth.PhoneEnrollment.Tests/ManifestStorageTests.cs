@@ -898,6 +898,78 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void MoveEntryWithResult_RollbackOnBlockedManifestReplacementDoesNotOrphanRetainedObsoleteFile()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000000000UL;
+            ulong secondId = 76561198000000001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-obsolete.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(obsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", "retained-obsolete.maFile", null);
+
+            long revisionBefore = manifest.StorageRevision;
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            using (new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult result = manifest.MoveEntryWithResult(0, 1);
+
+                Assert.False(result.Succeeded);
+                Assert.Equal(new[] { firstId, secondId }, manifest.Entries.Select(e => e.SteamID).ToArray());
+                Assert.Equal(revisionBefore, manifest.StorageRevision);
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            // Once unlocked, startup recovery must preserve the original order and clean up the retained obsolete file.
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(new[] { firstId, secondId }, reloaded.Entries.Select(e => e.SteamID).ToArray());
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void StartupRecovery_UncommittedTransactionPreservesAndCleansRetainedObsoleteFiles()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-crash-obsolete.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(obsoletePath, "obsolete");
+
+            JObject uncommittedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(File.ReadAllText(manifestPath) + "uncommitted"),
+                ["created_filenames"] = new JArray(),
+                ["obsolete_filenames"] = new JArray(),
+                ["retained_obsolete_filenames"] = new JArray("retained-crash-obsolete.maFile"),
+                ["backup_filename"] = TestBackupFilename
+            };
+            File.WriteAllText(journalPath, uncommittedJournal.ToString(Formatting.None));
+
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Manifest whileLocked = Manifest.GetManifest(true);
+                Assert.Single(whileLocked.Entries);
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            Manifest afterUnlock = Manifest.GetManifest(true);
+            Assert.Single(afterUnlock.Entries);
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
         public void MoveEntryBySteamIdOffsetWithResult_MovesInConsistentDirectionWithoutReversingOnSortedList()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
@@ -930,13 +1002,18 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 new[] { accountBravo.Session.SteamID, accountAlpha.Session.SteamID, accountZulu.Session.SteamID },
                 Manifest.GetManifest(true).Entries.Select(e => e.SteamID).ToArray());
 
-            // Pressing Ctrl+Down moves Bravo back down one slot.
+            // Pressing Ctrl+Down moves Bravo back down one slot, and zero/bottom-boundary offsets are no-ops.
             Assert.True(manifest.MoveEntryBySteamIdOffsetWithResult(bravoId, 1).Succeeded);
             Assert.Equal(
                 new[] { accountAlpha.Session.SteamID, accountBravo.Session.SteamID, accountZulu.Session.SteamID },
                 Manifest.GetManifest(true).Entries.Select(e => e.SteamID).ToArray());
 
-            // Ambiguous duplicate names (even when one entry lacks a session) must be rejected.
+            long revisionBeforeNoOps = manifest.StorageRevision;
+            Assert.True(manifest.MoveEntryBySteamIdOffsetWithResult(bravoId, 0).Succeeded);
+            Assert.True(manifest.MoveEntryBySteamIdOffsetWithResult(accountZulu.Session.SteamID, 1).Succeeded);
+            Assert.Equal(revisionBeforeNoOps, manifest.StorageRevision);
+
+            // Ambiguous duplicate names (both session-backed or mixed with sessionless) must be rejected.
             SteamGuardAccount duplicateSessionlessAlpha = new SteamGuardAccount { AccountName = "alpha", Session = null };
             Assert.False(MainForm.TryResolveAccountForReorder(
                 new[] { accountAlpha, duplicateSessionlessAlpha, accountBravo },
@@ -944,7 +1021,19 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 0,
                 out _));
 
-            // Removed or unknown SteamIDs return a validation failure.
+            SteamGuardAccount duplicateSessionBackedAlpha = CreateAccount(76561198000000009UL);
+            duplicateSessionBackedAlpha.AccountName = "alpha";
+            Assert.False(MainForm.TryResolveAccountForReorder(
+                new[] { accountAlpha, duplicateSessionBackedAlpha, accountBravo },
+                sortedDisplay,
+                0,
+                out _));
+
+            // Invalid zero or missing SteamIDs return a validation failure.
+            StorageResult zeroIdResult = manifest.MoveEntryBySteamIdOffsetWithResult(0, -1);
+            Assert.False(zeroIdResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, zeroIdResult.FailureKind);
+
             StorageResult missingResult = manifest.MoveEntryBySteamIdOffsetWithResult(76561198000000099UL, -1);
             Assert.False(missingResult.Succeeded);
             Assert.Equal(StorageFailureKind.Validation, missingResult.FailureKind);
