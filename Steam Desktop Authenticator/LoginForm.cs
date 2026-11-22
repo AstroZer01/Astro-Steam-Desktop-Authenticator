@@ -23,6 +23,8 @@ namespace Steam_Desktop_Authenticator
         public bool RefreshSucceeded { get; private set; }
 
         private readonly string suppliedPassKey;
+        private bool savePasswordRequested;
+        public bool SavedPasswordUpdated { get; private set; }
 
         public LoginForm(LoginType loginReason = LoginType.Initial, SteamGuardAccount account = null, string passKey = null)
         {
@@ -202,6 +204,13 @@ namespace Steam_Desktop_Authenticator
                     string jsAccountName = Newtonsoft.Json.JsonConvert.SerializeObject(account.AccountName ?? String.Empty);
                     _ = ExecuteScriptSafelyAsync($"setUsername({jsAccountName}, true)", "Login account UI");
                 }
+
+                Manifest currentManifest = Manifest.GetManifest();
+                bool allowSavePassword = currentManifest != null &&
+                    currentManifest.Encrypted &&
+                    currentManifest.AllowSavedSteamPasswords &&
+                    this.LoginReason != LoginType.Import;
+                _ = ExecuteScriptSafelyAsync($"setSavePasswordOption({allowSavePassword.ToString().ToLowerInvariant()})", "Login save password UI");
             };
 
             if (IsDisposed || loginCancellationSource?.IsCancellationRequested == true || webView == null)
@@ -249,6 +258,7 @@ namespace Steam_Desktop_Authenticator
                 if (username == null || password == null || username.Length > 256 || password.Length > 4096)
                     return;
 
+                savePasswordRequested = payload["savePassword"]?.Type == JTokenType.Boolean && payload.Value<bool>("savePassword");
                 txtUsername.Text = username;
                 txtPassword.Text = password;
                 btnSteamLogin_Click(this, EventArgs.Empty);
@@ -478,7 +488,7 @@ namespace Steam_Desktop_Authenticator
                 bool previousFullyEnrolled = account.FullyEnrolled;
                 account.FullyEnrolled = true;
                 account.Session = sessionData;
-                if (!HandleManifest(man, true, suppliedPassKey))
+                if (!HandleManifest(man, true, suppliedPassKey, out string usedPassKey))
                 {
                     // SaveAccount serializes and commits the candidate before the
                     // in-memory account becomes authoritative. Restore the old
@@ -488,6 +498,7 @@ namespace Steam_Desktop_Authenticator
                     ResetLoginButton(cancellationToken);
                     return;
                 }
+                TrySaveVerifiedPasswordAfterCommit(man, account.Session.SteamID, password, usedPassKey, showRefreshNotice: true);
                 RefreshSucceeded = true;
                 this.Close();
                 return;
@@ -685,6 +696,7 @@ namespace Steam_Desktop_Authenticator
                 this.Close();
                 return;
             }
+            TrySaveVerifiedPasswordAfterCommit(manifest, linker.LinkedAccount.Session.SteamID, password, passKey, showRefreshNotice: false);
             ShowRecoveryCode(
                 linker.LinkedAccount,
                 finalizeResponse == AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified
@@ -825,8 +837,9 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private bool HandleManifest(Manifest man, bool IsRefreshing = false, string suppliedPassKey = null)
+        private bool HandleManifest(Manifest man, bool IsRefreshing, string suppliedPassKey, out string usedPassKey)
         {
+            usedPassKey = null;
             string passKey = man.Encrypted ? suppliedPassKey : null;
             if (man.Entries.Count == 0)
             {
@@ -837,7 +850,7 @@ namespace Steam_Desktop_Authenticator
                 bool passKeyValid = !String.IsNullOrEmpty(passKey) && man.VerifyPasskey(passKey);
                 while (!passKeyValid)
                 {
-                    using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey."))
+                    using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey.", true))
                     {
                         passKeyForm.ShowInputDialog(this);
                         if (!passKeyForm.Canceled)
@@ -869,15 +882,58 @@ namespace Steam_Desktop_Authenticator
                     : "The finalized authenticator record could not be saved."), "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return false;
             }
-            if (IsRefreshing)
-            {
-                AstroMessageBox.Show("Your session was refreshed.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            else
+            usedPassKey = passKey;
+            if (!IsRefreshing)
             {
                 ShowRecoveryCode(account, "Mobile authenticator successfully linked. Keep this recovery code safe.");
             }
             return true;
+        }
+
+        private void TrySaveVerifiedPasswordAfterCommit(Manifest man, ulong steamId, string password, string usedPassKey, bool showRefreshNotice)
+        {
+            string extraNotice = String.Empty;
+            if (savePasswordRequested &&
+                man != null &&
+                man.Encrypted &&
+                man.AllowSavedSteamPasswords &&
+                steamId != 0 &&
+                !String.IsNullOrEmpty(password) &&
+                !String.IsNullOrEmpty(usedPassKey))
+            {
+                StorageResult credResult = man.SaveAccountPassword(steamId, password, usedPassKey);
+                if (credResult.Succeeded)
+                {
+                    SavedPasswordUpdated = true;
+                    if (credResult.ObsoleteCleanupPending)
+                    {
+                        extraNotice = "\n\nYour password was saved. The previous encrypted credential file could not be removed immediately and will be cleaned up automatically on the next save or restart.";
+                    }
+                }
+                else
+                {
+                    DiagnosticErrorLogger.Log("Credential storage", credResult.Exception, "The verified Steam password could not be saved after account commit.");
+                    extraNotice = "\n\nNote: The Steam password could not be saved for silent renewal. You can update it later in Account Options.";
+                }
+            }
+            else if (showRefreshNotice &&
+                man != null &&
+                man.Encrypted &&
+                man.AllowSavedSteamPasswords &&
+                !String.IsNullOrEmpty(usedPassKey))
+            {
+                // Preserve rejection state unless user explicitly replaced or deleted the saved password.
+                SavedCredentialRecord existing = man.GetSavedCredentialRecord(steamId, usedPassKey);
+                if (existing != null && existing.PasswordRejected)
+                {
+                    extraNotice = "\n\nNote: Your previously saved Steam password is still marked as rejected. Update or remove it in Account Options to re-enable silent renewal.";
+                }
+            }
+
+            if (showRefreshNotice)
+            {
+                AstroMessageBox.Show("Your session was refreshed." + extraNotice, "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
 
         private void ShowRecoveryCode(SteamGuardAccount recoveryAccount, string statusMessage, bool requireBackupBeforeContinue = false)

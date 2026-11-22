@@ -294,6 +294,24 @@ namespace Steam_Desktop_Authenticator
                 if (!filenames.Contains(Path.GetFileName(accountFile)))
                     throw new InvalidDataException("The imported configuration contains an account file that is not listed in its manifest.");
             }
+
+            // Strip any foreign saved-password flags or credential-store references from
+            // imported manifests so imported folders never reference missing or external stores.
+            bool strippedCredentialState = false;
+            if (manifestJson["allow_saved_steam_passwords"] != null)
+            {
+                manifestJson["allow_saved_steam_passwords"] = false;
+                strippedCredentialState = true;
+            }
+            if (manifestJson["credentials_store_filename"] != null)
+            {
+                manifestJson.Remove("credentials_store_filename");
+                strippedCredentialState = true;
+            }
+            if (strippedCredentialState)
+            {
+                File.WriteAllText(manifestPath, manifestJson.ToString(Formatting.None), new UTF8Encoding(false));
+            }
         }
 
         private static string CommitStagedImport(string stagingDirectory, string destinationDirectory)

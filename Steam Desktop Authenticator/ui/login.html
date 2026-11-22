@@ -41,13 +41,21 @@ input::-ms-reveal { display: none; }
         </div>
     </div>
 
+    <label id="save-password-row" class="hidden flex items-start gap-2.5 text-xs text-[#bac9cc] cursor-pointer select-none">
+        <input id="save-password" type="checkbox" style="width:16px !important;height:16px !important;padding:0 !important;margin-top:2px;flex-shrink:0;" />
+        <span>Save password for silent session renewal (encrypted with your manifest passkey)</span>
+    </label>
+
     <button id="btn-login" class="mt-4 bg-[#00E5FF] hover:bg-[#9cf0ff] text-[#00363D] font-bold py-3 rounded-lg w-full transition-colors shadow-lg shadow-[#00E5FF]/20">LOGIN</button>
 </div>
 <script>
     function submitLogin() {
         let u = document.getElementById('username').value;
         let p = document.getElementById('password').value;
-        window.chrome.webview.postMessage({ action: 'login', user: u, pass: p });
+        let saveRow = document.getElementById('save-password-row');
+        let saveCheckbox = document.getElementById('save-password');
+        let savePassword = !!(saveRow && !saveRow.classList.contains('hidden') && saveCheckbox && saveCheckbox.checked);
+        window.chrome.webview.postMessage({ action: 'login', user: u, pass: p, savePassword: savePassword });
     }
 
     document.getElementById('btn-login').addEventListener('click', submitLogin);
@@ -83,6 +91,14 @@ input::-ms-reveal { display: none; }
         b.innerText = text;
         b.disabled = disabled;
         b.style.opacity = disabled ? '0.5' : '1';
+    }
+
+    function setSavePasswordOption(visible) {
+        let row = document.getElementById('save-password-row');
+        let cb = document.getElementById('save-password');
+        if (!row || !cb) return;
+        row.classList.toggle('hidden', !visible);
+        if (!visible) cb.checked = false;
     }
 </script>
 </body></html>

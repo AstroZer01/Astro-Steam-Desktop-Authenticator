@@ -323,6 +323,15 @@
                     </div>
                     <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6">
                         <div class="flex items-start gap-3">
+                            <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary disabled:opacity-50 disabled:cursor-not-allowed" id="allow-saved-steam-passwords" type="checkbox"/>
+                            <div>
+                                <label class="text-on-surface" for="allow-saved-steam-passwords">Allow saved Steam passwords for silent session renewal</label>
+                                <p id="allow-saved-passwords-note" class="text-sm text-on-surface-variant mt-1">Opt-in only. Requires manifest encryption. Stored separately in AES-256-GCM (PBKDF2-SHA256) encrypted with your passkey and never included in exports. Turning this off deletes all saved passwords.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6">
+                        <div class="flex items-start gap-3">
                             <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="diagnostic-error-logging-enabled" type="checkbox"/>
                             <div>
                                 <label class="text-on-surface" for="diagnostic-error-logging-enabled">Enable diagnostic error logging</label>
@@ -732,7 +741,13 @@
             accountButton.className = "min-w-0 flex-1 border-0 bg-transparent p-0 text-left text-inherit cursor-pointer";
             const name = document.createElement('span');
             name.className = "block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ellipsis" + (sessionExpired ? " text-[#ffb4ab]" : "");
-            name.textContent = sessionExpired ? acc.name + " (expired session)" : acc.name;
+            if (acc.recoveryInProgress) {
+                name.textContent = acc.name + " (renewing session…)";
+            } else if (acc.passwordRejected) {
+                name.textContent = acc.name + " (saved password rejected)";
+            } else {
+                name.textContent = sessionExpired ? acc.name + " (expired session)" : acc.name;
+            }
             accountButton.appendChild(name);
             accountButton.onclick = () => { window.chrome.webview.postMessage({ action: 'switch_account', accountName: acc.name, steamId: acc.steamId }); };
 
@@ -895,6 +910,63 @@
         }
     }
 
+    function updateAccountOptionsPasswordSection(account) {
+        const section = document.getElementById('account-options-password-section');
+        if (!section || !account) return;
+        section.innerHTML = '';
+        section.classList.remove('hidden');
+
+        const heading = document.createElement('h3');
+        heading.className = 'text-xs font-semibold uppercase tracking-wider text-on-surface-variant';
+        heading.textContent = 'Silent Session Renewal Password';
+        section.appendChild(heading);
+
+        const status = document.createElement('p');
+        if (!account.canSavePasswords) {
+            status.className = 'text-xs text-on-surface-variant';
+            status.textContent = 'Enable manifest encryption and opt into saved Steam passwords in Settings to store a password for silent renewal.';
+            section.appendChild(status);
+            return;
+        }
+
+        if (account.passwordRejected) {
+            status.className = 'text-xs text-error font-medium';
+            status.textContent = 'Status: Rejected by Steam — automatic renewal paused.';
+        } else if (account.hasSavedPassword) {
+            status.className = 'text-xs text-[#4edea3]';
+            status.textContent = 'Status: Saved (encrypted with your manifest passkey).';
+        } else {
+            status.className = 'text-xs text-on-surface-variant';
+            status.textContent = 'Status: Not saved.';
+        }
+        section.appendChild(status);
+
+        const btnRow = document.createElement('div');
+        btnRow.className = 'flex flex-wrap gap-2 pt-1';
+
+        const setBtn = document.createElement('button');
+        setBtn.type = 'button';
+        setBtn.className = 'rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 transition-colors';
+        setBtn.textContent = account.hasSavedPassword ? 'Update Saved Password' : 'Save Password';
+        setBtn.onclick = () => {
+            window.chrome.webview.postMessage({ action: 'set_account_password', steamId: account.steamId });
+        };
+        btnRow.appendChild(setBtn);
+
+        if (account.hasSavedPassword) {
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'rounded-lg border border-error/40 bg-error-container/20 px-3 py-1.5 text-xs font-medium text-error hover:bg-error-container/40 transition-colors';
+            removeBtn.textContent = 'Remove Saved Password';
+            removeBtn.onclick = () => {
+                window.chrome.webview.postMessage({ action: 'remove_account_password', steamId: account.steamId });
+            };
+            btnRow.appendChild(removeBtn);
+        }
+
+        section.appendChild(btnRow);
+    }
+
     function openAccountOptionsModal(account) {
         if (!account || !account.steamId) return;
         accountOptionsPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -915,6 +987,7 @@
         document.getElementById('acct-opt-override').disabled = false;
         syncAccountOptionsOverrideUI();
         updateAccountOptionsHealthBanner(account);
+        updateAccountOptionsPasswordSection(account);
 
         const modal = document.getElementById('account-options-modal');
         modal.classList.remove('hidden');
@@ -1016,8 +1089,17 @@
             existing.healthState = metadata.healthState;
         if ('lastScanError' in metadata)
             existing.lastScanError = metadata.lastScanError;
+        if (typeof metadata.hasSavedPassword === 'boolean')
+            existing.hasSavedPassword = metadata.hasSavedPassword;
+        if (typeof metadata.passwordRejected === 'boolean')
+            existing.passwordRejected = metadata.passwordRejected;
+        if (typeof metadata.recoveryInProgress === 'boolean')
+            existing.recoveryInProgress = metadata.recoveryInProgress;
+        if (typeof metadata.canSavePasswords === 'boolean')
+            existing.canSavePasswords = metadata.canSavePasswords;
         if (accountOptionsTarget && accountOptionsTarget.steamId === metadata.steamId) {
             updateAccountOptionsHealthBanner(existing);
+            updateAccountOptionsPasswordSection(existing);
         }
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
     }
@@ -1781,6 +1863,7 @@
     const saveBoundSettingIds = [
         'trade-confirmation-custom-interval-enabled', 'trade-confirmation-check-interval',
         'auto-confirm-market', 'auto-confirm-trades', 'close-to-tray', 'check-for-updates',
+        'allow-saved-steam-passwords',
         'diagnostic-error-logging-enabled', 'login-action-monitoring-enabled',
         'login-action-mode', 'login-action-auto-allow-ip-enabled',
         'login-action-auto-allow-current-device-ip', 'login-action-auto-allow-ip',
@@ -1798,6 +1881,7 @@
             autoConfirmTrades: document.getElementById('auto-confirm-trades').checked,
             minimizeToTray: document.getElementById('close-to-tray').checked,
             checkForUpdates: document.getElementById('check-for-updates').checked,
+            allowSavedSteamPasswords: document.getElementById('allow-saved-steam-passwords').checked,
             diagnosticErrorLoggingEnabled: document.getElementById('diagnostic-error-logging-enabled').checked,
             loginActionMonitoringEnabled: document.getElementById('login-action-monitoring-enabled').checked,
             loginActionMode: document.getElementById('login-action-mode').value,
@@ -1986,6 +2070,18 @@
         document.getElementById('auto-confirm-trades').checked = settings.autoConfirmTrades;
         document.getElementById('close-to-tray').checked = settings.minimizeToTray;
         document.getElementById('check-for-updates').checked = settings.checkForUpdates !== false;
+        const allowSavedCb = document.getElementById('allow-saved-steam-passwords');
+        const allowSavedNote = document.getElementById('allow-saved-passwords-note');
+        const canEnableSavedPasswords = !!settings.manifestEncrypted && settings.aesGcmSupported !== false;
+        allowSavedCb.disabled = !canEnableSavedPasswords;
+        allowSavedCb.checked = canEnableSavedPasswords && !!settings.allowSavedSteamPasswords;
+        if (!settings.manifestEncrypted) {
+            allowSavedNote.textContent = 'Disabled because manifest encryption is off. Set up encryption on the Authenticator tab to enable saved passwords.';
+        } else if (settings.aesGcmSupported === false) {
+            allowSavedNote.textContent = 'Unavailable because AES-GCM encryption is not supported on this system.';
+        } else {
+            allowSavedNote.textContent = 'Opt-in only. Stored separately in AES-256-GCM (PBKDF2-SHA256) encrypted with your passkey and never included in exports. Turning this off deletes all saved passwords.';
+        }
         document.getElementById('diagnostic-error-logging-enabled').checked = !!settings.diagnosticErrorLoggingEnabled;
         document.getElementById('login-action-monitoring-enabled').checked = settings.loginActionMonitoringEnabled;
         document.getElementById('login-action-mode').value = settings.loginActionMode || 'manual';
