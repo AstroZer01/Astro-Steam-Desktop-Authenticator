@@ -22,6 +22,7 @@ namespace Steam_Desktop_Authenticator
         public bool Canceled = false;
         private bool userClosed = true;
         internal bool IsPasswordMasked { get; }
+        internal bool LoadFailed { get; private set; }
 
         public InputForm(string label, bool password = false)
             : this(label, password, initializeModernUi: true)
@@ -147,8 +148,35 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        internal void DisableNativeFallbackControls()
+        {
+            this.AcceptButton = null;
+            this.CancelButton = null;
+            this.txtBox.Enabled = false;
+            this.btnAccept.Enabled = false;
+            this.btnCancel.Enabled = false;
+        }
+
+        private void MarkModernUiLoadFailed(Panel loadingPanel, Label lblLoading)
+        {
+            this.LoadFailed = true;
+            if (!IsDisposed && !Disposing)
+            {
+                if (webView != null)
+                    webView.Visible = false;
+                if (lblLoading != null)
+                    lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                if (loadingPanel != null)
+                {
+                    loadingPanel.Visible = true;
+                    loadingPanel.BringToFront();
+                }
+            }
+        }
+
         private async void SetupModernUI(string label, bool isPassword)
         {
+            DisableNativeFallbackControls();
             this.Size = new Size(400, 300);
             this.MinimumSize = new Size(400, 100);
             this.MaximumSize = new Size(400, 1000);
@@ -178,8 +206,7 @@ namespace Steam_Desktop_Authenticator
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Input UI", ex, "The WebView2 input dialog could not be initialized.");
-                if (!IsDisposed && !Disposing)
-                    lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                MarkModernUiLoadFailed(loadingPanel, lblLoading);
                 return;
             }
 
@@ -230,6 +257,8 @@ namespace Steam_Desktop_Authenticator
 
                 if (action == "accept")
                 {
+                    if (LoadFailed || webView == null || !webView.Visible)
+                        return;
                     if (payload["value"]?.Type != JTokenType.String)
                         return;
                     string value = (string)payload["value"];
@@ -259,14 +288,12 @@ namespace Steam_Desktop_Authenticator
                     return;
                 if (!args.IsSuccess)
                 {
-                    if (!IsDisposed && !Disposing)
-                        lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                    MarkModernUiLoadFailed(loadingPanel, lblLoading);
                     return;
                 }
                 if (!WebViewSecurityPolicy.IsTrustedLocalDocument(webView.CoreWebView2.Source, htmlPath))
                 {
-                    if (!IsDisposed && !Disposing)
-                        lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                    MarkModernUiLoadFailed(loadingPanel, lblLoading);
                     DiagnosticErrorLogger.Log(
                         "Input UI",
                         new InvalidOperationException("WebView2 completed navigation to an untrusted document."),
@@ -281,10 +308,11 @@ namespace Steam_Desktop_Authenticator
                     return;
                 if (!setupSucceeded)
                 {
-                    lblLoading.Text = "Input UI could not be loaded. Restore the complete release folder and try again.";
+                    MarkModernUiLoadFailed(loadingPanel, lblLoading);
                     return;
                 }
 
+                this.LoadFailed = false;
                 loadingPanel.Visible = false;
                 foreach (Control c in this.Controls)
                 {

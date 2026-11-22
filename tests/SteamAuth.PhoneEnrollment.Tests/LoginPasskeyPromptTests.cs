@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Xunit;
 
@@ -165,7 +166,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 prompt =>
                 {
                     capturedPrompt = prompt;
-                    return "first-account-passkey";
+                    return (Manifest.SetupPassKeyStatus.Set, "first-account-passkey");
                 },
                 (_, _) => throw new InvalidOperationException("Current passkey prompt should not run on an empty manifest."),
                 _ => throw new InvalidOperationException("Error message should not show on an empty manifest."),
@@ -174,6 +175,40 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(resolved);
             Assert.Equal("first-account-passkey", resolvedPassKey);
             Assert.Equal(LoginForm.SetupPassKeyPromptLabel, capturedPrompt);
+        }
+
+        [Fact]
+        public void TryResolveManifestPassKey_AbortsEmptyVaultEnrollmentWhenSetupFails()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+
+            bool resolved = LoginForm.TryResolveManifestPassKey(
+                manifest,
+                null,
+                _ => (Manifest.SetupPassKeyStatus.Failed, null),
+                (_, _) => throw new InvalidOperationException("Current passkey prompt should not run on an empty manifest."),
+                _ => throw new InvalidOperationException("Invalid passkey error should not run on an empty manifest."),
+                out string resolvedPassKey);
+
+            Assert.False(resolved);
+            Assert.Null(resolvedPassKey);
+        }
+
+        [Fact]
+        public void TryResolveManifestPassKey_AllowsPlaintextOnlyWhenUserExplicitlyDeclinesEncryption()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+
+            bool resolved = LoginForm.TryResolveManifestPassKey(
+                manifest,
+                null,
+                _ => (Manifest.SetupPassKeyStatus.DeclinedUnencrypted, null),
+                (_, _) => throw new InvalidOperationException("Current passkey prompt should not run on an empty manifest."),
+                _ => throw new InvalidOperationException("Invalid passkey error should not run on an empty manifest."),
+                out string resolvedPassKey);
+
+            Assert.True(resolved);
+            Assert.Null(resolvedPassKey);
         }
 
         [Fact]
@@ -302,24 +337,64 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public void MainForm_AdoptResolvedPassKeyUpdatesStaleKeyForSubsequentReloads()
+        public async Task MainForm_PromptRefreshLoginAsyncForwardsPassKeyAndAdoptsResolvedKeyOnSuccess()
         {
+            const string stalePassKey = "stale-passkey";
             const string correctedPassKey = "corrected-refresh-passkey";
             Manifest manifest = CreateEncryptedManifestWithAccount(correctedPassKey);
+            SteamGuardAccount account = manifest.GetAllAccounts(correctedPassKey)[0];
+            string forwardedPassKey = null;
 
             using (MainForm form = new MainForm(
                 manifest,
                 new UpdatePreferenceRevisionTracker(),
                 null,
-                _ => { }))
+                _ => { },
+                showRefreshLoginDialog: (targetAccount, currentPassKey) =>
+                {
+                    Assert.Same(account, targetAccount);
+                    forwardedPassKey = currentPassKey;
+                    return (true, correctedPassKey);
+                }))
             {
-                form.SetEncryptionKey("stale-passkey");
-                form.AdoptResolvedPassKey(correctedPassKey);
+                form.SetEncryptionKey(stalePassKey);
+                bool succeeded = await InvokePrivateAsyncMethod<bool>(form, "PromptRefreshLoginAsync", account);
 
+                Assert.True(succeeded);
+                Assert.Equal(stalePassKey, forwardedPassKey);
                 Assert.Equal(correctedPassKey, GetPrivateField<string>(form, "passKey"));
                 InvokePrivateMethod(form, "loadAccountsList", new object[] { null });
                 SteamGuardAccount[] loaded = GetPrivateField<SteamGuardAccount[]>(form, "allAccounts");
                 Assert.Single(loaded);
+            }
+        }
+
+        [Fact]
+        public async Task MainForm_PromptRefreshLoginAsyncDoesNotOverwritePassKeyOnFailure()
+        {
+            const string activePassKey = "active-refresh-passkey";
+            Manifest manifest = CreateEncryptedManifestWithAccount(activePassKey);
+            SteamGuardAccount account = manifest.GetAllAccounts(activePassKey)[0];
+            string forwardedPassKey = null;
+
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                showRefreshLoginDialog: (targetAccount, currentPassKey) =>
+                {
+                    Assert.Same(account, targetAccount);
+                    forwardedPassKey = currentPassKey;
+                    return (false, "unexpected-passkey");
+                }))
+            {
+                form.SetEncryptionKey(activePassKey);
+                bool succeeded = await InvokePrivateAsyncMethod<bool>(form, "PromptRefreshLoginAsync", account);
+
+                Assert.False(succeeded);
+                Assert.Equal(activePassKey, forwardedPassKey);
+                Assert.Equal(activePassKey, GetPrivateField<string>(form, "passKey"));
             }
         }
 
@@ -331,6 +406,13 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.True(form.IsPasswordMasked);
                 Assert.Equal('*', form.txtBox.PasswordChar);
                 Assert.Equal(LoginForm.CurrentPassKeyPromptLabel, GetPrivateField<Label>(form, "labelText").Text);
+
+                form.DisableNativeFallbackControls();
+                Assert.Null(form.AcceptButton);
+                Assert.Null(form.CancelButton);
+                Assert.False(form.txtBox.Enabled);
+                Assert.False(GetPrivateField<Button>(form, "btnAccept").Enabled);
+                Assert.False(GetPrivateField<Button>(form, "btnCancel").Enabled);
             }
         }
 
@@ -376,22 +458,80 @@ namespace SteamAuth.PhoneEnrollment.Tests
             List<(string Label, bool IsPassword)> prompts = new List<(string, bool)>();
             List<string> messages = new List<string>();
 
-            string passKey = manifest.PromptSetupPassKey(
+            Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
                 LoginForm.SetupPassKeyPromptLabel,
                 commitImmediately: false,
                 (label, isPassword) =>
                 {
                     prompts.Add((label, isPassword));
-                    return (false, "deferred-passkey");
+                    return (false, "deferred-passkey", false);
                 },
-                message => messages.Add(message));
+                message => messages.Add(message),
+                out string passKey);
 
+            Assert.Equal(Manifest.SetupPassKeyStatus.Set, status);
             Assert.Equal("deferred-passkey", passKey);
             Assert.False(manifest.Encrypted);
             Assert.Empty(messages);
             Assert.Equal(2, prompts.Count);
             Assert.All(prompts, prompt => Assert.True(prompt.IsPassword));
             Assert.False(File.Exists(manifestPath));
+        }
+
+        [Theory]
+        [InlineData(true, false)]
+        [InlineData(false, true)]
+        public void TryPromptSetupPassKey_ReturnsFailedWhenPromptFailsToLoad(bool initialLoadFailed, bool confirmLoadFailed)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            int promptIndex = 0;
+            List<string> messages = new List<string>();
+
+            Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                LoginForm.SetupPassKeyPromptLabel,
+                commitImmediately: false,
+                (_, isPassword) =>
+                {
+                    Assert.True(isPassword);
+                    promptIndex++;
+                    if (promptIndex == 1)
+                        return initialLoadFailed ? (true, string.Empty, true) : (false, "valid-passkey", false);
+
+                    return confirmLoadFailed ? (true, string.Empty, true) : (false, "valid-passkey", false);
+                },
+                message => messages.Add(message),
+                out string passKey);
+
+            Assert.Equal(Manifest.SetupPassKeyStatus.Failed, status);
+            Assert.Null(passKey);
+            Assert.False(manifest.Encrypted);
+            string message = Assert.Single(messages);
+            Assert.DoesNotContain("WARNING: You chose to not encrypt", message);
+        }
+
+        [Fact]
+        public void TryPromptSetupPassKey_ReturnsFailedWhenConfirmationDoesNotMatch()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            int promptIndex = 0;
+            List<string> messages = new List<string>();
+
+            Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                LoginForm.SetupPassKeyPromptLabel,
+                commitImmediately: false,
+                (_, _) =>
+                {
+                    promptIndex++;
+                    return promptIndex == 1
+                        ? (false, "passkey-one", false)
+                        : (false, "passkey-two", false);
+                },
+                message => messages.Add(message),
+                out string passKey);
+
+            Assert.Equal(Manifest.SetupPassKeyStatus.Failed, status);
+            Assert.Null(passKey);
+            Assert.Equal("Passkeys do not match.", Assert.Single(messages));
         }
 
         [Fact]
@@ -446,6 +586,13 @@ namespace SteamAuth.PhoneEnrollment.Tests
             MethodInfo method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.NotNull(method);
             method.Invoke(target, arguments);
+        }
+
+        private static Task<T> InvokePrivateAsyncMethod<T>(object target, string methodName, params object[] arguments)
+        {
+            MethodInfo method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            return (Task<T>)method.Invoke(target, arguments);
         }
 
         private static T GetPrivateField<T>(object target, string fieldName)

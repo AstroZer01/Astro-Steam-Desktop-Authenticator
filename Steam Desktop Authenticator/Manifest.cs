@@ -367,6 +367,13 @@ namespace Steam_Desktop_Authenticator
             return passKey;
         }
 
+        internal enum SetupPassKeyStatus
+        {
+            Set,
+            DeclinedUnencrypted,
+            Failed
+        }
+
         public string PromptSetupPassKey(string initialPrompt = "Enter passkey, or hit cancel to remain unencrypted.")
         {
             return PromptSetupPassKey(initialPrompt, commitImmediately: true);
@@ -374,7 +381,13 @@ namespace Steam_Desktop_Authenticator
 
         internal string PromptSetupPassKey(string initialPrompt, bool commitImmediately)
         {
-            return PromptSetupPassKey(
+            TryPromptSetupPassKey(initialPrompt, commitImmediately, out string passKey);
+            return passKey;
+        }
+
+        internal SetupPassKeyStatus TryPromptSetupPassKey(string initialPrompt, bool commitImmediately, out string passKey)
+        {
+            return TryPromptSetupPassKey(
                 initialPrompt,
                 commitImmediately,
                 (promptLabel, isPassword) =>
@@ -382,37 +395,51 @@ namespace Steam_Desktop_Authenticator
                     using (InputForm passKeyForm = new InputForm(promptLabel, isPassword))
                     {
                         passKeyForm.ShowInputDialog();
-                        return (passKeyForm.Canceled, passKeyForm.txtBox.Text);
+                        return (passKeyForm.Canceled, passKeyForm.txtBox.Text, passKeyForm.LoadFailed);
                     }
                 },
-                message => AstroMessageBox.Show(message));
+                message => AstroMessageBox.Show(message),
+                out passKey);
         }
 
-        internal string PromptSetupPassKey(
+        internal SetupPassKeyStatus TryPromptSetupPassKey(
             string initialPrompt,
             bool commitImmediately,
-            Func<string, bool, (bool Canceled, string Value)> promptForPassKey,
-            Action<string> showMessage)
+            Func<string, bool, (bool Canceled, string Value, bool LoadFailed)> promptForPassKey,
+            Action<string> showMessage,
+            out string passKey)
         {
             if (promptForPassKey == null)
                 throw new ArgumentNullException(nameof(promptForPassKey));
             if (showMessage == null)
                 throw new ArgumentNullException(nameof(showMessage));
 
-            (bool Canceled, string Value) initialResponse = promptForPassKey(initialPrompt, true);
+            passKey = null;
+
+            (bool Canceled, string Value, bool LoadFailed) initialResponse = promptForPassKey(initialPrompt, true);
+            if (initialResponse.LoadFailed)
+            {
+                showMessage("The passkey prompt could not be loaded. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
+            }
             if (initialResponse.Canceled || String.IsNullOrEmpty(initialResponse.Value))
             {
                 showMessage("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
-                return null;
+                return SetupPassKeyStatus.DeclinedUnencrypted;
             }
 
             string newPassKey = initialResponse.Value;
 
-            (bool Canceled, string Value) confirmResponse = promptForPassKey("Confirm new passkey.", true);
+            (bool Canceled, string Value, bool LoadFailed) confirmResponse = promptForPassKey("Confirm new passkey.", true);
+            if (confirmResponse.LoadFailed)
+            {
+                showMessage("The passkey confirmation prompt could not be loaded. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
+            }
             if (confirmResponse.Canceled)
             {
                 showMessage("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
-                return null;
+                return SetupPassKeyStatus.DeclinedUnencrypted;
             }
 
             string confirmPassKey = confirmResponse.Value;
@@ -420,12 +447,13 @@ namespace Steam_Desktop_Authenticator
             if (newPassKey != confirmPassKey)
             {
                 showMessage("Passkeys do not match.");
-                return null;
+                return SetupPassKeyStatus.Failed;
             }
 
             if (!commitImmediately)
             {
-                return newPassKey;
+                passKey = newPassKey;
+                return SetupPassKeyStatus.Set;
             }
 
             StorageResult encryptionResult = this.ChangeEncryptionKey(null, newPassKey);
@@ -433,14 +461,15 @@ namespace Steam_Desktop_Authenticator
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", encryptionResult.Exception, "Setting an encryption passkey failed.");
                 showMessage(encryptionResult.UserMessage ?? "Unable to set passkey.");
-                return null;
+                return SetupPassKeyStatus.Failed;
             }
             else
             {
                 showMessage("Passkey successfully set.");
             }
 
-            return newPassKey;
+            passKey = newPassKey;
+            return SetupPassKeyStatus.Set;
         }
 
         public SteamAuth.SteamGuardAccount[] GetAllAccounts(string passKey = null, int limit = -1)

@@ -815,7 +815,11 @@ namespace Steam_Desktop_Authenticator
             return TryResolveManifestPassKey(
                 manifest,
                 currentPassKey,
-                prompt => manifest.PromptSetupPassKey(prompt, commitImmediately: false),
+                prompt =>
+                {
+                    Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(prompt, commitImmediately: false, out string passKey);
+                    return (status, passKey);
+                },
                 PromptForCurrentPassKey,
                 message => AstroMessageBox.Show(message, "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error),
                 out resolvedPassKey);
@@ -833,14 +837,14 @@ namespace Steam_Desktop_Authenticator
                 : new InputForm(promptLabel, false))
             {
                 passKeyForm.ShowInputDialog(this);
-                return (passKeyForm.Canceled, passKeyForm.txtBox.Text);
+                return (passKeyForm.Canceled || passKeyForm.LoadFailed, passKeyForm.txtBox.Text);
             }
         }
 
         internal static bool TryResolveManifestPassKey(
             Manifest manifest,
             string suppliedPassKey,
-            Func<string, string> promptSetupPassKey,
+            Func<string, (Manifest.SetupPassKeyStatus Status, string PassKey)> promptSetupPassKey,
             Func<string, bool, (bool Canceled, string Value)> promptCurrentPassKey,
             Action<string> showInvalidPassKeyMessage,
             out string resolvedPassKey)
@@ -857,7 +861,11 @@ namespace Steam_Desktop_Authenticator
             resolvedPassKey = null;
             if (manifest.Entries.Count == 0)
             {
-                resolvedPassKey = promptSetupPassKey(SetupPassKeyPromptLabel);
+                (Manifest.SetupPassKeyStatus status, string setupPassKey) = promptSetupPassKey(SetupPassKeyPromptLabel);
+                if (status == Manifest.SetupPassKeyStatus.Failed)
+                    return false;
+
+                resolvedPassKey = status == Manifest.SetupPassKeyStatus.Set ? setupPassKey : null;
                 return true;
             }
 

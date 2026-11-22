@@ -102,6 +102,7 @@ namespace Steam_Desktop_Authenticator
         private readonly Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate;
         private readonly Func<bool, string, string, Task> publishUpdateCheckStateAsync;
         private readonly Func<string, string> showAddAccountLoginDialog;
+        private readonly Func<SteamGuardAccount, string, (bool Succeeded, string ResolvedPassKey)> showRefreshLoginDialog;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -506,7 +507,8 @@ namespace Steam_Desktop_Authenticator
             Func<string, DialogResult> confirmAutomaticLoginAction = null,
             Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate = null,
             Func<bool, string, string, Task> publishUpdateCheckStateAsync = null,
-            Func<string, string> showAddAccountLoginDialog = null)
+            Func<string, string> showAddAccountLoginDialog = null,
+            Func<SteamGuardAccount, string, (bool Succeeded, string ResolvedPassKey)> showRefreshLoginDialog = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
@@ -521,6 +523,7 @@ namespace Steam_Desktop_Authenticator
             this.promptForUpdate = promptForUpdate ?? ShowUpdateAvailablePrompt;
             this.publishUpdateCheckStateAsync = publishUpdateCheckStateAsync;
             this.showAddAccountLoginDialog = showAddAccountLoginDialog ?? ShowAddAccountLoginDialog;
+            this.showRefreshLoginDialog = showRefreshLoginDialog ?? ShowRefreshLoginDialog;
         }
 
         private string ShowAddAccountLoginDialog(string currentPassKey)
@@ -529,6 +532,15 @@ namespace Steam_Desktop_Authenticator
             {
                 loginForm.ShowDialog(this);
                 return loginForm.ResolvedPassKey;
+            }
+        }
+
+        private (bool Succeeded, string ResolvedPassKey) ShowRefreshLoginDialog(SteamGuardAccount account, string currentPassKey)
+        {
+            using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Refresh, account, currentPassKey))
+            {
+                loginForm.ShowDialog(this);
+                return (loginForm.RefreshSucceeded, loginForm.ResolvedPassKey);
             }
         }
 
@@ -3052,21 +3064,17 @@ namespace Steam_Desktop_Authenticator
 
             return await RunSteamAccountOperationAsync(account, () =>
             {
-                using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Refresh, account, passKey))
+                (bool succeeded, string resolvedPassKey) = showRefreshLoginDialog(account, passKey);
+                if (succeeded)
                 {
-                    loginForm.ShowDialog(this);
-                    bool succeeded = loginForm.RefreshSucceeded;
-                    if (succeeded)
-                    {
-                        AdoptResolvedPassKey(loginForm.ResolvedPassKey);
-                    }
-                    if (succeeded && account.Session != null)
-                    {
-                        ClearSessionRecoveryState(account);
-                        InvalidateTradeConfirmationCache(account);
-                    }
-                    return Task.FromResult(succeeded);
+                    AdoptResolvedPassKey(resolvedPassKey);
                 }
+                if (succeeded && account.Session != null)
+                {
+                    ClearSessionRecoveryState(account);
+                    InvalidateTradeConfirmationCache(account);
+                }
+                return Task.FromResult(succeeded);
             });
         }
 
