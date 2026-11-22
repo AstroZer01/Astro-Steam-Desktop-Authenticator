@@ -376,13 +376,14 @@ namespace Steam_Desktop_Authenticator
 
         internal readonly struct PassKeyPromptResult
         {
-            public PassKeyPromptResult(bool canceled, string value, bool uiReady, bool loadFailed, bool accepted)
+            public PassKeyPromptResult(bool canceled, string value, bool uiReady, bool loadFailed, bool accepted, bool explicitCancel = false)
             {
                 Canceled = canceled;
                 Value = value;
                 UiReady = uiReady;
                 LoadFailed = loadFailed;
                 Accepted = accepted;
+                ExplicitCancel = explicitCancel;
             }
 
             public bool Canceled { get; }
@@ -390,6 +391,7 @@ namespace Steam_Desktop_Authenticator
             public bool UiReady { get; }
             public bool LoadFailed { get; }
             public bool Accepted { get; }
+            public bool ExplicitCancel { get; }
         }
 
         public string PromptSetupPassKey(string initialPrompt = "Enter passkey, or hit cancel to remain unencrypted.")
@@ -445,10 +447,15 @@ namespace Steam_Desktop_Authenticator
                 showMessage("The passkey prompt closed before it finished loading. No encryption changes were applied.");
                 return SetupPassKeyStatus.Failed;
             }
-            if (initialResponse.Canceled || String.IsNullOrEmpty(initialResponse.Value))
+            if (initialResponse.ExplicitCancel || (initialResponse.Accepted && String.IsNullOrEmpty(initialResponse.Value)))
             {
                 showMessage("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
                 return SetupPassKeyStatus.DeclinedUnencrypted;
+            }
+            if (!initialResponse.Accepted || initialResponse.Canceled || String.IsNullOrEmpty(initialResponse.Value))
+            {
+                showMessage("Passkey setup was closed before an option was selected. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
             }
 
             string newPassKey = initialResponse.Value;
@@ -464,7 +471,7 @@ namespace Steam_Desktop_Authenticator
                 showMessage("The passkey confirmation prompt closed before it finished loading. No encryption changes were applied.");
                 return SetupPassKeyStatus.Failed;
             }
-            if (confirmResponse.Canceled && !confirmResponse.Accepted)
+            if (!confirmResponse.Accepted)
             {
                 showMessage("Passkey setup was canceled. No encryption changes were applied.");
                 return SetupPassKeyStatus.Failed;

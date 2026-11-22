@@ -25,6 +25,7 @@ namespace Steam_Desktop_Authenticator
         private ulong? activeNavigationId;
         internal bool IsPasswordMasked { get; }
         internal bool Accepted { get; private set; }
+        internal bool ExplicitCancel { get; private set; }
         internal bool UiReady { get; private set; }
         internal bool LoadFailed { get; private set; }
 
@@ -283,6 +284,11 @@ namespace Steam_Desktop_Authenticator
             btnCancel_Click(this, EventArgs.Empty);
         }
 
+        internal void SimulateWindowClose()
+        {
+            InputForm_FormClosing(this, new FormClosingEventArgs(CloseReason.UserClosing, cancel: false));
+        }
+
         internal Manifest.PassKeyPromptResult ToPassKeyPromptResult()
         {
             return new Manifest.PassKeyPromptResult(
@@ -290,7 +296,8 @@ namespace Steam_Desktop_Authenticator
                 value: this.txtBox.Text,
                 uiReady: this.UiReady,
                 loadFailed: this.LoadFailed,
-                accepted: this.Accepted);
+                accepted: this.Accepted,
+                explicitCancel: this.ExplicitCancel);
         }
 
         private async void SetupModernUI(string label, bool isPassword)
@@ -468,6 +475,7 @@ namespace Steam_Desktop_Authenticator
         private void btnAccept_Click(object sender, EventArgs e)
         {
             this.Accepted = true;
+            this.ExplicitCancel = false;
             if (string.IsNullOrEmpty(this.txtBox.Text))
             {
                 this.Canceled = true;
@@ -485,6 +493,7 @@ namespace Steam_Desktop_Authenticator
         private void btnCancel_Click(object sender, EventArgs e)
         {
             this.Accepted = false;
+            this.ExplicitCancel = true;
             this.Canceled = true;
             this.userClosed = false;
             this.Close();
@@ -496,6 +505,7 @@ namespace Steam_Desktop_Authenticator
             {
                 // Set Canceled = true when the user hits the X button.
                 this.Accepted = false;
+                this.ExplicitCancel = false;
                 this.Canceled = true;
             }
         }

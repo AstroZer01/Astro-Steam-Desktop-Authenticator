@@ -559,8 +559,10 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
-        [Fact]
-        public void TryPromptSetupPassKey_AbortsInsteadOfPlaintextWhenReadyPromptCrashesThenCloses()
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void TryPromptSetupPassKey_AbortsInsteadOfPlaintextWhenReadyPromptCrashesOrWindowCloses(bool failureReportedBeforeClose)
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
             List<string> messages = new List<string>();
@@ -582,9 +584,17 @@ namespace SteamAuth.PhoneEnrollment.Tests
                                 Assert.True(form.TryHandleNavigationCompletedResult(1, gen1, succeeded: true));
                                 Assert.True(form.UiReady);
 
-                                // Simulate WebView2 renderer exit after prompt became ready, then user closing the dialog.
-                                Assert.True(form.HandleModernUiProcessFailed(CoreWebView2ProcessFailedKind.RenderProcessExited));
-                                form.Canceled = true;
+                                if (failureReportedBeforeClose)
+                                {
+                                    Assert.True(form.HandleModernUiProcessFailed(CoreWebView2ProcessFailedKind.RenderProcessExited));
+                                    form.SimulateWindowClose();
+                                }
+                                else
+                                {
+                                    // User closes the native window before WebView2 delivers ProcessFailed.
+                                    form.SimulateWindowClose();
+                                }
+
                                 return form.ToPassKeyPromptResult();
                             }
                         },
@@ -604,7 +614,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public void InputForm_DistinguishesBlankAcceptFromCancel()
+        public void InputForm_DistinguishesBlankAcceptExplicitCancelAndWindowClose()
         {
             using (InputForm blankAcceptForm = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
             {
@@ -612,6 +622,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Manifest.PassKeyPromptResult result = blankAcceptForm.ToPassKeyPromptResult();
                 Assert.True(result.Canceled);
                 Assert.True(result.Accepted);
+                Assert.False(result.ExplicitCancel);
                 Assert.True(result.UiReady);
                 Assert.False(result.LoadFailed);
                 Assert.Equal(string.Empty, result.Value);
@@ -623,6 +634,18 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Manifest.PassKeyPromptResult result = canceledForm.ToPassKeyPromptResult();
                 Assert.True(result.Canceled);
                 Assert.False(result.Accepted);
+                Assert.True(result.ExplicitCancel);
+                Assert.True(result.UiReady);
+                Assert.False(result.LoadFailed);
+            }
+
+            using (InputForm windowClosedForm = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
+            {
+                windowClosedForm.SimulateWindowClose();
+                Manifest.PassKeyPromptResult result = windowClosedForm.ToPassKeyPromptResult();
+                Assert.True(result.Canceled);
+                Assert.False(result.Accepted);
+                Assert.False(result.ExplicitCancel);
                 Assert.True(result.UiReady);
                 Assert.False(result.LoadFailed);
             }
@@ -633,6 +656,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Manifest.PassKeyPromptResult result = acceptedForm.ToPassKeyPromptResult();
                 Assert.False(result.Canceled);
                 Assert.True(result.Accepted);
+                Assert.False(result.ExplicitCancel);
                 Assert.True(result.UiReady);
                 Assert.False(result.LoadFailed);
                 Assert.Equal("secret-passkey", result.Value);
