@@ -240,12 +240,36 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        internal void MarkModernUiLoadFailed(Panel loadingPanel = null, Label lblLoading = null)
+        internal static bool IsTerminalProcessFailure(CoreWebView2ProcessFailedKind failureKind)
+        {
+            return failureKind == CoreWebView2ProcessFailedKind.BrowserProcessExited ||
+                failureKind == CoreWebView2ProcessFailedKind.RenderProcessExited ||
+                failureKind == CoreWebView2ProcessFailedKind.RenderProcessUnresponsive;
+        }
+
+        internal bool HandleModernUiProcessFailed(CoreWebView2ProcessFailedKind failureKind, Panel loadingPanel = null, Label lblLoading = null)
+        {
+            if (!IsTerminalProcessFailure(failureKind))
+                return false;
+
+            DiagnosticErrorLogger.Log(
+                "Input UI",
+                new InvalidOperationException("The WebView2 input process failed (" + failureKind + ")."),
+                "The WebView2 input dialog process ended unexpectedly.");
+            MarkModernUiLoadFailed(loadingPanel, lblLoading, "The input UI stopped responding. Close this window and try again.");
+            return true;
+        }
+
+        internal void MarkModernUiLoadFailed(
+            Panel loadingPanel = null,
+            Label lblLoading = null,
+            string failureMessage = "Input UI could not be loaded. Restore the complete release folder and try again.")
         {
             activeNavigationId = null;
+            navigationGeneration++;
             this.UiReady = false;
             this.LoadFailed = true;
-            ShowLoadingState(loadingPanel, lblLoading, "Input UI could not be loaded. Restore the complete release folder and try again.");
+            ShowLoadingState(loadingPanel, lblLoading, failureMessage);
         }
 
         internal void SubmitInput(string value)
@@ -319,6 +343,14 @@ namespace Steam_Desktop_Authenticator
 
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+            webView.CoreWebView2.ProcessFailed += (sender, args) =>
+            {
+                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested)
+                    return;
+
+                HandleModernUiProcessFailed(args.ProcessFailedKind, loadingPanel, lblLoading);
+            };
 
             webView.NavigationStarting += (sender, args) =>
             {

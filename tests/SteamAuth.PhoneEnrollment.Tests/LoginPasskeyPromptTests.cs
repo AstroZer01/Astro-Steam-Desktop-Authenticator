@@ -1,3 +1,4 @@
+using Microsoft.Web.WebView2.Core;
 using Steam_Desktop_Authenticator;
 using SteamAuth;
 using System;
@@ -512,6 +513,94 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.True(form.UiReady);
                 Assert.False(form.LoadFailed);
             }
+        }
+
+        [Theory]
+        [InlineData(CoreWebView2ProcessFailedKind.RenderProcessExited)]
+        [InlineData(CoreWebView2ProcessFailedKind.BrowserProcessExited)]
+        [InlineData(CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)]
+        public void InputForm_TerminalProcessFailureClearsReadinessAndFailsClosed(CoreWebView2ProcessFailedKind failureKind)
+        {
+            using (InputForm form = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
+            {
+                form.BeginModernUiNavigation(navigationId: 5);
+                Assert.True(form.ShouldHandleNavigationCompleted(5, out int gen5));
+                Assert.True(form.TryHandleNavigationCompletedResult(5, gen5, succeeded: true));
+                Assert.True(form.UiReady);
+                Assert.False(form.LoadFailed);
+
+                Assert.True(form.HandleModernUiProcessFailed(failureKind));
+                Assert.False(form.UiReady);
+                Assert.True(form.LoadFailed);
+                Assert.False(form.CanAcceptWebMessage(isWebViewVisible: true));
+
+                // Late setup completion for the crashed navigation must not restore readiness.
+                Assert.False(form.TryHandleNavigationCompletedResult(5, gen5, succeeded: true));
+                Assert.False(form.UiReady);
+                Assert.True(form.LoadFailed);
+            }
+        }
+
+        [Theory]
+        [InlineData(CoreWebView2ProcessFailedKind.GpuProcessExited)]
+        [InlineData(CoreWebView2ProcessFailedKind.UtilityProcessExited)]
+        public void InputForm_NonTerminalProcessFailureKeepsReadyPromptUsable(CoreWebView2ProcessFailedKind failureKind)
+        {
+            using (InputForm form = LoginForm.CreateCurrentPassKeyPrompt(initializeModernUi: false))
+            {
+                form.BeginModernUiNavigation(navigationId: 6);
+                Assert.True(form.ShouldHandleNavigationCompleted(6, out int gen6));
+                Assert.True(form.TryHandleNavigationCompletedResult(6, gen6, succeeded: true));
+
+                Assert.False(form.HandleModernUiProcessFailed(failureKind));
+                Assert.True(form.UiReady);
+                Assert.False(form.LoadFailed);
+                Assert.True(form.CanAcceptWebMessage(isWebViewVisible: true));
+            }
+        }
+
+        [Fact]
+        public void TryPromptSetupPassKey_AbortsInsteadOfPlaintextWhenReadyPromptCrashesThenCloses()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            List<string> messages = new List<string>();
+
+            bool resolved = LoginForm.TryResolveManifestPassKey(
+                manifest,
+                null,
+                prompt =>
+                {
+                    Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                        prompt,
+                        commitImmediately: false,
+                        (label, isPassword) =>
+                        {
+                            using (InputForm form = new InputForm(label, isPassword, initializeModernUi: false))
+                            {
+                                form.BeginModernUiNavigation(navigationId: 1);
+                                Assert.True(form.ShouldHandleNavigationCompleted(1, out int gen1));
+                                Assert.True(form.TryHandleNavigationCompletedResult(1, gen1, succeeded: true));
+                                Assert.True(form.UiReady);
+
+                                // Simulate WebView2 renderer exit after prompt became ready, then user closing the dialog.
+                                Assert.True(form.HandleModernUiProcessFailed(CoreWebView2ProcessFailedKind.RenderProcessExited));
+                                form.Canceled = true;
+                                return form.ToPassKeyPromptResult();
+                            }
+                        },
+                        message => messages.Add(message),
+                        out string setupPassKey);
+                    return (status, setupPassKey);
+                },
+                (_, _) => throw new InvalidOperationException("Current passkey prompt should not run on an empty manifest."),
+                _ => throw new InvalidOperationException("Invalid passkey error should not run on an empty manifest."),
+                out string resolvedPassKey);
+
+            Assert.False(resolved);
+            Assert.Null(resolvedPassKey);
+            Assert.False(manifest.Encrypted);
+            string message = Assert.Single(messages);
+            Assert.DoesNotContain("WARNING: You chose to not encrypt", message);
         }
 
         [Fact]
