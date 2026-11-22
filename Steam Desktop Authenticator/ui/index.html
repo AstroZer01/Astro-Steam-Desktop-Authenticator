@@ -394,6 +394,55 @@
     </div>
 </div>
 
+<div id="account-options-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-xs p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="account-options-title">
+    <div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-xl border border-white/10 bg-surface-container shadow-2xl p-5 space-y-4">
+        <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+                <h2 id="account-options-title" class="font-semibold text-on-surface truncate">Account options</h2>
+                <p id="account-options-subtitle" class="text-xs text-on-surface-variant mt-1 truncate"></p>
+            </div>
+            <button id="btn-close-account-options" type="button" class="shrink-0 p-1 rounded-sm hover:bg-surface-variant text-on-surface-variant" aria-label="Close account options">
+                <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+            </button>
+        </div>
+
+        <div id="account-options-health" class="rounded-lg border border-white/10 bg-surface-container-low px-3 py-2 text-xs text-on-surface-variant"></div>
+
+        <div class="space-y-3 border-t border-white/10 pt-3">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-on-surface-variant">Confirmation Monitoring</h3>
+            <label class="flex items-center justify-between gap-3 text-sm text-on-surface cursor-pointer">
+                <span>Use custom confirmation settings</span>
+                <input id="acct-opt-override" type="checkbox" class="rounded-sm bg-surface-variant border-white/20 text-primary focus:ring-primary">
+            </label>
+            <div id="acct-opt-override-fields" class="space-y-3 pl-3 border-l border-white/10">
+                <label class="flex items-center justify-between gap-3 text-sm text-on-surface cursor-pointer">
+                    <span>Auto-confirm trades</span>
+                    <input id="acct-opt-auto-trades" type="checkbox" class="rounded-sm bg-surface-variant border-white/20 text-primary focus:ring-primary">
+                </label>
+                <label class="flex items-center justify-between gap-3 text-sm text-on-surface cursor-pointer">
+                    <span>Auto-confirm market listings</span>
+                    <input id="acct-opt-auto-market" type="checkbox" class="rounded-sm bg-surface-variant border-white/20 text-primary focus:ring-primary">
+                </label>
+                <div class="flex items-center justify-between gap-3">
+                    <label for="acct-opt-interval" class="text-sm text-on-surface">Check interval (seconds)</label>
+                    <input id="acct-opt-interval" type="number" min="3" max="3600" placeholder="Global" class="w-24 rounded-lg bg-surface-variant border border-white/15 px-2.5 py-1.5 text-sm text-on-surface text-right focus:outline-hidden focus:ring-1 focus:ring-primary">
+                </div>
+                <p class="text-xs text-on-surface-variant">Allowed range: 3 to 3600 seconds. Leave blank to use the global check interval.</p>
+            </div>
+        </div>
+
+        <div id="account-options-password-section" class="hidden space-y-2 border-t border-white/10 pt-3"></div>
+        <div id="account-options-export-section" class="hidden space-y-2 border-t border-white/10 pt-3"></div>
+
+        <p id="account-options-error" class="hidden rounded-lg border border-error/40 bg-error-container/20 px-3 py-2 text-xs text-error"></p>
+
+        <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-2 border-t border-white/10">
+            <button id="btn-cancel-account-options" type="button" class="rounded-lg border border-white/10 px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-variant transition-colors">Close</button>
+            <button id="btn-save-account-options" type="button" class="rounded-lg btn-primary px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed">Save Account Options</button>
+        </div>
+    </div>
+</div>
+
 <script>
     // Tab Switching Logic
     let activeTabId = 'authenticator';
@@ -689,6 +738,22 @@
 
             const accountActions = document.createElement('div');
             accountActions.className = "shrink-0 flex items-center gap-1";
+            const optionsButton = document.createElement('button');
+            optionsButton.type = 'button';
+            optionsButton.disabled = !acc.steamId;
+            optionsButton.className = acc.steamId
+                ? "shrink-0 rounded-sm p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
+                : "shrink-0 rounded-sm p-1 text-on-surface-variant opacity-50 cursor-not-allowed transition-colors";
+            optionsButton.title = "Account options for " + acc.name;
+            optionsButton.setAttribute('aria-label', "Account options for " + acc.name);
+            optionsButton.innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+            optionsButton.onclick = event => {
+                if (optionsButton.disabled) return;
+                event.stopPropagation();
+                openAccountOptionsModal(acc);
+            };
+            accountActions.appendChild(optionsButton);
+
             const renewButton = document.createElement('button');
             renewButton.type = 'button';
             renewButton.disabled = !sessionExpired || !acc.steamId;
@@ -798,6 +863,190 @@
     document.getElementById('btn-cancel-remove-account').addEventListener('click', closeRemoveAccountModal);
     document.getElementById('remove-account-modal').addEventListener('click', event => {
         if (event.target.id === 'remove-account-modal') closeRemoveAccountModal();
+    });
+
+    let accountOptionsTarget = null;
+    let accountOptionsSavePending = false;
+    let accountOptionsEscapeHandler = null;
+    let accountOptionsPreviousFocus = null;
+
+    function syncAccountOptionsOverrideUI() {
+        const overrideEnabled = document.getElementById('acct-opt-override').checked;
+        const fields = document.getElementById('acct-opt-override-fields');
+        fields.classList.toggle('opacity-50', !overrideEnabled);
+        document.getElementById('acct-opt-auto-trades').disabled = !overrideEnabled || accountOptionsSavePending;
+        document.getElementById('acct-opt-auto-market').disabled = !overrideEnabled || accountOptionsSavePending;
+        document.getElementById('acct-opt-interval').disabled = !overrideEnabled || accountOptionsSavePending;
+    }
+
+    function updateAccountOptionsHealthBanner(account) {
+        const healthEl = document.getElementById('account-options-health');
+        if (!healthEl || !account) return;
+        const state = account.healthState || 'idle';
+        if (state === 'warning') {
+            healthEl.className = 'rounded-lg border border-error/40 bg-error-container/20 px-3 py-2 text-xs text-error';
+            healthEl.textContent = account.lastScanError || 'Last background confirmation check failed. Retrying with backoff.';
+        } else if (state === 'ok') {
+            healthEl.className = 'rounded-lg border border-[#4edea3]/30 bg-[#00a572]/15 px-3 py-2 text-xs text-[#4edea3]';
+            healthEl.textContent = 'Confirmation monitor healthy.';
+        } else {
+            healthEl.className = 'rounded-lg border border-white/10 bg-surface-container-low px-3 py-2 text-xs text-on-surface-variant';
+            healthEl.textContent = 'Confirmation monitor waiting for next scheduled check.';
+        }
+    }
+
+    function openAccountOptionsModal(account) {
+        if (!account || !account.steamId) return;
+        accountOptionsPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        accountOptionsTarget = account;
+        accountOptionsSavePending = false;
+
+        document.getElementById('account-options-title').textContent = account.name;
+        document.getElementById('account-options-subtitle').textContent = 'SteamID ' + account.steamId;
+        document.getElementById('acct-opt-override').checked = Boolean(account.autoConfirmOverrideEnabled);
+        document.getElementById('acct-opt-auto-trades').checked = Boolean(account.autoConfirmTrades);
+        document.getElementById('acct-opt-auto-market').checked = Boolean(account.autoConfirmMarket);
+        document.getElementById('acct-opt-interval').value =
+            typeof account.tradeConfirmationCheckInterval === 'number' ? String(account.tradeConfirmationCheckInterval) : '';
+        const err = document.getElementById('account-options-error');
+        err.textContent = '';
+        err.classList.add('hidden');
+        document.getElementById('btn-save-account-options').disabled = false;
+        document.getElementById('acct-opt-override').disabled = false;
+        syncAccountOptionsOverrideUI();
+        updateAccountOptionsHealthBanner(account);
+
+        const modal = document.getElementById('account-options-modal');
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+
+        if (accountOptionsEscapeHandler)
+            document.removeEventListener('keydown', accountOptionsEscapeHandler);
+        accountOptionsEscapeHandler = event => {
+            if (event.key === 'Escape') {
+                if (accountOptionsSavePending) return;
+                event.preventDefault();
+                closeAccountOptionsModal();
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const focusables = Array.from(modal.querySelectorAll('button:not([disabled]), input:not([disabled])'));
+            if (focusables.length === 0) return;
+            const idx = focusables.indexOf(document.activeElement);
+            if (idx === -1) {
+                event.preventDefault();
+                focusables[event.shiftKey ? focusables.length - 1 : 0].focus();
+                return;
+            }
+            const next = event.shiftKey ? idx - 1 : idx + 1;
+            if (next < 0 || next >= focusables.length) {
+                event.preventDefault();
+                focusables[event.shiftKey ? focusables.length - 1 : 0].focus();
+            }
+        };
+        document.addEventListener('keydown', accountOptionsEscapeHandler);
+        document.getElementById('acct-opt-override').focus();
+    }
+
+    function closeAccountOptionsModal() {
+        if (accountOptionsSavePending) return;
+        if (accountOptionsEscapeHandler) {
+            document.removeEventListener('keydown', accountOptionsEscapeHandler);
+            accountOptionsEscapeHandler = null;
+        }
+        accountOptionsTarget = null;
+        const modal = document.getElementById('account-options-modal');
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+        const focusTarget = accountOptionsPreviousFocus;
+        accountOptionsPreviousFocus = null;
+        if (focusTarget && focusTarget.isConnected && !focusTarget.disabled)
+            focusTarget.focus();
+    }
+
+    function saveAccountOptions() {
+        if (!accountOptionsTarget || accountOptionsSavePending) return;
+        const err = document.getElementById('account-options-error');
+        err.textContent = '';
+        err.classList.add('hidden');
+
+        const overrideEnabled = document.getElementById('acct-opt-override').checked;
+        const autoConfirmTrades = document.getElementById('acct-opt-auto-trades').checked;
+        const autoConfirmMarket = document.getElementById('acct-opt-auto-market').checked;
+        const rawInterval = document.getElementById('acct-opt-interval').value.trim();
+        let checkInterval = null;
+        if (rawInterval !== '') {
+            const parsed = Number(rawInterval);
+            if (!Number.isInteger(parsed) || parsed < 3 || parsed > 3600) {
+                err.textContent = 'Check interval must be a whole number between 3 and 3600 seconds.';
+                err.classList.remove('hidden');
+                return;
+            }
+            checkInterval = parsed;
+        }
+
+        accountOptionsSavePending = true;
+        document.getElementById('btn-save-account-options').disabled = true;
+        document.getElementById('acct-opt-override').disabled = true;
+        syncAccountOptionsOverrideUI();
+
+        window.chrome.webview.postMessage({
+            action: 'save_account_settings',
+            steamId: accountOptionsTarget.steamId,
+            overrideEnabled: overrideEnabled,
+            autoConfirmTrades: autoConfirmTrades,
+            autoConfirmMarket: autoConfirmMarket,
+            checkInterval: checkInterval
+        });
+    }
+
+    function updateAccountMetadata(metadata) {
+        if (!metadata || !metadata.steamId) return;
+        const existing = allAccs.find(item => item.steamId === metadata.steamId);
+        if (!existing) return;
+        if (typeof metadata.autoConfirmOverrideEnabled === 'boolean')
+            existing.autoConfirmOverrideEnabled = metadata.autoConfirmOverrideEnabled;
+        if (typeof metadata.autoConfirmTrades === 'boolean')
+            existing.autoConfirmTrades = metadata.autoConfirmTrades;
+        if (typeof metadata.autoConfirmMarket === 'boolean')
+            existing.autoConfirmMarket = metadata.autoConfirmMarket;
+        if ('tradeConfirmationCheckInterval' in metadata)
+            existing.tradeConfirmationCheckInterval = metadata.tradeConfirmationCheckInterval;
+        if (typeof metadata.healthState === 'string')
+            existing.healthState = metadata.healthState;
+        if ('lastScanError' in metadata)
+            existing.lastScanError = metadata.lastScanError;
+        if (accountOptionsTarget && accountOptionsTarget.steamId === metadata.steamId) {
+            updateAccountOptionsHealthBanner(existing);
+        }
+        renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+    }
+
+    function accountSettingsSaved(metadata) {
+        accountOptionsSavePending = false;
+        document.getElementById('btn-save-account-options').disabled = false;
+        document.getElementById('acct-opt-override').disabled = false;
+        syncAccountOptionsOverrideUI();
+        updateAccountMetadata(metadata);
+        closeAccountOptionsModal();
+    }
+
+    function accountSettingsSaveFailed(message) {
+        accountOptionsSavePending = false;
+        document.getElementById('btn-save-account-options').disabled = false;
+        document.getElementById('acct-opt-override').disabled = false;
+        syncAccountOptionsOverrideUI();
+        const err = document.getElementById('account-options-error');
+        err.textContent = message || 'Account options could not be saved.';
+        err.classList.remove('hidden');
+    }
+
+    document.getElementById('acct-opt-override').addEventListener('change', syncAccountOptionsOverrideUI);
+    document.getElementById('btn-close-account-options').addEventListener('click', closeAccountOptionsModal);
+    document.getElementById('btn-cancel-account-options').addEventListener('click', closeAccountOptionsModal);
+    document.getElementById('btn-save-account-options').addEventListener('click', saveAccountOptions);
+    document.getElementById('account-options-modal').addEventListener('click', event => {
+        if (event.target.id === 'account-options-modal' && !accountOptionsSavePending) closeAccountOptionsModal();
     });
 
     document.getElementById('filter-input').addEventListener('input', (e) => {

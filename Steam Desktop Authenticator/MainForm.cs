@@ -63,8 +63,7 @@ namespace Steam_Desktop_Authenticator
         private LoginApprovalService loginApprovalService;
         private Action trayNotificationClickAction;
         private string tradeAccountSelection = "all";
-        private readonly object tradeRateLimitLock = new object();
-        private DateTime tradeRateLimitedUntilUtc = DateTime.MinValue;
+        private readonly TradeConfirmationScheduler tradeConfirmationScheduler = new TradeConfirmationScheduler();
         private readonly object loginRateLimitLock = new object();
         private DateTime loginRateLimitedUntilUtc = DateTime.MinValue;
         private readonly Dictionary<ulong, LoginMonitorSchedule> loginMonitorSchedules = new Dictionary<ulong, LoginMonitorSchedule>();
@@ -73,7 +72,6 @@ namespace Steam_Desktop_Authenticator
         private static readonly TimeSpan LoginMonitorSuccessInterval = TimeSpan.FromSeconds(12);
         private static readonly TimeSpan LoginMonitorInitialFailureBackoff = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan LoginMonitorMaximumFailureBackoff = TimeSpan.FromMinutes(5);
-        private int tradeMonitoringAccountIndex;
         private string activeWebTab = "authenticator";
         private long tradeViewRevision;
         private long loginViewRevision;
@@ -278,11 +276,73 @@ namespace Steam_Desktop_Authenticator
             return Math.Clamp(manifest.TradeConfirmationCheckInterval, 3, 3600);
         }
 
+        private int CountEligibleInheritedConfirmationAccounts()
+        {
+            if (manifest == null || allAccounts == null)
+                return 1;
+
+            int count = 0;
+            foreach (SteamGuardAccount account in allAccounts)
+            {
+                if (!IsSessionAvailableForAccountOperations(account))
+                    continue;
+
+                if (!manifest.GetAccountConfirmationSettings(account.Session.SteamID).AutoConfirmOverrideEnabled)
+                    count++;
+            }
+
+            return Math.Max(1, count);
+        }
+
+        private ResolvedAccountConfirmationPolicy ResolveAccountConfirmationPolicyForMonitor(ulong steamId, int? eligibleInheritedCount = null)
+        {
+            if (manifest == null)
+                return new ResolvedAccountConfirmationPolicy(false, 15, false, false);
+
+            int inheritedCount = eligibleInheritedCount ?? CountEligibleInheritedConfirmationAccounts();
+            return manifest.ResolveConfirmationPolicy(steamId, inheritedCount);
+        }
+
         private bool ShouldAutoConfirmTrade(Confirmation confirmation)
         {
-            return confirmation != null &&
-                ((confirmation.ConfType == Confirmation.EMobileConfirmationType.MarketListing && manifest?.AutoConfirmMarketTransactions == true) ||
-                 (confirmation.ConfType == Confirmation.EMobileConfirmationType.Trade && manifest?.AutoConfirmTrades == true));
+            return ShouldAutoConfirmTrade(confirmation, (ulong?)null);
+        }
+
+        private bool ShouldAutoConfirmTrade(Confirmation confirmation, ulong? steamId)
+        {
+            if (confirmation == null || manifest == null)
+                return false;
+
+            if (confirmation.ConfType != Confirmation.EMobileConfirmationType.Trade &&
+                confirmation.ConfType != Confirmation.EMobileConfirmationType.MarketListing)
+            {
+                return false;
+            }
+
+            ResolvedAccountConfirmationPolicy policy = steamId.HasValue && steamId.Value != 0
+                ? manifest.ResolveConfirmationPolicy(steamId.Value)
+                : new ResolvedAccountConfirmationPolicy(
+                    false,
+                    GetTradeConfirmationMonitorIntervalSeconds(),
+                    manifest.AutoConfirmTrades,
+                    manifest.AutoConfirmMarketTransactions);
+
+            return (confirmation.ConfType == Confirmation.EMobileConfirmationType.MarketListing && policy.AutoConfirmMarketTransactions) ||
+                (confirmation.ConfType == Confirmation.EMobileConfirmationType.Trade && policy.AutoConfirmTrades);
+        }
+
+        private bool AreAllAutoConfirmAuthorized(ulong steamId, IReadOnlyList<Confirmation> confirmations)
+        {
+            if (manifest == null || steamId == 0 || confirmations == null || confirmations.Count == 0)
+                return false;
+
+            for (int i = 0; i < confirmations.Count; i++)
+            {
+                if (!ShouldAutoConfirmTrade(confirmations[i], steamId))
+                    return false;
+            }
+
+            return true;
         }
 
         private async Task<Confirmation[]> FetchTradeConfirmationsAsync(SteamGuardAccount account, TimeSpan retryDelay, int retryCount, CancellationToken cancellationToken = default)
@@ -341,24 +401,20 @@ namespace Steam_Desktop_Authenticator
 
         private bool TryGetTradeRateLimitMessage(out string message)
         {
-            lock (tradeRateLimitLock)
+            if (!tradeConfirmationScheduler.TryGetRateLimitRemaining(out TimeSpan remaining))
             {
-                if (DateTime.UtcNow >= tradeRateLimitedUntilUtc)
-                {
-                    message = null;
-                    return false;
-                }
-
-                TimeSpan remaining = tradeRateLimitedUntilUtc - DateTime.UtcNow;
-                message = "Steam is temporarily limiting confirmation checks. Retrying automatically in about " +
-                    Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds)) + " seconds.";
-                return true;
+                message = null;
+                return false;
             }
+
+            message = "Steam is temporarily limiting confirmation checks. Retrying automatically in about " +
+                Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds)) + " seconds.";
+            return true;
         }
 
         private TradeRateLimitedException ApplyTradeRateLimit(Exception exception)
         {
-            TimeSpan delay = TimeSpan.FromSeconds(60);
+            TimeSpan delay = TradeConfirmationScheduler.DefaultRateLimitDelay;
             string retryAfter = null;
             if (exception is SteamWebRequestException steamException)
             {
@@ -374,18 +430,7 @@ namespace Steam_Desktop_Authenticator
             else if (DateTimeOffset.TryParse(retryAfter, out DateTimeOffset retryAfterUtc))
                 delay = retryAfterUtc.UtcDateTime - DateTime.UtcNow;
 
-            if (delay < TimeSpan.FromSeconds(15))
-                delay = TimeSpan.FromSeconds(15);
-            if (delay > TimeSpan.FromMinutes(5))
-                delay = TimeSpan.FromMinutes(5);
-
-            lock (tradeRateLimitLock)
-            {
-                DateTime proposedUntil = DateTime.UtcNow.Add(delay);
-                if (proposedUntil > tradeRateLimitedUntilUtc)
-                    tradeRateLimitedUntilUtc = proposedUntil;
-            }
-
+            tradeConfirmationScheduler.ApplyRateLimit(delay);
             TryGetTradeRateLimitMessage(out string message);
             return new TradeRateLimitedException(message);
         }
@@ -1742,14 +1787,35 @@ namespace Steam_Desktop_Authenticator
             if (accountsToMonitor.Length == 0)
                 return;
 
+            int globalIntervalSeconds = GetTradeConfirmationMonitorIntervalSeconds();
+            ulong[] eligibleSteamIds = accountsToMonitor.Select(item => item.Session.SteamID).ToArray();
+            int eligibleInheritedCount = accountsToMonitor.Count(item =>
+                !manifest.GetAccountConfirmationSettings(item.Session.SteamID).AutoConfirmOverrideEnabled);
+            eligibleInheritedCount = Math.Max(1, eligibleInheritedCount);
+
+            if (!tradeConfirmationScheduler.TrySelectNextDueAccount(
+                eligibleSteamIds,
+                steamId => manifest.GetAccountConfirmationSettings(steamId).AutoConfirmOverrideEnabled,
+                globalIntervalSeconds,
+                out ulong dueSteamId))
+            {
+                return;
+            }
+
+            SteamGuardAccount account = accountsToMonitor.FirstOrDefault(item => item.Session.SteamID == dueSteamId);
+            if (account == null)
+                return;
+
             if (!confirmationsSemaphore.Wait(0))
             {
                 return; //Only one thread may access this critical section at once. Mutex is a bad choice here because it'll cause a pileup of threads.
             }
 
-            tradeMonitoringAccountIndex = ((tradeMonitoringAccountIndex % accountsToMonitor.Length) + accountsToMonitor.Length) % accountsToMonitor.Length;
-            SteamGuardAccount account = accountsToMonitor[tradeMonitoringAccountIndex];
-            bool advanceQueue = true;
+            ulong steamId = account.Session.SteamID;
+            ResolvedAccountConfirmationPolicy policyAtStart = ResolveAccountConfirmationPolicyForMonitor(steamId, eligibleInheritedCount);
+            bool scanCompletedSuccessfully = false;
+            string failureSummary = null;
+            bool rateLimited = false;
 
             try
             {
@@ -1762,15 +1828,17 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
+                tradeConfirmationScheduler.RecordGlobalDispatch();
                 Confirmation[] confirmations = await FetchTradeConfirmationsForMonitorAsync(account, lifetimeCancellationSource.Token) ?? Array.Empty<Confirmation>();
                 lblStatus.Text = "";
                 if (!IsSessionAvailableForAccountOperations(account))
                     return;
+
                 var pendingConfirmations = new List<Confirmation>();
                 var autoAcceptConfirmations = new List<Confirmation>();
                 foreach (Confirmation confirmation in confirmations)
                 {
-                    if (ShouldAutoConfirmTrade(confirmation))
+                    if (ShouldAutoConfirmTrade(confirmation, steamId))
                     {
                         autoAcceptConfirmations.Add(confirmation);
                     }
@@ -1780,39 +1848,74 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
-                ReconcileTradeConfirmationNotifications(account, confirmations);
+                bool autoAcceptFailedTransiently = false;
+                if (autoAcceptConfirmations.Count > 0)
+                {
+                    bool accepted = false;
+                    try
+                    {
+                        accepted = await RunAvailableSteamAccountOperationAsync(account, () =>
+                            RunTradeConfirmationActionWithRefreshRetryAsync(
+                                account,
+                                () => account.AcceptMultipleConfirmations(
+                                    autoAcceptConfirmations.ToArray(),
+                                    () => AreAllAutoConfirmAuthorized(steamId, autoAcceptConfirmations),
+                                    lifetimeCancellationSource.Token),
+                                lifetimeCancellationSource.Token),
+                            lifetimeCancellationSource.Token);
+                    }
+                    catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (TradeRateLimitedException)
+                    {
+                        throw;
+                    }
+                    catch (SessionUnavailableException)
+                    {
+                        throw;
+                    }
+                    catch (Exception autoEx)
+                    {
+                        autoAcceptFailedTransiently = true;
+                        failureSummary = "Automatic confirmation could not be completed.";
+                        DiagnosticErrorLogger.Log("Trade confirmation auto-accept", autoEx, "An automatic confirmation batch failed; items remain visible.");
+                    }
+
+                    if (!accepted)
+                    {
+                        pendingConfirmations.AddRange(autoAcceptConfirmations);
+                        if (!autoAcceptFailedTransiently && AreAllAutoConfirmAuthorized(steamId, autoAcceptConfirmations))
+                        {
+                            autoAcceptFailedTransiently = true;
+                            failureSummary = "Steam did not accept the automatic confirmation action.";
+                        }
+                    }
+                }
+
+                ReconcileTradeConfirmationNotifications(account, pendingConfirmations);
                 foreach (var pending in pendingConfirmations)
                 {
-                    string confirmationKey = account.Session.SteamID.ToString() + ":" + pending.ID.ToString();
+                    string confirmationKey = steamId.ToString(CultureInfo.InvariantCulture) + ":" + pending.ID.ToString(CultureInfo.InvariantCulture);
                     if (notifiedTradeConfirmations.Add(confirmationKey))
                         NotifyTradeConfirmation(account, pending);
                 }
-                pendingTradeConfirmationCounts[account.Session.SteamID] = pendingConfirmations.Count;
+                pendingTradeConfirmationCounts[steamId] = pendingConfirmations.Count;
                 UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
                 CacheTradeConfirmations(account, pendingConfirmations);
                 if (IsWebTabActive("trades"))
                     await PublishCachedTradesAsync();
 
-                if (autoAcceptConfirmations.Count > 0)
-                {
-                    bool accepted = await RunAvailableSteamAccountOperationAsync(account, () =>
-                        RunTradeConfirmationActionWithRefreshRetryAsync(
-                            account,
-                            () => account.AcceptMultipleConfirmations(autoAcceptConfirmations.ToArray(), lifetimeCancellationSource.Token),
-                            lifetimeCancellationSource.Token),
-                        lifetimeCancellationSource.Token);
-                    if (!accepted)
-                        throw new InvalidOperationException("Steam did not accept the automatic confirmation action. It will remain pending for a later scan.");
-                }
+                scanCompletedSuccessfully = !autoAcceptFailedTransiently;
             }
             catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
             {
-                advanceQueue = false;
             }
             catch (TradeRateLimitedException ex)
             {
                 lblStatus.Text = "";
-                advanceQueue = false;
+                rateLimited = true;
                 DiagnosticErrorLogger.Log("Trade confirmation monitor", ex, "Steam rate limited the queued confirmation monitor.");
             }
             catch (SessionUnavailableException)
@@ -1822,16 +1925,25 @@ namespace Steam_Desktop_Authenticator
             catch (Exception ex)
             {
                 lblStatus.Text = "";
+                failureSummary = "Background confirmation check did not complete.";
                 Debug.WriteLine("Trade confirmation monitor failed: " + ex.Message);
                 DiagnosticErrorLogger.Log("Trade confirmation monitor", ex, "The background confirmation scan did not complete.");
             }
             finally
             {
-                // The monitor already keeps notifications and the navigation badge current.
-                // Do not immediately re-fetch the same accounts merely to redraw the page:
-                // that doubled traffic and caused Steam to return HTTP 429 responses.
-                if (advanceQueue)
-                    tradeMonitoringAccountIndex = (tradeMonitoringAccountIndex + 1) % accountsToMonitor.Length;
+                if (!lifetimeCancellationSource.IsCancellationRequested && !rateLimited)
+                {
+                    ResolvedAccountConfirmationPolicy latestPolicy = ResolveAccountConfirmationPolicyForMonitor(steamId);
+                    if (scanCompletedSuccessfully)
+                    {
+                        tradeConfirmationScheduler.RecordSuccess(steamId, latestPolicy.Interval);
+                    }
+                    else if (!String.IsNullOrEmpty(failureSummary))
+                    {
+                        tradeConfirmationScheduler.RecordTransientFailure(steamId, latestPolicy.Interval, failureSummary);
+                    }
+                    PublishAccountHealthMetadata(steamId);
+                }
                 confirmationsSemaphore.Release();
             }
         }
@@ -2269,7 +2381,6 @@ namespace Steam_Desktop_Authenticator
                     sessionRenewalRequired.Add(steamId);
                     loginMonitorSchedules.Remove(steamId);
                     loginMonitoringAccountIndex = 0;
-                    tradeMonitoringAccountIndex = 0;
                     unavailableLoginAccounts.Remove(account.AccountName);
                     notifiedUnavailableLoginAccounts.Remove(account.AccountName);
                     foreach (string requestKey in pendingLoginRequests.Keys
@@ -3138,6 +3249,7 @@ namespace Steam_Desktop_Authenticator
                 foreach (ulong steamId in loginMonitorSchedules.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
                     loginMonitorSchedules.Remove(steamId);
                 loadedTradeConfirmationAccounts.RemoveWhere(steamId => !activeSteamIds.Contains(steamId));
+                tradeConfirmationScheduler.PruneRemovedAccounts(activeSteamIds);
                 lock (sessionStateLock)
                 {
                     sessionRenewalRequired.RemoveWhere(steamId => !activeSteamIds.Contains(steamId));
@@ -3188,17 +3300,57 @@ namespace Steam_Desktop_Authenticator
 
             if (GetCoreWebView2IfAvailable() != null)
             {
-                var accounts = allAccounts.Select(a => new
-                {
-                    name = a.AccountName,
-                    steamId = a.Session == null ? null : a.Session.SteamID.ToString(CultureInfo.InvariantCulture),
-                    sessionExpired = IsSessionRenewalRequired(a),
-                    needsRenewal = IsSessionRenewalRequired(a)
-                }).ToArray();
+                var accounts = allAccounts.Select(BuildWebAccountPayload).ToArray();
                 string jsonAccounts = JsonConvert.SerializeObject(accounts);
                 _ = ExecuteScriptSafelyAsync($"updateAccountList({jsonAccounts})", "Account list UI");
                 _ = ExecuteScriptSafelyAsync($"updateEncryptionState({manifest.Encrypted.ToString().ToLowerInvariant()}, {hasAccounts.ToString().ToLowerInvariant()})", "Encryption state UI");
             }
+        }
+
+        private object BuildWebAccountPayload(SteamGuardAccount account)
+        {
+            ulong steamId = account?.Session?.SteamID ?? 0;
+            AccountConfirmationSettings confSettings = manifest != null && steamId != 0
+                ? manifest.GetAccountConfirmationSettings(steamId)
+                : new AccountConfirmationSettings();
+            AccountScanHealthSnapshot health = steamId != 0
+                ? tradeConfirmationScheduler.GetHealthSnapshot(steamId)
+                : null;
+
+            return new
+            {
+                name = account?.AccountName,
+                steamId = steamId == 0 ? null : steamId.ToString(CultureInfo.InvariantCulture),
+                sessionExpired = IsSessionRenewalRequired(account),
+                needsRenewal = IsSessionRenewalRequired(account),
+                autoConfirmOverrideEnabled = confSettings.AutoConfirmOverrideEnabled,
+                autoConfirmTrades = confSettings.AutoConfirmTrades,
+                autoConfirmMarket = confSettings.AutoConfirmMarketTransactions,
+                tradeConfirmationCheckInterval = confSettings.TradeConfirmationCheckInterval,
+                healthState = (health?.State ?? AccountScanHealthState.Idle).ToString().ToLowerInvariant(),
+                lastScanError = health?.LastErrorSummary
+            };
+        }
+
+        private void PublishAccountHealthMetadata(ulong steamId)
+        {
+            if (steamId == 0 || GetCoreWebView2IfAvailable() == null || manifest == null)
+                return;
+
+            AccountConfirmationSettings confSettings = manifest.GetAccountConfirmationSettings(steamId);
+            AccountScanHealthSnapshot health = tradeConfirmationScheduler.GetHealthSnapshot(steamId);
+            var metadata = new
+            {
+                steamId = steamId.ToString(CultureInfo.InvariantCulture),
+                autoConfirmOverrideEnabled = confSettings.AutoConfirmOverrideEnabled,
+                autoConfirmTrades = confSettings.AutoConfirmTrades,
+                autoConfirmMarket = confSettings.AutoConfirmMarketTransactions,
+                tradeConfirmationCheckInterval = confSettings.TradeConfirmationCheckInterval,
+                healthState = health.State.ToString().ToLowerInvariant(),
+                lastScanError = health.LastErrorSummary
+            };
+            string json = JsonConvert.SerializeObject(metadata);
+            _ = ExecuteScriptSafelyAsync($"updateAccountMetadata({json});", "Account metadata UI");
         }
 
         private void RebindTradeConfirmationCache()
@@ -3397,9 +3549,9 @@ namespace Steam_Desktop_Authenticator
             if (manifest == null)
                 return;
 
-            int intervalSeconds = GetTradeConfirmationMonitorIntervalSeconds();
-            timerTradesPopup.Interval = intervalSeconds * 1000;
+            timerTradesPopup.Interval = 1000;
             timerTradesPopup.Enabled = true;
+            tradeConfirmationScheduler.OnGlobalSettingsChanged(steamId => ResolveAccountConfirmationPolicyForMonitor(steamId).Interval);
         }
 
         private void StartBackgroundServicesAfterUiReady()
@@ -4366,6 +4518,94 @@ namespace Steam_Desktop_Authenticator
                 TryGetWebMessageString(payload, "proxyPassword", 4096, out _);
         }
 
+        private static bool TryParseAccountSettingsPayload(JObject payload, out ulong steamId, out AccountConfirmationSettings settings)
+        {
+            steamId = 0;
+            settings = null;
+            if (payload == null)
+                return false;
+
+            if (!TryGetWebMessageString(payload, "steamId", 32, out string steamIdText, required: true) ||
+                !ulong.TryParse(steamIdText, NumberStyles.None, CultureInfo.InvariantCulture, out steamId) ||
+                steamId == 0)
+            {
+                return false;
+            }
+
+            JToken overrideToken = payload["overrideEnabled"];
+            JToken tradesToken = payload["autoConfirmTrades"];
+            JToken marketToken = payload["autoConfirmMarket"];
+            JToken intervalToken = payload["checkInterval"];
+
+            if (overrideToken?.Type != JTokenType.Boolean ||
+                tradesToken?.Type != JTokenType.Boolean ||
+                marketToken?.Type != JTokenType.Boolean)
+            {
+                return false;
+            }
+
+            int? intervalSeconds = null;
+            if (intervalToken != null && intervalToken.Type != JTokenType.Null)
+            {
+                if (intervalToken.Type != JTokenType.Integer)
+                    return false;
+
+                long parsedInterval = intervalToken.Value<long>();
+                if (parsedInterval < 3 || parsedInterval > 3600)
+                    return false;
+
+                intervalSeconds = (int)parsedInterval;
+            }
+
+            settings = new AccountConfirmationSettings
+            {
+                AutoConfirmOverrideEnabled = overrideToken.Value<bool>(),
+                AutoConfirmTrades = tradesToken.Value<bool>(),
+                AutoConfirmMarketTransactions = marketToken.Value<bool>(),
+                TradeConfirmationCheckInterval = intervalSeconds
+            };
+            return true;
+        }
+
+        private async Task SaveAccountSettingsFromPayloadAsync(JObject payload)
+        {
+            if (manifest == null)
+            {
+                await ExecuteScriptSafelyAsync($"accountSettingsSaveFailed({JsonConvert.SerializeObject("No account manifest is loaded.")});", "Account options UI");
+                return;
+            }
+
+            if (!TryParseAccountSettingsPayload(payload, out ulong steamId, out AccountConfirmationSettings settings))
+            {
+                await ExecuteScriptSafelyAsync($"accountSettingsSaveFailed({JsonConvert.SerializeObject("The account options message was invalid. Check interval must be between 3 and 3600 seconds.")});", "Account options UI");
+                return;
+            }
+
+            StorageResult result = manifest.SaveAccountConfirmationSettings(steamId, settings);
+            if (!result.Succeeded)
+            {
+                DiagnosticErrorLogger.Log("Account options storage", result.Exception, "Per-account confirmation settings could not be saved.");
+                await ExecuteScriptSafelyAsync($"accountSettingsSaveFailed({JsonConvert.SerializeObject(result.UserMessage ?? "The account options could not be saved.")});", "Account options UI");
+                return;
+            }
+
+            ResolvedAccountConfirmationPolicy resolved = ResolveAccountConfirmationPolicyForMonitor(steamId);
+            tradeConfirmationScheduler.OnSettingsChanged(steamId, resolved.Interval);
+            AccountScanHealthSnapshot health = tradeConfirmationScheduler.GetHealthSnapshot(steamId);
+            var savedPayload = new
+            {
+                steamId = steamId.ToString(CultureInfo.InvariantCulture),
+                autoConfirmOverrideEnabled = settings.AutoConfirmOverrideEnabled,
+                autoConfirmTrades = settings.AutoConfirmTrades,
+                autoConfirmMarket = settings.AutoConfirmMarketTransactions,
+                tradeConfirmationCheckInterval = settings.TradeConfirmationCheckInterval,
+                healthState = health.State.ToString().ToLowerInvariant(),
+                lastScanError = health.LastErrorSummary
+            };
+            string json = JsonConvert.SerializeObject(savedPayload);
+            await ExecuteScriptSafelyAsync($"accountSettingsSaved({json});", "Account options UI");
+        }
+
         private async void CoreWebView2_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             string message = e.WebMessageAsJson;
@@ -4479,6 +4719,10 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
                 await SaveSettingsAsync(payload);
+            }
+            else if (action == "save_account_settings")
+            {
+                await SaveAccountSettingsFromPayloadAsync(payload);
             }
             else if (action == "test_proxy")
             {
@@ -4793,10 +5037,15 @@ namespace Steam_Desktop_Authenticator
                 {
                     try
                     {
+                        tradeConfirmationScheduler.RecordGlobalDispatch();
                         Confirmation[] accountConfirmations = await FetchTradeConfirmationsForPageAsync(account, cancellationToken);
                         if (accountConfirmations == null)
                             continue;
-                        CacheTradeConfirmations(account, accountConfirmations.Where(confirmation => !ShouldAutoConfirmTrade(confirmation)));
+                        // Manual refresh always displays every pending confirmation currently on Steam.
+                        CacheTradeConfirmations(account, accountConfirmations);
+                        ResolvedAccountConfirmationPolicy policy = ResolveAccountConfirmationPolicyForMonitor(account.Session.SteamID);
+                        tradeConfirmationScheduler.RecordSuccess(account.Session.SteamID, policy.Interval);
+                        PublishAccountHealthMetadata(account.Session.SteamID);
                     }
                     catch (TradeRateLimitedException ex)
                     {
@@ -4810,6 +5059,9 @@ namespace Steam_Desktop_Authenticator
                             InvalidateTradeConfirmationCache(account);
                         else
                         {
+                            ResolvedAccountConfirmationPolicy policy = ResolveAccountConfirmationPolicyForMonitor(account.Session.SteamID);
+                            tradeConfirmationScheduler.RecordTransientFailure(account.Session.SteamID, policy.Interval, "Manual confirmation refresh failed.");
+                            PublishAccountHealthMetadata(account.Session.SteamID);
                             unavailableAccounts.Add(account.AccountName + " could not be loaded.");
                         }
                     }

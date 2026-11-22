@@ -746,7 +746,11 @@ namespace Steam_Desktop_Authenticator
                             IV = iv,
                             Salt = salt,
                             Filename = filename,
-                            SessionNeedsRenewal = account.Session.IsRefreshTokenExpired()
+                            SessionNeedsRenewal = account.Session.IsRefreshTokenExpired(),
+                            AutoConfirmOverrideEnabled = false,
+                            AutoConfirmTrades = false,
+                            AutoConfirmMarketTransactions = false,
+                            TradeConfirmationCheckInterval = null
                         });
                     }
 
@@ -1020,7 +1024,11 @@ namespace Steam_Desktop_Authenticator
                     IV = iV,
                     Salt = salt,
                     Filename = filename,
-                    SessionNeedsRenewal = account.Session.IsRefreshTokenExpired()
+                    SessionNeedsRenewal = account.Session.IsRefreshTokenExpired(),
+                    AutoConfirmOverrideEnabled = previousEntry?.AutoConfirmOverrideEnabled ?? false,
+                    AutoConfirmTrades = previousEntry?.AutoConfirmTrades ?? false,
+                    AutoConfirmMarketTransactions = previousEntry?.AutoConfirmMarketTransactions ?? false,
+                    TradeConfirmationCheckInterval = previousEntry?.TradeConfirmationCheckInterval
                 };
                 if (previousEntry == null)
                 {
@@ -1953,6 +1961,123 @@ namespace Steam_Desktop_Authenticator
         {
             TradeConfirmationCheckInterval = Math.Clamp(TradeConfirmationCheckInterval, 3, 3600);
             TradeConfirmationSelectedTab = TradeConfirmationClassifier.NormalizeSelectableTab(TradeConfirmationSelectedTab);
+            if (Entries != null)
+            {
+                foreach (ManifestEntry entry in Entries)
+                {
+                    if (entry?.TradeConfirmationCheckInterval.HasValue == true)
+                    {
+                        entry.TradeConfirmationCheckInterval = Math.Clamp(entry.TradeConfirmationCheckInterval.Value, 3, 3600);
+                    }
+                }
+            }
+        }
+
+        public AccountConfirmationSettings GetAccountConfirmationSettings(ulong steamId)
+        {
+            if (steamId == 0)
+                return new AccountConfirmationSettings();
+
+            lock (storageLock)
+            {
+                ManifestEntry entry = Entries?.FirstOrDefault(item => item != null && item.SteamID == steamId);
+                if (entry == null)
+                    return new AccountConfirmationSettings();
+
+                return new AccountConfirmationSettings
+                {
+                    AutoConfirmOverrideEnabled = entry.AutoConfirmOverrideEnabled,
+                    AutoConfirmTrades = entry.AutoConfirmTrades,
+                    AutoConfirmMarketTransactions = entry.AutoConfirmMarketTransactions,
+                    TradeConfirmationCheckInterval = entry.TradeConfirmationCheckInterval.HasValue
+                        ? Math.Clamp(entry.TradeConfirmationCheckInterval.Value, 3, 3600)
+                        : (int?)null
+                };
+            }
+        }
+
+        public ResolvedAccountConfirmationPolicy ResolveConfirmationPolicy(ulong steamId, int eligibleInheritedCount = 1)
+        {
+            lock (storageLock)
+            {
+                int globalInterval = TradeConfirmationCustomIntervalEnabled
+                    ? Math.Clamp(TradeConfirmationCheckInterval, 3, 3600)
+                    : 15;
+
+                ManifestEntry entry = steamId == 0
+                    ? null
+                    : Entries?.FirstOrDefault(item => item != null && item.SteamID == steamId);
+
+                if (entry != null && entry.AutoConfirmOverrideEnabled)
+                {
+                    int customInterval = entry.TradeConfirmationCheckInterval.HasValue
+                        ? Math.Clamp(entry.TradeConfirmationCheckInterval.Value, 3, 3600)
+                        : globalInterval;
+
+                    return new ResolvedAccountConfirmationPolicy(
+                        overrideEnabled: true,
+                        intervalSeconds: customInterval,
+                        autoConfirmTrades: entry.AutoConfirmTrades,
+                        autoConfirmMarketTransactions: entry.AutoConfirmMarketTransactions);
+                }
+
+                long inheritedIntervalLong = (long)globalInterval * Math.Max(1, eligibleInheritedCount);
+                int inheritedInterval = inheritedIntervalLong > int.MaxValue ? int.MaxValue : (int)inheritedIntervalLong;
+
+                return new ResolvedAccountConfirmationPolicy(
+                    overrideEnabled: false,
+                    intervalSeconds: inheritedInterval,
+                    autoConfirmTrades: AutoConfirmTrades,
+                    autoConfirmMarketTransactions: AutoConfirmMarketTransactions);
+            }
+        }
+
+        public StorageResult SaveAccountConfirmationSettings(ulong steamId, AccountConfirmationSettings settings)
+        {
+            if (steamId == 0 || settings == null)
+                return StorageResult.Failure(StorageFailureKind.Validation, "The account confirmation settings are invalid.");
+
+            if (settings.TradeConfirmationCheckInterval.HasValue &&
+                (settings.TradeConfirmationCheckInterval.Value < 3 || settings.TradeConfirmationCheckInterval.Value > 3600))
+            {
+                return StorageResult.Failure(StorageFailureKind.Validation, "The custom check interval must be between 3 and 3600 seconds.");
+            }
+
+            lock (storageLock)
+            {
+                ManifestEntry liveEntry = Entries?.FirstOrDefault(item => item != null && item.SteamID == steamId);
+                if (liveEntry == null)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is no longer managed by this authenticator.");
+
+                Manifest staged;
+                try
+                {
+                    staged = CloneForStorage();
+                    ManifestEntry stagedEntry = staged.Entries.FirstOrDefault(item => item != null && item.SteamID == steamId);
+                    if (stagedEntry == null)
+                        return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is no longer managed by this authenticator.");
+
+                    stagedEntry.AutoConfirmOverrideEnabled = settings.AutoConfirmOverrideEnabled;
+                    stagedEntry.AutoConfirmTrades = settings.AutoConfirmTrades;
+                    stagedEntry.AutoConfirmMarketTransactions = settings.AutoConfirmMarketTransactions;
+                    stagedEntry.TradeConfirmationCheckInterval = settings.TradeConfirmationCheckInterval;
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The account confirmation settings could not be prepared.", ex);
+                }
+
+                StorageResult result = staged.SaveWithResult();
+                if (result.Succeeded)
+                {
+                    liveEntry.AutoConfirmOverrideEnabled = settings.AutoConfirmOverrideEnabled;
+                    liveEntry.AutoConfirmTrades = settings.AutoConfirmTrades;
+                    liveEntry.AutoConfirmMarketTransactions = settings.AutoConfirmMarketTransactions;
+                    liveEntry.TradeConfirmationCheckInterval = settings.TradeConfirmationCheckInterval;
+                }
+
+                return result;
+            }
         }
 
         private bool MigrateLegacyTradeConfirmationSettings(JObject manifestJson)
@@ -2066,6 +2191,18 @@ namespace Steam_Desktop_Authenticator
 
             [JsonProperty("session_needs_renewal")]
             public bool SessionNeedsRenewal { get; set; }
+
+            [JsonProperty("auto_confirm_override_enabled", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public bool AutoConfirmOverrideEnabled { get; set; }
+
+            [JsonProperty("auto_confirm_trades", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public bool AutoConfirmTrades { get; set; }
+
+            [JsonProperty("auto_confirm_market_transactions", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public bool AutoConfirmMarketTransactions { get; set; }
+
+            [JsonProperty("trade_confirmation_check_interval", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public int? TradeConfirmationCheckInterval { get; set; }
         }
     }
 }
