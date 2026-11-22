@@ -10,6 +10,19 @@ namespace Steam_Desktop_Authenticator
         public const string CategoryMarket = "market";
         public const string CategoryOther = "other";
 
+        public static bool IsSelectableTab(string tabName)
+        {
+            return String.Equals(tabName, CategoryAll, StringComparison.Ordinal) ||
+                String.Equals(tabName, CategoryTrades, StringComparison.Ordinal) ||
+                String.Equals(tabName, CategoryMarket, StringComparison.Ordinal);
+        }
+
+        public static string NormalizeSelectableTab(string tabName)
+        {
+            string normalized = tabName?.Trim().ToLowerInvariant();
+            return IsSelectableTab(normalized) ? normalized : CategoryAll;
+        }
+
         public static bool IsTradeConfirmation(Confirmation.EMobileConfirmationType confType)
         {
             return confType == Confirmation.EMobileConfirmationType.Trade;

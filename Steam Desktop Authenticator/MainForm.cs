@@ -2713,12 +2713,34 @@ namespace Steam_Desktop_Authenticator
         private void OpenTradeConfirmationsFromNotification(string confirmationTab = null)
         {
             trayRestore_Click(this, EventArgs.Empty);
-            string script = confirmationTab == TradeConfirmationClassifier.CategoryAll ||
-                confirmationTab == TradeConfirmationClassifier.CategoryTrades ||
-                confirmationTab == TradeConfirmationClassifier.CategoryMarket
+            string script = TradeConfirmationClassifier.IsSelectableTab(confirmationTab)
                 ? $"openTradeConfirmations({JsonConvert.SerializeObject(confirmationTab)});"
                 : "switchTab('trades');";
             _ = ExecuteScriptSafelyAsync(script, "Trade confirmations navigation");
+        }
+
+        internal bool PersistTradeConfirmationSelectedTab(string tabName)
+        {
+            if (manifest == null || !TradeConfirmationClassifier.IsSelectableTab(tabName))
+                return false;
+
+            if (String.Equals(manifest.TradeConfirmationSelectedTab, tabName, StringComparison.Ordinal))
+                return true;
+
+            StorageResult saveResult = manifest.SaveSettingsWithResult(staged =>
+            {
+                staged.TradeConfirmationSelectedTab = tabName;
+            });
+            if (!saveResult.Succeeded)
+            {
+                DiagnosticErrorLogger.Log(
+                    "Trade confirmation tab",
+                    saveResult.Exception,
+                    saveResult.UserMessage ?? "The selected confirmation tab could not be saved.");
+                return false;
+            }
+
+            return true;
         }
 
         private async Task FetchLoginActionsForManualRefreshAsync()
@@ -3802,6 +3824,8 @@ namespace Steam_Desktop_Authenticator
                 // Set autostart checkbox
                 bool isAutoStart = WindowsStartup.IsEnabled();
                 _ = ExecuteScriptSafelyAsync($"setAutoStart({isAutoStart.ToString().ToLowerInvariant()});", "Startup setting UI");
+                string savedConfirmationTab = TradeConfirmationClassifier.NormalizeSelectableTab(manifest?.TradeConfirmationSelectedTab);
+                _ = ExecuteScriptSafelyAsync($"setConfirmationTab({JsonConvert.SerializeObject(savedConfirmationTab)}, false, false);", "Trade confirmation tab UI");
                 _ = PublishAvailableUpdateAsync();
                 _ = PublishUpdateCheckStateAsync(isCheckingForUpdates, updateCheckStatusMessage, updateCheckStatusTone);
 
@@ -4373,6 +4397,12 @@ namespace Steam_Desktop_Authenticator
                     return;
                 if (tabName == "authenticator" || tabName == "trades" || tabName == "login-actions" || tabName == "settings")
                     activeWebTab = tabName;
+            }
+            else if (action == "confirmation_tab_changed")
+            {
+                if (!TryGetWebMessageString(payload, "tabName", 32, out string tabName, true))
+                    return;
+                PersistTradeConfirmationSelectedTab(tabName);
             }
             else if (action == "load_trades_cache")
             {

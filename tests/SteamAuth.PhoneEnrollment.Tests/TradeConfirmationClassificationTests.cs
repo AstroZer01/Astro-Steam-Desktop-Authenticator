@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -153,6 +154,107 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 bool result = (bool)method.Invoke(form, new object[] { new Confirmation { ConfType = confType } });
                 Assert.Equal(expectedAutoConfirm, result);
             }
+        }
+
+        [Theory]
+        [InlineData("all", true, "all")]
+        [InlineData("trades", true, "trades")]
+        [InlineData("market", true, "market")]
+        [InlineData("Market", false, "market")]
+        [InlineData(" trades ", false, "trades")]
+        [InlineData("other", false, "all")]
+        [InlineData("", false, "all")]
+        [InlineData(null, false, "all")]
+        public void SelectableTabHelpers_ValidateAndNormalizeTabs(string input, bool expectedSelectable, string expectedNormalized)
+        {
+            Assert.Equal(expectedSelectable, TradeConfirmationClassifier.IsSelectableTab(input));
+            Assert.Equal(expectedNormalized, TradeConfirmationClassifier.NormalizeSelectableTab(input));
+        }
+    }
+
+    [Collection("Manifest storage")]
+    public sealed class TradeConfirmationTabPersistenceTests : IDisposable
+    {
+        private readonly string dataDirectory = Path.Combine(Path.GetTempPath(), "asda-confirmation-tab-tests", Guid.NewGuid().ToString("N"));
+        private readonly string previousDataDirectory;
+
+        public TradeConfirmationTabPersistenceTests()
+        {
+            previousDataDirectory = Environment.GetEnvironmentVariable("ASDA_DATA_DIRECTORY");
+            Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", dataDirectory);
+        }
+
+        [Fact]
+        public void NewAndLegacyManifests_DefaultSelectedConfirmationTabToAll()
+        {
+            Manifest fresh = Manifest.GenerateNewManifest(false);
+            Assert.Equal(TradeConfirmationClassifier.CategoryAll, fresh.TradeConfirmationSelectedTab);
+
+            string maDir = Path.Combine(dataDirectory, "maFiles");
+            Directory.CreateDirectory(maDir);
+            File.WriteAllText(
+                Path.Combine(maDir, "manifest.json"),
+                new JObject { ["encrypted"] = false, ["entries"] = new JArray() }.ToString(Formatting.None));
+
+            Manifest loadedLegacy = Manifest.GetManifest(true);
+            Assert.Equal(TradeConfirmationClassifier.CategoryAll, loadedLegacy.TradeConfirmationSelectedTab);
+        }
+
+        [Fact]
+        public void InvalidPersistedConfirmationTab_NormalizesToAllOnLoad()
+        {
+            string maDir = Path.Combine(dataDirectory, "maFiles");
+            Directory.CreateDirectory(maDir);
+            File.WriteAllText(
+                Path.Combine(maDir, "manifest.json"),
+                new JObject
+                {
+                    ["encrypted"] = false,
+                    ["entries"] = new JArray(),
+                    ["trade_confirmation_selected_tab"] = "unexpected-value"
+                }.ToString(Formatting.None));
+
+            Manifest loaded = Manifest.GetManifest(true);
+            Assert.Equal(TradeConfirmationClassifier.CategoryAll, loaded.TradeConfirmationSelectedTab);
+        }
+
+        [Fact]
+        public void SelectedConfirmationTab_PersistsAcrossReloadsAndUnrelatedSettingsSaves()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveWithResult().Succeeded);
+
+            using (MainForm form = new MainForm(manifest, new UpdatePreferenceRevisionTracker(), null, _ => { }))
+            {
+                Assert.True(form.PersistTradeConfirmationSelectedTab(TradeConfirmationClassifier.CategoryMarket));
+                Assert.Equal(TradeConfirmationClassifier.CategoryMarket, manifest.TradeConfirmationSelectedTab);
+
+                Assert.False(form.PersistTradeConfirmationSelectedTab("other"));
+                Assert.Equal(TradeConfirmationClassifier.CategoryMarket, manifest.TradeConfirmationSelectedTab);
+            }
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(TradeConfirmationClassifier.CategoryMarket, reloaded.TradeConfirmationSelectedTab);
+
+            StorageResult unrelatedSave = reloaded.SaveSettingsWithResult(staged => staged.MinimizeToTray = !staged.MinimizeToTray);
+            Assert.True(unrelatedSave.Succeeded);
+
+            Manifest reloadedAfterSettings = Manifest.GetManifest(true);
+            Assert.Equal(TradeConfirmationClassifier.CategoryMarket, reloadedAfterSettings.TradeConfirmationSelectedTab);
+
+            using (MainForm form = new MainForm(reloadedAfterSettings, new UpdatePreferenceRevisionTracker(), null, _ => { }))
+            {
+                Assert.True(form.PersistTradeConfirmationSelectedTab(TradeConfirmationClassifier.CategoryTrades));
+            }
+
+            Assert.Equal(TradeConfirmationClassifier.CategoryTrades, Manifest.GetManifest(true).TradeConfirmationSelectedTab);
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);
+            if (Directory.Exists(dataDirectory))
+                Directory.Delete(dataDirectory, true);
         }
     }
 }

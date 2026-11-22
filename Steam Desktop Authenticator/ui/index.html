@@ -882,10 +882,14 @@
         }
     }
 
-    function setConfirmationTab(tabId, focusTab = false) {
+    function setConfirmationTab(tabId, focusTab = false, persist = true) {
         if (!validConfirmationTabs.has(tabId)) return;
+        const changed = activeConfirmationTab !== tabId;
         activeConfirmationTab = tabId;
         renderConfirmations();
+        if (persist && changed) {
+            window.chrome.webview.postMessage({ action: 'confirmation_tab_changed', tabName: tabId });
+        }
         if (focusTab) {
             const tabButton = document.getElementById('confirmation-tab-' + tabId);
             if (tabButton) tabButton.focus();
@@ -894,7 +898,7 @@
 
     function openTradeConfirmations(category = 'all') {
         if (validConfirmationTabs.has(category)) {
-            setConfirmationTab(category);
+            setConfirmationTab(category, false, false);
         }
         switchTab('trades');
     }
