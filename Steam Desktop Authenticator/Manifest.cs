@@ -1300,11 +1300,12 @@ namespace Steam_Desktop_Authenticator
                     WriteAllTextAtomically(manifestFilename, manifestContents, backupFilename);
                     manifestCommitted = true;
 
-                    bool cleanupSucceeded = DeleteFilesBestEffort(
-                        maDir,
-                        obsoleteFilenames.Concat(trackedRetainedObsoleteFilenames),
-                        "The replaced authenticator file could not be removed after the manifest was committed.");
-                    if (cleanupSucceeded && DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed."))
+                    bool backupDeleted = DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
+                    if (backupDeleted &&
+                        DeleteFilesBestEffort(
+                            maDir,
+                            obsoleteFilenames.Concat(trackedRetainedObsoleteFilenames),
+                            "The replaced authenticator file could not be removed after the manifest was committed."))
                     {
                         DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed.");
                     }

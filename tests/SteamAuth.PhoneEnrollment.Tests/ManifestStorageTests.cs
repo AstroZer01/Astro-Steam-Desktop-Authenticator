@@ -888,12 +888,42 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.Equal(revisionBefore + 1, manifest.StorageRevision);
                 Assert.True(File.Exists(obsoletePath));
                 Assert.True(File.Exists(journalPath));
+                Assert.Empty(Directory.EnumerateFiles(maDirectory, ".manifest.*.bak"));
             }
 
             // Once unlocked, normal startup recovery must delete the retained obsolete file and preserve the reordered manifest.
             Manifest reloaded = Manifest.GetManifest(true);
             Assert.Equal(new[] { secondId, firstId }, reloaded.Entries.Select(e => e.SteamID).ToArray());
             Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void SaveAccount_DeletesManifestBackupBeforeObsoleteCleanupWhenRetainedObsoleteIsLocked()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = CreateAccount(76561198000000000UL);
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string retainedObsoletePath = Path.Combine(maDirectory, "retained-locked.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(retainedObsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", "retained-locked.maFile", null);
+
+            account.Session.AccessToken = "updated-access-token";
+            using (new FileStream(retainedObsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.True(manifest.SaveAccount(account, false).Succeeded);
+                Assert.Empty(Directory.EnumerateFiles(maDirectory, ".manifest.*.bak"));
+                Assert.True(File.Exists(retainedObsoletePath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal("updated-access-token", Assert.Single(reloaded.GetAllAccounts()).Session.AccessToken);
+            Assert.False(File.Exists(retainedObsoletePath));
             Assert.False(File.Exists(journalPath));
         }
 
@@ -1027,7 +1057,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
             File.WriteAllText(obsoletePath, "obsolete");
             WriteJournal(maDirectory, File.ReadAllText(manifestPath), createdFilename, "committed-obsolete.maFile", TestBackupFilename);
 
-            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            // Keep obsoletePath unlocked while locking only backupPath to prove recovery fails closed
+            // before touching obsolete files or clearing created_filenames.
             using (new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.None))
             {
                 Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
