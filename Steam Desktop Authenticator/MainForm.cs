@@ -3471,7 +3471,7 @@ namespace Steam_Desktop_Authenticator
         }
 
         // Logic for version checking
-        private static readonly HttpClient defaultUpdateClient = new HttpClient();
+        private static readonly HttpClient defaultUpdateClient = CreateDefaultUpdateClient();
         private const int MaximumUpdateResponseBytes = 1024 * 1024;
         private const string AutomaticUpdateChecksDisabledMessage = "Automatic update checks are disabled. You can check manually anytime.";
         private static readonly TimeSpan UpdateRequestTimeout = TimeSpan.FromSeconds(20);
@@ -3480,6 +3480,20 @@ namespace Steam_Desktop_Authenticator
         private string updateCheckStatusTone = "info";
         private Version availableUpdateVersion;
         private string availableUpdateDownloadUrl;
+
+        internal static SocketsHttpHandler CreateDefaultUpdateHttpHandler()
+        {
+            return new SocketsHttpHandler
+            {
+                AutomaticDecompression = DecompressionMethods.All,
+                PooledConnectionLifetime = SteamNetworkConfiguration.DefaultPooledConnectionLifetime
+            };
+        }
+
+        private static HttpClient CreateDefaultUpdateClient()
+        {
+            return new HttpClient(CreateDefaultUpdateHttpHandler());
+        }
 
         internal async Task CheckForUpdatesAsync(bool isStartupCheck)
         {
