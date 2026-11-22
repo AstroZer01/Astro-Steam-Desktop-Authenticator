@@ -1352,6 +1352,33 @@ namespace SteamAuth.PhoneEnrollment.Tests
             // 1 in ChangeEncryptionKey + 1 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 1 in its commit.
             Assert.Equal(4, Manifest.StorageDirectoryValidationCount - beforeEncrypt);
             Assert.Equal(accountCount, reloaded.GetAllAccounts("test-passkey").Length);
+
+            // Verify ImportUnmanagedMaFiles and sessionless RemoveAccount also perform O(1) directory validations.
+            Assert.True(reloaded.ChangeEncryptionKey("test-passkey", null).Succeeded);
+            for (int i = 0; i < 3; i++)
+            {
+                ulong importId = 76561198000002000UL + (ulong)i;
+                File.WriteAllText(
+                    Path.Combine(maDirectory, $"import-{i}.maFile"),
+                    JsonConvert.SerializeObject(CreateAccount(importId)));
+            }
+            var importCandidates = reloaded.FindUnmanagedMaFiles();
+            Assert.Equal(3, importCandidates.Count);
+
+            long beforeImport = Manifest.StorageDirectoryValidationCount;
+            Assert.True(reloaded.ImportUnmanagedMaFiles(importCandidates).Succeeded);
+            // 1 in ImportUnmanagedMaFiles + 1 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 1 in its commit.
+            Assert.Equal(4, Manifest.StorageDirectoryValidationCount - beforeImport);
+
+            SteamGuardAccount uniqueNamed = CreateAccount(76561198000003000UL);
+            uniqueNamed.AccountName = "unique-removal-target";
+            Assert.True(reloaded.SaveAccount(uniqueNamed, false).Succeeded);
+            SteamGuardAccount sessionlessTarget = new SteamGuardAccount { AccountName = "unique-removal-target", Session = null };
+
+            long beforeRemove = Manifest.StorageDirectoryValidationCount;
+            Assert.True(reloaded.RemoveAccount(sessionlessTarget, (string)null));
+            // 1 in FindEntryForRemoval + 1 in CommitStorageTransaction (independent of the 12 stored entries).
+            Assert.Equal(2, Manifest.StorageDirectoryValidationCount - beforeRemove);
         }
 
         [Fact]
@@ -1362,13 +1389,22 @@ namespace SteamAuth.PhoneEnrollment.Tests
             string linkedDataDir = Path.Combine(junctionRoot, "linked-data");
             string directJunctionDataDir = Path.Combine(junctionRoot, "direct-data");
             string directMaFilesJunction = Path.Combine(directJunctionDataDir, "maFiles");
-            Directory.CreateDirectory(realTargetDir);
-            Directory.CreateDirectory(directJunctionDataDir);
 
             try
             {
+                Directory.CreateDirectory(realTargetDir);
+                Directory.CreateDirectory(directJunctionDataDir);
                 CreateDirectoryJunction(linkedDataDir, realTargetDir);
                 CreateDirectoryJunction(directMaFilesJunction, realTargetDir);
+
+                // Seed the junction target with a pending transaction journal, backup, and account file
+                // to prove CommitStorageTransaction validates maDir BEFORE recovery can restore or delete anything.
+                string targetBackupPath = Path.Combine(realTargetDir, TestBackupFilename);
+                string targetCreatedPath = Path.Combine(realTargetDir, "uncommitted-target.maFile");
+                string targetJournalPath = Path.Combine(realTargetDir, ".asda-storage-transaction.json");
+                File.WriteAllText(targetBackupPath, JsonConvert.SerializeObject(Manifest.GenerateNewManifest(false)));
+                File.WriteAllText(targetCreatedPath, "should-not-be-deleted");
+                WriteJournal(realTargetDir, "uncommitted-manifest", "uncommitted-target.maFile", "obsolete-target.maFile", TestBackupFilename);
 
                 // 1. Ancestor junction (ASDA_DATA_DIRECTORY itself is a junction and maFiles does not exist yet):
                 //    Saves must fail without creating maFiles inside the junction target.
@@ -1379,7 +1415,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.Empty(ancestorManifest.Entries);
                 Assert.False(Directory.Exists(Path.Combine(realTargetDir, "maFiles")));
 
-                // 2. Direct junction at maFiles: every storage boundary must reject it.
+                // 2. Direct junction at maFiles: every storage boundary must reject it without modifying target files.
                 Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", directJunctionDataDir);
                 Manifest directManifest = Manifest.GenerateNewManifest(false);
                 directManifest.Entries.Add(new Manifest.ManifestEntry
@@ -1387,27 +1423,72 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     SteamID = 76561198000000000UL,
                     Filename = Manifest.GetCanonicalMaFileFilename(76561198000000000UL)
                 });
+                directManifest.Entries.Add(new Manifest.ManifestEntry
+                {
+                    SteamID = 76561198000000001UL,
+                    Filename = Manifest.GetCanonicalMaFileFilename(76561198000000001UL)
+                });
 
                 Assert.Throws<ManifestParseException>(() => Manifest.GetManifest(true));
                 Assert.Throws<InvalidDataException>(() => directManifest.GetAllAccounts());
                 Assert.False(directManifest.SaveWithResult().Succeeded);
-                Assert.False(directManifest.SaveAccount(CreateAccount(76561198000000001UL), false).Succeeded);
+                Assert.False(directManifest.SaveAccount(CreateAccount(76561198000000002UL), false).Succeeded);
+                Assert.False(directManifest.MoveEntryWithResult(0, 1).Succeeded);
                 Assert.False(directManifest.NormalizeAccountFilenames().Succeeded);
                 Assert.False(directManifest.ChangeEncryptionKey(null, "test-passkey").Succeeded);
+                Assert.False(directManifest.RemoveAccount(CreateAccount(76561198000000000UL)));
 
                 SteamGuardAccount sessionless = CreateAccount();
                 sessionless.Session = null;
                 Assert.False(directManifest.RemoveAccount(sessionless, (string)null));
+
+                var fakeCandidate = new Manifest.UnmanagedMaFileCandidate
+                {
+                    FileName = "uncommitted-target.maFile",
+                    SteamID = 76561198000000099UL,
+                    ContentHash = ComputeContentHash("should-not-be-deleted")
+                };
+                Assert.False(directManifest.ImportUnmanagedMaFiles(new[] { fakeCandidate }).Succeeded);
+
+                // Recovery must not have restored manifest.json or deleted any file inside realTargetDir.
+                Assert.False(File.Exists(Path.Combine(realTargetDir, "manifest.json")));
+                Assert.True(File.Exists(targetBackupPath));
+                Assert.True(File.Exists(targetCreatedPath));
+                Assert.True(File.Exists(targetJournalPath));
+
+                // 3. Mid-operation junction swap check: ReadTextWithLimit rejects an opened file handle
+                //    whose OS final path resolves outside the validated canonical storage directory.
+                string realMaFilesDir = Path.Combine(dataDirectory, "maFiles");
+                Directory.CreateDirectory(realMaFilesDir);
+                string expectedCanonicalDir = Manifest.TryGetValidatedCanonicalDirectoryPath(realMaFilesDir);
+                Assert.False(String.IsNullOrEmpty(expectedCanonicalDir));
+                Assert.Throws<InvalidDataException>(() =>
+                    Manifest.ReadTextWithLimit(
+                        Path.Combine(directMaFilesJunction, "uncommitted-target.maFile"),
+                        1024 * 1024,
+                        expectedCanonicalDir));
             }
             finally
             {
                 Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", dataDirectory);
-                if (Directory.Exists(directMaFilesJunction))
-                    Directory.Delete(directMaFilesJunction, false);
-                if (Directory.Exists(linkedDataDir))
-                    Directory.Delete(linkedDataDir, false);
-                if (Directory.Exists(junctionRoot))
-                    Directory.Delete(junctionRoot, true);
+                try
+                {
+                    if (Directory.Exists(directMaFilesJunction))
+                        Directory.Delete(directMaFilesJunction, false);
+                }
+                catch { }
+                try
+                {
+                    if (Directory.Exists(linkedDataDir))
+                        Directory.Delete(linkedDataDir, false);
+                }
+                catch { }
+                try
+                {
+                    if (Directory.Exists(junctionRoot))
+                        Directory.Delete(junctionRoot, true);
+                }
+                catch { }
             }
         }
 

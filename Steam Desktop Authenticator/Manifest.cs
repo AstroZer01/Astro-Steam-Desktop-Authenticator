@@ -1,3 +1,4 @@
+using Microsoft.Win32.SafeHandles;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SteamAuth;
@@ -8,6 +9,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -444,6 +446,7 @@ namespace Steam_Desktop_Authenticator
 
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
             string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
+            string expectedCanonicalDir = TryGetValidatedCanonicalDirectoryPath(maDir);
             string[] entryPaths = ValidateAndResolveManifestEntries(entriesSnapshot, isEncrypted, validatedRoot);
 
             List<SteamAuth.SteamGuardAccount> accounts = new List<SteamAuth.SteamGuardAccount>();
@@ -452,7 +455,7 @@ namespace Steam_Desktop_Authenticator
                 ManifestEntry entry = entriesSnapshot[i];
                 try
                 {
-                    string fileText = ReadTextWithLimit(entryPaths[i], MaximumAccountFileSizeBytes);
+                    string fileText = ReadTextWithLimit(entryPaths[i], MaximumAccountFileSizeBytes, expectedCanonicalDir);
                     if (isEncrypted)
                     {
                         string decryptedText = FileEncryptor.DecryptData(passKey, entry.Salt, entry.IV, fileText);
@@ -547,6 +550,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
                     string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
+                    string expectedCanonicalDir = TryGetValidatedCanonicalDirectoryPath(maDir);
                     string[] entryPaths = ValidateAndResolveManifestEntries(this.Entries, this.Encrypted, validatedRoot);
 
                     Manifest stagedManifest = CloneForStorage();
@@ -580,7 +584,7 @@ namespace Steam_Desktop_Authenticator
                             continue;
                         }
 
-                        string contents = ReadTextWithLimit(sourcePath, MaximumAccountFileSizeBytes);
+                        string contents = ReadTextWithLimit(sourcePath, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                         stagedFiles.Add(canonicalFilename, contents);
                         stagedManifest.Entries[i].Filename = canonicalFilename;
                         obsoleteFiles.Add(entry.Filename);
@@ -710,6 +714,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
                     string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
+                    string expectedCanonicalDir = TryGetValidatedCanonicalDirectoryPath(maDir);
                     ValidateAndResolveManifestEntries(this.Entries, this.Encrypted, validatedRoot);
                     HashSet<ulong> managedSteamIds = new HashSet<ulong>(Entries.Select(entry => entry.SteamID));
                     HashSet<string> sourceNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -722,7 +727,7 @@ namespace Steam_Desktop_Authenticator
                             return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files is no longer available for import.");
 
                         string path = ResolveValidatedManifestFilePath(validatedRoot, candidate.FileName);
-                        string contents = ReadTextWithLimit(path, MaximumAccountFileSizeBytes);
+                        string contents = ReadTextWithLimit(path, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                         if (!String.Equals(GetContentHash(contents), candidate.ContentHash, StringComparison.Ordinal))
                             return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files changed before it could be imported.");
 
@@ -810,6 +815,7 @@ namespace Steam_Desktop_Authenticator
                 List<string> obsoleteFiles = new List<string>();
                 string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
                 string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
+                string expectedCanonicalDir = TryGetValidatedCanonicalDirectoryPath(maDir);
                 string[] entryPaths = ValidateAndResolveManifestEntries(this.Entries, this.Encrypted, validatedRoot);
 
                 for (int i = 0; i < this.Entries.Count; i++)
@@ -821,7 +827,7 @@ namespace Steam_Desktop_Authenticator
                         return StorageResult.Failure(StorageFailureKind.Validation, "One of the local authenticator files is missing. Encryption settings were not changed.");
                     }
 
-                    string fileContents = ReadTextWithLimit(existingFilename, MaximumAccountFileSizeBytes);
+                    string fileContents = ReadTextWithLimit(existingFilename, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                     if (this.Encrypted)
                     {
                         fileContents = FileEncryptor.DecryptData(oldKey, existingEntry.Salt, existingEntry.IV, fileContents);
@@ -954,9 +960,11 @@ namespace Steam_Desktop_Authenticator
             List<ManifestEntry> matchingEntries = new List<ManifestEntry>();
             string maDir = Path.Combine(GetExecutableDir(), "maFiles");
             string validatedRoot;
+            string expectedCanonicalDir;
             try
             {
                 validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
+                expectedCanonicalDir = TryGetValidatedCanonicalDirectoryPath(maDir);
             }
             catch (Exception ex)
             {
@@ -967,7 +975,7 @@ namespace Steam_Desktop_Authenticator
             {
                 try
                 {
-                    string contents = ReadTextWithLimit(ResolveValidatedManifestFilePath(validatedRoot, candidate), MaximumAccountFileSizeBytes);
+                    string contents = ReadTextWithLimit(ResolveValidatedManifestFilePath(validatedRoot, candidate), MaximumAccountFileSizeBytes, expectedCanonicalDir);
                     if (Encrypted)
                     {
                         contents = FileEncryptor.DecryptData(passKey, candidate.Salt, candidate.IV, contents);
@@ -1279,6 +1287,9 @@ namespace Steam_Desktop_Authenticator
 
                 try
                 {
+                    bool maDirExisted = Directory.Exists(maDir);
+                    string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
+
                     // A cleanup failure leaves the previous journal intentionally. Complete it
                     // before replacing it so its obsolete files remain recoverable.
                     List<string> retainedObsoleteFilenames = new List<string>();
@@ -1299,8 +1310,6 @@ namespace Steam_Desktop_Authenticator
                     }
 
                     CopySettingsInto(stagedManifest);
-                    bool maDirExisted = Directory.Exists(maDir);
-                    string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
                     ValidateAndResolveManifestEntries(stagedManifest.Entries, stagedManifest.Encrypted, validatedRoot);
                     string manifestContents = JsonConvert.SerializeObject(stagedManifest, storageJsonSettings);
                     if (Encoding.UTF8.GetByteCount(manifestContents) > MaximumManifestFileSizeBytes)
@@ -1760,7 +1769,90 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static string ReadTextWithLimit(string filename, long maximumBytes)
+        private const uint FileShareReadWriteDelete = 0x00000001 | 0x00000002 | 0x00000004;
+        private const uint OpenExisting = 3;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileNameNormalized = 0x0;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string lpFileName,
+            uint dwDesiredAccess,
+            uint dwShareMode,
+            IntPtr lpSecurityAttributes,
+            uint dwCreationDisposition,
+            uint dwFlagsAndAttributes,
+            IntPtr hTemplateFile);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle hFile,
+            [Out] char[] lpszFilePath,
+            uint cchFilePath,
+            uint dwFlags);
+
+        private static string TryGetFinalPathNameByHandle(SafeFileHandle handle)
+        {
+            if (handle == null || handle.IsInvalid)
+                return null;
+
+            uint requiredLength = GetFinalPathNameByHandleW(handle, null, 0, FileNameNormalized);
+            if (requiredLength == 0)
+                return null;
+
+            char[] buffer = new char[requiredLength];
+            uint written = GetFinalPathNameByHandleW(handle, buffer, requiredLength, FileNameNormalized);
+            if (written == 0 || written >= requiredLength)
+                return null;
+
+            return new string(buffer, 0, (int)written);
+        }
+
+        internal static string TryGetValidatedCanonicalDirectoryPath(string directoryPath)
+        {
+            if (String.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
+                return null;
+
+            using (SafeFileHandle handle = CreateFileW(
+                directoryPath,
+                0,
+                FileShareReadWriteDelete,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagBackupSemantics,
+                IntPtr.Zero))
+            {
+                return TryGetFinalPathNameByHandle(handle);
+            }
+        }
+
+        private static void VerifyOpenedFileWithinCanonicalDirectory(
+            SafeFileHandle fileHandle,
+            string expectedFilename,
+            string expectedCanonicalDirectory)
+        {
+            if (String.IsNullOrEmpty(expectedCanonicalDirectory))
+                return;
+
+            string finalFilePath = TryGetFinalPathNameByHandle(fileHandle);
+            if (String.IsNullOrEmpty(finalFilePath))
+                throw new InvalidDataException("A storage file path could not be verified.");
+
+            string normalizedExpectedDir = expectedCanonicalDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            int lastSeparator = finalFilePath.LastIndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar });
+            if (lastSeparator <= 0)
+                throw new InvalidDataException("A storage file resolved outside the account-data directory.");
+
+            string actualDir = finalFilePath.Substring(0, lastSeparator);
+            string actualName = finalFilePath.Substring(lastSeparator + 1);
+            if (!String.Equals(actualDir, normalizedExpectedDir, StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(actualName, expectedFilename, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("A storage file resolved outside the account-data directory.");
+            }
+        }
+
+        internal static string ReadTextWithLimit(string filename, long maximumBytes, string expectedCanonicalDirectory = null)
         {
             FileInfo fileInfo = new FileInfo(filename);
             if (!fileInfo.Exists)
@@ -1773,6 +1865,7 @@ namespace Steam_Desktop_Authenticator
             using (FileStream stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan))
             using (MemoryStream contents = new MemoryStream())
             {
+                VerifyOpenedFileWithinCanonicalDirectory(stream.SafeFileHandle, Path.GetFileName(filename), expectedCanonicalDirectory);
                 byte[] buffer = new byte[81920];
                 int bytesRead;
                 long totalBytes = 0;
