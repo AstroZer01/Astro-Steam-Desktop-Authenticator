@@ -409,10 +409,10 @@
     function switchTab(tabId) {
         if (!validTabIds.has(tabId)) return;
         if (activeTabId === tabId) return;
-        if (activeTabId === 'settings' && tabId !== 'settings' && settingsDirty) {
+        if (activeTabId === 'settings' && tabId !== 'settings' && (settingsDirty || settingsSavePending)) {
             if (tabId !== 'trades') pendingConfirmationTab = null;
             pendingSettingsNavigation = tabId;
-            openUnsavedSettingsModal();
+            if (settingsDirty) openUnsavedSettingsModal();
             return;
         }
         performTabSwitch(tabId);
@@ -948,7 +948,7 @@
 
     function openTradeConfirmations(category = 'all') {
         const targetCategory = validConfirmationTabs.has(category) ? category : null;
-        if (activeTabId === 'settings' && settingsDirty) {
+        if (activeTabId === 'settings' && (settingsDirty || settingsSavePending)) {
             pendingConfirmationTab = targetCategory;
             switchTab('trades');
             return;
