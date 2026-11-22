@@ -1300,6 +1300,137 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
+        [Fact]
+        public void PathValidation_ValidatesStorageDirectoryOncePerOperationRegardlessOfEntryCount()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            const int accountCount = 8;
+            for (int i = 0; i < accountCount; i++)
+            {
+                Assert.True(manifest.SaveAccount(CreateAccount(76561198000001000UL + (ulong)i), false).Succeeded);
+            }
+
+            long beforeGetAll = Manifest.StorageDirectoryValidationCount;
+            SteamGuardAccount[] loaded = manifest.GetAllAccounts();
+            long getAllValidations = Manifest.StorageDirectoryValidationCount - beforeGetAll;
+            Assert.Equal(accountCount, loaded.Length);
+            Assert.Equal(1, getAllValidations);
+
+            long beforeSaveWithResult = Manifest.StorageDirectoryValidationCount;
+            Assert.True(manifest.SaveWithResult().Succeeded);
+            Assert.Equal(1, Manifest.StorageDirectoryValidationCount - beforeSaveWithResult);
+
+            long beforeMove = Manifest.StorageDirectoryValidationCount;
+            Assert.True(manifest.MoveEntryWithResult(0, 1).Succeeded);
+            Assert.Equal(1, Manifest.StorageDirectoryValidationCount - beforeMove);
+
+            long beforeGetManifest = Manifest.StorageDirectoryValidationCount;
+            Manifest reloaded = Manifest.GetManifest(true);
+            long getManifestValidations = Manifest.StorageDirectoryValidationCount - beforeGetManifest;
+            Assert.Equal(accountCount, reloaded.Entries.Count);
+            // Constant boundary validations (startup check, entry validation, recompute, guid normalization),
+            // never scaling with accountCount.
+            Assert.Equal(4, getManifestValidations);
+
+            // Convert 5 entries to GUID names and confirm NormalizeAccountFilenames does O(1) directory validations.
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            for (int i = 0; i < 5; i++)
+            {
+                Manifest.ManifestEntry entry = reloaded.Entries[i];
+                string guidFilename = entry.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
+                File.Move(Path.Combine(maDirectory, entry.Filename), Path.Combine(maDirectory, guidFilename));
+                entry.Filename = guidFilename;
+            }
+            Assert.True(reloaded.Save());
+
+            long beforeNormalize = Manifest.StorageDirectoryValidationCount;
+            Assert.True(reloaded.NormalizeAccountFilenames().Succeeded);
+            Assert.Equal(2, Manifest.StorageDirectoryValidationCount - beforeNormalize);
+
+            long beforeEncrypt = Manifest.StorageDirectoryValidationCount;
+            Assert.True(reloaded.ChangeEncryptionKey(null, "test-passkey").Succeeded);
+            // 1 in ChangeEncryptionKey + 1 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 1 in its commit.
+            Assert.Equal(4, Manifest.StorageDirectoryValidationCount - beforeEncrypt);
+            Assert.Equal(accountCount, reloaded.GetAllAccounts("test-passkey").Length);
+        }
+
+        [Fact]
+        public void PathValidation_RejectsDirectoryJunctionAtStorageRootAndAncestor()
+        {
+            string junctionRoot = Path.Combine(Path.GetTempPath(), "asda-junction-tests", Guid.NewGuid().ToString("N"));
+            string realTargetDir = Path.Combine(junctionRoot, "target");
+            string linkedDataDir = Path.Combine(junctionRoot, "linked-data");
+            string directJunctionDataDir = Path.Combine(junctionRoot, "direct-data");
+            string directMaFilesJunction = Path.Combine(directJunctionDataDir, "maFiles");
+            Directory.CreateDirectory(realTargetDir);
+            Directory.CreateDirectory(directJunctionDataDir);
+
+            try
+            {
+                CreateDirectoryJunction(linkedDataDir, realTargetDir);
+                CreateDirectoryJunction(directMaFilesJunction, realTargetDir);
+
+                // 1. Ancestor junction (ASDA_DATA_DIRECTORY itself is a junction and maFiles does not exist yet):
+                //    Saves must fail without creating maFiles inside the junction target.
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", linkedDataDir);
+                Manifest ancestorManifest = Manifest.GenerateNewManifest(false);
+                Assert.False(ancestorManifest.SaveWithResult().Succeeded);
+                Assert.False(ancestorManifest.SaveAccount(CreateAccount(), false).Succeeded);
+                Assert.Empty(ancestorManifest.Entries);
+                Assert.False(Directory.Exists(Path.Combine(realTargetDir, "maFiles")));
+
+                // 2. Direct junction at maFiles: every storage boundary must reject it.
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", directJunctionDataDir);
+                Manifest directManifest = Manifest.GenerateNewManifest(false);
+                directManifest.Entries.Add(new Manifest.ManifestEntry
+                {
+                    SteamID = 76561198000000000UL,
+                    Filename = Manifest.GetCanonicalMaFileFilename(76561198000000000UL)
+                });
+
+                Assert.Throws<ManifestParseException>(() => Manifest.GetManifest(true));
+                Assert.Throws<InvalidDataException>(() => directManifest.GetAllAccounts());
+                Assert.False(directManifest.SaveWithResult().Succeeded);
+                Assert.False(directManifest.SaveAccount(CreateAccount(76561198000000001UL), false).Succeeded);
+                Assert.False(directManifest.NormalizeAccountFilenames().Succeeded);
+                Assert.False(directManifest.ChangeEncryptionKey(null, "test-passkey").Succeeded);
+
+                SteamGuardAccount sessionless = CreateAccount();
+                sessionless.Session = null;
+                Assert.False(directManifest.RemoveAccount(sessionless, (string)null));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", dataDirectory);
+                if (Directory.Exists(directMaFilesJunction))
+                    Directory.Delete(directMaFilesJunction, false);
+                if (Directory.Exists(linkedDataDir))
+                    Directory.Delete(linkedDataDir, false);
+                if (Directory.Exists(junctionRoot))
+                    Directory.Delete(junctionRoot, true);
+            }
+        }
+
+        private static void CreateDirectoryJunction(string junctionPath, string targetPath)
+        {
+            using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c mklink /J \"{junctionPath}\" \"{targetPath}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            }))
+            {
+                Assert.NotNull(process);
+                string stdout = process.StandardOutput.ReadToEnd();
+                string stderr = process.StandardError.ReadToEnd();
+                process.WaitForExit();
+                Assert.True(process.ExitCode == 0, $"mklink /J failed ({process.ExitCode}): {stdout} {stderr}");
+            }
+        }
+
         public void Dispose()
         {
             Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);
