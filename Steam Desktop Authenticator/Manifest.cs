@@ -1386,7 +1386,8 @@ namespace Steam_Desktop_Authenticator
                 {
                     ManifestHash = GetContentHash(currentManifestContents),
                     CreatedFilenames = new List<string>(),
-                    ObsoleteFilenames = retainedObsoleteFilenames.ToList(),
+                    ObsoleteFilenames = new List<string>(),
+                    RetainedObsoleteFilenames = retainedObsoleteFilenames.ToList(),
                     BackupFilename = null
                 };
                 WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings));
@@ -1444,12 +1445,13 @@ namespace Steam_Desktop_Authenticator
                         if (!DeleteFilesBestEffort(maDir, committedObsolete, "An obsolete authenticator file could not be removed during storage recovery."))
                         {
                             // The manifest is committed and its pre-commit backup is already gone,
-                            // so its newly created files are live. Retain only obsolete-file cleanup
-                            // state before allowing a later settings save to replace the manifest.
+                            // so its newly created files are live. Store pending deletions in
+                            // retained_obsolete_filenames so they survive a subsequent manifest
+                            // update even if the process exits before rebasing the journal hash.
                             journal.BackupFilename = null;
                             journal.CreatedFilenames = new List<string>();
-                            journal.ObsoleteFilenames = committedObsolete;
-                            journal.RetainedObsoleteFilenames = null;
+                            journal.ObsoleteFilenames = new List<string>();
+                            journal.RetainedObsoleteFilenames = committedObsolete;
                             WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
                             if (retainedObsoleteFilenames != null)
                             {
@@ -1514,15 +1516,25 @@ namespace Steam_Desktop_Authenticator
                     if (journal == null || String.IsNullOrWhiteSpace(journal.ManifestHash))
                         throw new InvalidDataException("The retained storage journal is invalid.");
 
-                    foreach (string filename in (journal.ObsoleteFilenames ?? new List<string>()))
+                    List<string> pendingRetainedObsolete = (journal.ObsoleteFilenames ?? new List<string>())
+                        .Concat(journal.RetainedObsoleteFilenames ?? new List<string>())
+                        .Where(filename => !String.IsNullOrWhiteSpace(filename))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    foreach (string filename in pendingRetainedObsolete)
                         ValidateStorageFilename(filename);
 
                     string backupFilename = GetValidatedStorageBackupPath(maDir, journal.BackupFilename);
-                    if (backupFilename != null)
-                        DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed while rebasing retained storage cleanup.");
+                    if (backupFilename != null &&
+                        !DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed while rebasing retained storage cleanup."))
+                    {
+                        return false;
+                    }
 
                     journal.ManifestHash = GetContentHash(manifestContents);
                     journal.CreatedFilenames = new List<string>();
+                    journal.ObsoleteFilenames = new List<string>();
+                    journal.RetainedObsoleteFilenames = pendingRetainedObsolete.Count > 0 ? pendingRetainedObsolete : null;
                     journal.BackupFilename = null;
                     WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
                     return true;

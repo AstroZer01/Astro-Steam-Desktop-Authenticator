@@ -1078,6 +1078,39 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void StartupRecovery_CleansRetainedObsoleteFileEvenWhenManifestChangesBeforeJournalRebase()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-before-settings-crash.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(obsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", "retained-before-settings-crash.maFile", null);
+
+            // Transition the journal into cleanup-only retained state while obsoletePath is locked.
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Manifest reloadedWhileLocked = Manifest.GetManifest(true);
+                Assert.Single(reloadedWhileLocked.Entries);
+                Assert.True(File.Exists(journalPath));
+            }
+
+            // Simulate SaveWithResult updating manifest.json and crashing before RebaseRetainedStorageTransaction runs.
+            JObject updatedManifest = JObject.Parse(File.ReadAllText(manifestPath));
+            updatedManifest["minimize_to_tray"] = !(updatedManifest["minimize_to_tray"]?.Value<bool>() ?? true);
+            File.WriteAllText(manifestPath, updatedManifest.ToString(Formatting.None));
+
+            // Next startup sees a hash mismatch against the cleanup-only journal, yet must still clean up the retained obsolete file.
+            Manifest recovered = Manifest.GetManifest(true);
+            Assert.Single(recovered.Entries);
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
         public void FailedImportOverlappingRetainedObsoleteFile_PreservesCleanupOnRestart()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
