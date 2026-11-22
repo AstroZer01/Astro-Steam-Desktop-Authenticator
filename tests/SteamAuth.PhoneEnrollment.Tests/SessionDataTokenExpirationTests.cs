@@ -204,7 +204,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     BeforeTokenExpirationCacheStore = _ =>
                     {
                         accessReaderPaused.Set();
-                        releaseAccessReader.Wait(TimeSpan.FromSeconds(5));
+                        Assert.True(releaseAccessReader.Wait(TimeSpan.FromSeconds(5)));
                     }
                 };
 
@@ -229,7 +229,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     BeforeTokenExpirationCacheStore = _ =>
                     {
                         refreshReaderPaused.Set();
-                        releaseRefreshReader.Wait(TimeSpan.FromSeconds(5));
+                        Assert.True(releaseRefreshReader.Wait(TimeSpan.FromSeconds(5)));
                     }
                 };
 
@@ -265,7 +265,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                         if (String.Equals(token, validToken, StringComparison.Ordinal))
                         {
                             readerPaused.Set();
-                            releaseReader.Wait(TimeSpan.FromSeconds(5));
+                            Assert.True(releaseReader.Wait(TimeSpan.FromSeconds(5)));
                         }
                     }
                 };
