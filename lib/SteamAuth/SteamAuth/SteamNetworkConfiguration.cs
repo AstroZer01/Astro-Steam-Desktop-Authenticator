@@ -63,6 +63,10 @@ namespace SteamAuth
                 PooledConnectionLifetime = DefaultPooledConnectionLifetime
             };
 #else
+            HttpMessageHandler socketsHandler = TryCreateSocketsHttpHandler(proxy, allowAutoRedirect);
+            if (socketsHandler != null)
+                return socketsHandler;
+
             return new HttpClientHandler
             {
                 UseCookies = false,
@@ -73,6 +77,55 @@ namespace SteamAuth
             };
 #endif
         }
+
+#if !NET5_0_OR_GREATER
+        private static HttpMessageHandler TryCreateSocketsHttpHandler(IWebProxy proxy, bool allowAutoRedirect)
+        {
+            Type handlerType = typeof(HttpClientHandler).Assembly.GetType("System.Net.Http.SocketsHttpHandler", false);
+            if (handlerType == null)
+                return null;
+
+            HttpMessageHandler handler = null;
+            try
+            {
+                handler = Activator.CreateInstance(handlerType) as HttpMessageHandler;
+                if (handler == null)
+                    return null;
+
+                DecompressionMethods decompression = Enum.TryParse("All", out DecompressionMethods allDecompression)
+                    ? allDecompression
+                    : DecompressionMethods.GZip | DecompressionMethods.Deflate;
+
+                if (!TrySetProperty(handlerType, handler, "UseCookies", false) ||
+                    !TrySetProperty(handlerType, handler, "AllowAutoRedirect", allowAutoRedirect) ||
+                    !TrySetProperty(handlerType, handler, "UseProxy", proxy != null) ||
+                    !TrySetProperty(handlerType, handler, "Proxy", proxy) ||
+                    !TrySetProperty(handlerType, handler, "AutomaticDecompression", decompression) ||
+                    !TrySetProperty(handlerType, handler, "PooledConnectionLifetime", DefaultPooledConnectionLifetime))
+                {
+                    handler.Dispose();
+                    return null;
+                }
+
+                return handler;
+            }
+            catch
+            {
+                handler?.Dispose();
+                return null;
+            }
+        }
+
+        private static bool TrySetProperty(Type targetType, object instance, string propertyName, object value)
+        {
+            System.Reflection.PropertyInfo property = targetType.GetProperty(propertyName);
+            if (property == null || !property.CanWrite)
+                return false;
+
+            property.SetValue(instance, value);
+            return true;
+        }
+#endif
 
         internal static HttpClientLease AcquireHttpClient()
         {
