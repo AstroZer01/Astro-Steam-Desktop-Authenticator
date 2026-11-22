@@ -400,6 +400,74 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(Manifest.GetManifest(true).AutoConfirmMarketTransactions);
         }
 
+        [Theory]
+        [InlineData("approve")]
+        [InlineData("deny-exception")]
+        public async Task SaveSettingsAsync_CanceledProxyDuringAutomaticLoginActionConfirmationPreventsPersistence(string actionCase)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            if (actionCase == "deny-exception")
+                manifest.LoginActionMode = LoginActionModes.Deny;
+
+            StorageResult baselineSave = manifest.SaveWithResult();
+            Assert.True(baselineSave.Succeeded, baselineSave.UserMessage);
+
+            int proxyTests = 0;
+            int confirmations = 0;
+            int proxyApplications = 0;
+            string requestedMode = actionCase == "approve" ? LoginActionModes.ApprovePersistent : LoginActionModes.Deny;
+            bool enableDenyException = actionCase == "deny-exception";
+            MethodInfo cancelProxyOperation = typeof(MainForm).GetMethod(
+                "CancelProxyOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(cancelProxyOperation);
+
+            MainForm form = null;
+            using (form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                async (_, __) =>
+                {
+                    proxyTests++;
+                    await Task.Yield();
+                    return new ProxyTestResult { Succeeded = true, Message = "Proxy test succeeded." };
+                },
+                _ => proxyApplications++,
+                confirmAutomaticLoginAction: _ =>
+                {
+                    confirmations++;
+                    cancelProxyOperation.Invoke(form, null);
+                    return DialogResult.Yes;
+                }))
+            {
+                await form.SaveSettingsAsync(CreateLoginActionSettingsPayload(
+                    proxyEnabled: true,
+                    requestedMode,
+                    enableDenyException));
+
+                Assert.False(GetPrivateField<bool>(form, "settingsSaveInProgress"));
+                Assert.Null(GetPrivateField<CancellationTokenSource>(form, "proxyTestCancellationSource"));
+            }
+
+            Assert.Equal(1, proxyTests);
+            Assert.Equal(1, confirmations);
+            Assert.Equal(0, proxyApplications);
+
+            string expectedMode = actionCase == "deny-exception" ? LoginActionModes.Deny : LoginActionModes.Manual;
+            Assert.Equal(expectedMode, manifest.LoginActionMode);
+            Assert.False(manifest.ProxyEnabled);
+            Assert.False(manifest.AutoConfirmMarketTransactions);
+            Assert.False(manifest.LoginActionAutoAllowIpEnabled);
+            Assert.False(manifest.LoginActionAutoAllowCurrentDeviceIp);
+
+            Manifest persisted = Manifest.GetManifest(true);
+            Assert.Equal(expectedMode, persisted.LoginActionMode);
+            Assert.False(persisted.ProxyEnabled);
+            Assert.False(persisted.AutoConfirmMarketTransactions);
+            Assert.False(persisted.LoginActionAutoAllowIpEnabled);
+            Assert.False(persisted.LoginActionAutoAllowCurrentDeviceIp);
+        }
+
         private static JObject CreateSettingsPayload(bool checkForUpdates, bool proxyEnabled, bool autoConfirmMarket)
         {
             return new JObject
