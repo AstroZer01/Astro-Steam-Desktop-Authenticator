@@ -4402,12 +4402,10 @@ namespace Steam_Desktop_Authenticator
             {
                 if (!TryGetWebMessageString(payload, "tabName", 32, out string tabName, true))
                     return;
-                if (PersistTradeConfirmationSelectedTab(tabName))
-                {
-                    _ = ExecuteScriptSafelyAsync(
-                        $"confirmationTabPersisted({JsonConvert.SerializeObject(tabName)});",
-                        "Trade confirmation tab persistence");
-                }
+                bool persisted = PersistTradeConfirmationSelectedTab(tabName);
+                _ = ExecuteScriptSafelyAsync(
+                    $"confirmationTabPersistCompleted({JsonConvert.SerializeObject(tabName)}, {persisted.ToString().ToLowerInvariant()});",
+                    "Trade confirmation tab persistence");
             }
             else if (action == "load_trades_cache")
             {

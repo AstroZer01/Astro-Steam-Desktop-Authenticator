@@ -845,6 +845,7 @@
     const validConfirmationTabs = new Set(confirmationTabOrder);
     let activeConfirmationTab = 'all';
     let persistedConfirmationTab = 'all';
+    let pendingConfirmationTabPersistCount = 0;
     let pendingConfirmationTab = null;
     let cachedConfirmations = [];
     let cachedConfirmationsSelection = null;
@@ -920,11 +921,13 @@
         const normalized = validConfirmationTabs.has(tabId) ? tabId : 'all';
         activeConfirmationTab = normalized;
         persistedConfirmationTab = normalized;
+        pendingConfirmationTabPersistCount = 0;
         renderConfirmations();
     }
 
-    function confirmationTabPersisted(tabId) {
-        if (validConfirmationTabs.has(tabId)) {
+    function confirmationTabPersistCompleted(tabId, succeeded) {
+        pendingConfirmationTabPersistCount = Math.max(0, pendingConfirmationTabPersistCount - 1);
+        if (succeeded && validConfirmationTabs.has(tabId)) {
             persistedConfirmationTab = tabId;
         }
     }
@@ -933,7 +936,8 @@
         if (!validConfirmationTabs.has(tabId)) return;
         activeConfirmationTab = tabId;
         renderConfirmations();
-        if (persist && persistedConfirmationTab !== tabId) {
+        if (persist && (pendingConfirmationTabPersistCount > 0 || persistedConfirmationTab !== tabId)) {
+            pendingConfirmationTabPersistCount++;
             window.chrome.webview.postMessage({ action: 'confirmation_tab_changed', tabName: tabId });
         }
         if (focusTab) {
@@ -1762,9 +1766,10 @@
                 btn.classList.remove('bg-secondary', 'text-on-secondary');
             }, 1500);
         }
-        const navigationTarget = saveContext && saveContext.startsWith('tab:')
-            ? saveContext.substring(4)
-            : pendingSettingsNavigation;
+        const navigationTarget = saveContext === 'exit'
+            ? null
+            : (pendingSettingsNavigation ||
+                (saveContext && saveContext.startsWith('tab:') ? saveContext.substring(4) : null));
         pendingSettingsNavigation = null;
         if (navigationTarget && validTabIds.has(navigationTarget)) {
             performTabSwitch(navigationTarget);
