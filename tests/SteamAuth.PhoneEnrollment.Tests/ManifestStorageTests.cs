@@ -1740,13 +1740,13 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
             Assert.True(File.Exists(racedPath));
 
-            // Duplicate exact or differently-cased journal_version fields must fail closed.
-            string exactDupVersionJson = $"{{\"journal_version\":2,\"journal_version\":null,\"manifest_hash\":\"{ComputeContentHash("dup-exact")}\",\"created_filenames\":[\"{racedFilename}\"],\"obsolete_filenames\":[],\"backup_filename\":null}}";
+            // Duplicate exact or differently-cased journal_version fields in otherwise valid journals must fail closed.
+            string exactDupVersionJson = $"{{\"journal_version\":null,\"journal_version\":2,\"manifest_hash\":\"{ComputeContentHash("dup-exact")}\",\"created_filenames\":[\"{racedFilename}\"],\"created_file_hashes\":{{\"{racedFilename}\":\"{ComputeContentHash(otherWriterContents)}\"}},\"obsolete_filenames\":[],\"backup_filename\":null}}";
             File.WriteAllText(journalPath, exactDupVersionJson);
             Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
             Assert.True(File.Exists(racedPath));
 
-            string casedDupVersionJson = $"{{\"journal_version\":2,\"JOURNAL_VERSION\":null,\"manifest_hash\":\"{ComputeContentHash("dup-cased")}\",\"created_filenames\":[\"{racedFilename}\"],\"obsolete_filenames\":[],\"backup_filename\":null}}";
+            string casedDupVersionJson = $"{{\"journal_version\":2,\"JOURNAL_VERSION\":null,\"manifest_hash\":\"{ComputeContentHash("dup-cased")}\",\"created_filenames\":[\"{racedFilename}\"],\"created_file_hashes\":{{\"{racedFilename}\":\"{ComputeContentHash(otherWriterContents)}\"}},\"obsolete_filenames\":[],\"backup_filename\":null}}";
             File.WriteAllText(journalPath, casedDupVersionJson);
             Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
             Assert.True(File.Exists(racedPath));
