@@ -267,11 +267,11 @@ namespace Steam_Desktop_Authenticator
 
             SafeFileHandle dirHandle = CreateFileW(
                 parentDir,
-                0,
-                FileShareAll,
+                FileListDirectory,
+                FileShareReadWrite,
                 IntPtr.Zero,
                 OpenExisting,
-                FileFlagBackupSemantics,
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
                 IntPtr.Zero);
             if (dirHandle.IsInvalid)
             {
@@ -341,7 +341,10 @@ namespace Steam_Desktop_Authenticator
             public uint FileIndexLow;
         }
 
+        private const uint FileListDirectory = 0x00000001;
         private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const uint FileShareReadWrite = 0x00000001 | 0x00000002;
         private const uint FileShareAll = 0x00000001 | 0x00000002 | 0x00000004;
         private const uint OpenExisting = 3;
 

@@ -215,11 +215,11 @@ namespace Steam_Desktop_Authenticator
             if (!String.IsNullOrWhiteSpace(expectedTransferAttemptId))
             {
                 PendingTransferMarkerRecord current = TryReadMarker(steamId);
-                if (current != null &&
-                    !String.IsNullOrWhiteSpace(current.TransferAttemptId) &&
+                if (current == null ||
                     !String.Equals(current.TransferAttemptId, expectedTransferAttemptId, StringComparison.Ordinal))
                 {
-                    // Marker belongs to a different transfer attempt; never delete it.
+                    // Marker is missing, corrupt/unreadable, or belongs to a different transfer attempt;
+                    // fail closed so scoped cleanup never removes another attempt's warning.
                     return;
                 }
             }

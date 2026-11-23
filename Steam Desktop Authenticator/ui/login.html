@@ -50,6 +50,8 @@ input::-ms-reveal { display: none; }
 </div>
 <script>
     function submitLogin() {
+        let btn = document.getElementById('btn-login');
+        if (btn && btn.disabled) return;
         let u = document.getElementById('username').value;
         let p = document.getElementById('password').value;
         let saveRow = document.getElementById('save-password-row');

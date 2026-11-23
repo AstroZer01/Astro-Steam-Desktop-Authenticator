@@ -923,5 +923,72 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 throw new InvalidOperationException("Unexpected method: " + methodName);
             }
         }
+
+        [Fact]
+        public void DeleteMarkerBestEffort_FailsClosedOnCorruptMarkerWhenAttemptScoped_ButDeletesWhenUnscoped()
+        {
+            ulong steamId = 76561198000000088UL;
+            string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+            Directory.CreateDirectory(maDir);
+            string markerPath = PendingTransferMarker.GetMarkerPath(steamId);
+            File.WriteAllText(markerPath, "{ corrupt json without attempt id");
+
+            // Attempt-scoped cleanup MUST NOT delete a corrupt/unreadable marker
+            PendingTransferMarker.DeleteMarkerBestEffort(steamId, "attempt-old");
+            Assert.True(File.Exists(markerPath));
+            Assert.True(PendingTransferMarker.HasMarker(steamId));
+
+            // Unscoped user dismissal MUST delete the corrupt marker
+            PendingTransferMarker.DeleteMarkerBestEffort(steamId);
+            Assert.False(File.Exists(markerPath));
+            Assert.False(PendingTransferMarker.HasMarker(steamId));
+        }
+
+        [Fact]
+        public async Task TransferFenceDispose_HandsOffToUnresolvedMarkerSetAtomicallyBeforeUnlocking()
+        {
+            ulong steamId = 76561198000000089UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            using (MainForm form = new MainForm(manifest, new UpdatePreferenceRevisionTracker(), null, _ => { }))
+            {
+                var beginFenceMethod = typeof(MainForm).GetMethod(
+                    "BeginTransferFenceAsync",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                var isBusyMethod = typeof(MainForm).GetMethod(
+                    "IsAccountBusyWithRecoveryOrTransfer",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                var unresolvedField = typeof(MainForm).GetField(
+                    "unresolvedTransferMarkerSteamIds",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+                Assert.NotNull(beginFenceMethod);
+                Assert.NotNull(isBusyMethod);
+                Assert.NotNull(unresolvedField);
+
+                var unresolvedDict = (System.Collections.Concurrent.ConcurrentDictionary<ulong, byte>)unresolvedField.GetValue(form);
+                Assert.False(unresolvedDict.ContainsKey(steamId));
+
+                Task<IDisposable> fenceTask = (Task<IDisposable>)beginFenceMethod.Invoke(form, new object[] { steamId, CancellationToken.None });
+                IDisposable fence = await fenceTask;
+                Assert.NotNull(fence);
+                Assert.True((bool)isBusyMethod.Invoke(form, new object[] { steamId }));
+
+                // Simulate OutcomeUnknown leaving a pending marker on disk before fence disposal
+                Assert.True(PendingTransferMarker.TryWriteMarker(steamId, "fence_user", "android:fence", "attempt-unknown"));
+
+                // Disposing the fence MUST populate unresolvedTransferMarkerSteamIds immediately
+                // even before LoginForm closes or StartAuthenticatorTransferFlow calls RefreshUnresolvedTransferMarkers()
+                fence.Dispose();
+                Assert.True(unresolvedDict.ContainsKey(steamId));
+                Assert.True((bool)isBusyMethod.Invoke(form, new object[] { steamId }));
+
+                // Clean up marker and re-verify that a subsequent fence dispose clears unresolvedDict when no marker exists
+                PendingTransferMarker.DeleteMarkerBestEffort(steamId, "attempt-unknown");
+                IDisposable secondFence = await (Task<IDisposable>)beginFenceMethod.Invoke(form, new object[] { steamId, CancellationToken.None });
+                secondFence.Dispose();
+                Assert.False(unresolvedDict.ContainsKey(steamId));
+                Assert.False((bool)isBusyMethod.Invoke(form, new object[] { steamId }));
+            }
+        }
     }
 }

@@ -566,10 +566,10 @@ namespace SteamAuth
                 case 21: // NotLoggedOn
                 case 27: // Expired
                 case 42: // NoMatch
-                case 43: // AccountNotFound
+                case 43: // AccountDisabled
                 case 65: // InvalidLoginAuthCode
                 case 88: // TwoFactorCodeMismatch
-                case 96: // SMSCodeExpired
+                case 96: // AccountActivityLimitExceeded
                     return true;
                 default:
                     return false;

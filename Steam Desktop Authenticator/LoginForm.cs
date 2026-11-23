@@ -271,6 +271,9 @@ namespace Steam_Desktop_Authenticator
 
             if (action == "login")
             {
+                if (transferContinueInFlight || !btnSteamLogin.Enabled)
+                    return;
+
                 if (payload["user"]?.Type != JTokenType.String || payload["pass"]?.Type != JTokenType.String)
                     return;
 
@@ -343,6 +346,9 @@ namespace Steam_Desktop_Authenticator
 
         private async void btnSteamLogin_Click(object sender, EventArgs e)
         {
+            if (transferContinueInFlight || !btnSteamLogin.Enabled)
+                return;
+
             // Disable button while we login
             btnSteamLogin.Enabled = false;
             btnSteamLogin.Text = "Logging in...";

@@ -203,6 +203,50 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void ExportPlainMaFile_AndEncryptedZip_RejectNtfsJunctionDestinationDirectory()
+        {
+            if (!System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
+                return;
+
+            string realTargetDir = Path.Combine(exportDir, "real-export-target");
+            Directory.CreateDirectory(realTargetDir);
+            string junctionDir = Path.Combine(exportDir, "junction-export-dir");
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c mklink /J \"{junctionDir}\" \"{realTargetDir}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            using (var proc = System.Diagnostics.Process.Start(psi))
+            {
+                proc.WaitForExit(10000);
+                if (proc.ExitCode != 0 || !Directory.Exists(junctionDir))
+                    return; // Skip if filesystem does not support NTFS junctions
+            }
+
+            try
+            {
+                SteamGuardAccount account = CreateSampleAccount(76561198000001095UL, "junction_user");
+                string plainPath = Path.Combine(junctionDir, "junction.maFile");
+                string zipPath = Path.Combine(junctionDir, "junction.zip");
+
+                Assert.Throws<InvalidDataException>(() => AccountExportService.ExportPlainMaFile(account, plainPath, includeSession: false));
+                Assert.Throws<InvalidDataException>(() => AccountExportService.ExportEncryptedZip(new[] { account }, zipPath, "pass1234", includeSession: false));
+                Assert.False(File.Exists(Path.Combine(realTargetDir, "junction.maFile")));
+                Assert.False(File.Exists(Path.Combine(realTargetDir, "junction.zip")));
+            }
+            finally
+            {
+                if (Directory.Exists(junctionDir))
+                    Directory.Delete(junctionDir, false);
+            }
+        }
+
+        [Fact]
         public void SecretQrBuilder_GeneratesValidKeePassXcAndBitwardenUris_RoundTripsThroughZXing_AndMatchesSteamTotp()
         {
             // Fixed 20-byte RFC test secret vector

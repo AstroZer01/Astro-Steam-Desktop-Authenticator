@@ -56,6 +56,8 @@ namespace Steam_Desktop_Authenticator
         private readonly Dictionary<string, string> unavailableLoginAccounts = new Dictionary<string, string>();
         private readonly HashSet<ulong> sessionRenewalRequired = new HashSet<ulong>();
         private readonly HashSet<ulong> startupDeferredSessionRenewals = new HashSet<ulong>();
+        private readonly Dictionary<ulong, DateTime> sessionRenewalPersistBackoffUntilUtc = new Dictionary<ulong, DateTime>();
+        private static readonly TimeSpan SessionRenewalPersistRetryBackoff = TimeSpan.FromSeconds(30);
         private readonly Dictionary<string, DateTime> recentlyResolvedLoginRequests = new Dictionary<string, DateTime>();
         private readonly Dictionary<string, DateTime> recentlyResolvedTradeConfirmations = new Dictionary<string, DateTime>();
         private readonly Dictionary<string, DateTime> completedTradeActions = new Dictionary<string, DateTime>();
@@ -1043,6 +1045,7 @@ namespace Steam_Desktop_Authenticator
                     {
                         sessionRenewalRequired.Remove(steamId);
                         startupDeferredSessionRenewals.Remove(steamId);
+                        sessionRenewalPersistBackoffUntilUtc.Remove(steamId);
                     }
                     return true;
                 }
@@ -1291,12 +1294,18 @@ namespace Steam_Desktop_Authenticator
         private sealed class TransferFenceHandle : IDisposable
         {
             private readonly ConcurrentDictionary<ulong, byte> fencedIds;
+            private readonly ConcurrentDictionary<ulong, byte> unresolvedMarkers;
             private readonly ulong steamId;
             private IDisposable exclusiveLock;
 
-            public TransferFenceHandle(ConcurrentDictionary<ulong, byte> fencedIds, ulong steamId, IDisposable exclusiveLock)
+            public TransferFenceHandle(
+                ConcurrentDictionary<ulong, byte> fencedIds,
+                ConcurrentDictionary<ulong, byte> unresolvedMarkers,
+                ulong steamId,
+                IDisposable exclusiveLock)
             {
                 this.fencedIds = fencedIds;
+                this.unresolvedMarkers = unresolvedMarkers;
                 this.steamId = steamId;
                 this.exclusiveLock = exclusiveLock;
             }
@@ -1306,11 +1315,24 @@ namespace Steam_Desktop_Authenticator
                 IDisposable lockToRelease = Interlocked.Exchange(ref exclusiveLock, null);
                 try
                 {
-                    lockToRelease?.Dispose();
+                    // Atomically hand off fence coverage to unresolvedTransferMarkerSteamIds BEFORE
+                    // releasing exclusiveLock or transferFencedSteamIds so no background timer or
+                    // silent re-login can slip through after an OutcomeUnknown / SavePending transfer.
+                    if (PendingTransferMarker.HasMarker(steamId))
+                        unresolvedMarkers[steamId] = 0;
+                    else
+                        unresolvedMarkers.TryRemove(steamId, out _);
                 }
                 finally
                 {
-                    fencedIds.TryRemove(steamId, out _);
+                    try
+                    {
+                        lockToRelease?.Dispose();
+                    }
+                    finally
+                    {
+                        fencedIds.TryRemove(steamId, out _);
+                    }
                 }
             }
         }
@@ -1329,7 +1351,7 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 IDisposable exclusiveLock = await steamAccountOperationCoordinator.AcquireExclusiveLockAsync(steamId, cancellationToken);
-                return new TransferFenceHandle(transferFencedSteamIds, steamId, exclusiveLock);
+                return new TransferFenceHandle(transferFencedSteamIds, unresolvedTransferMarkerSteamIds, steamId, exclusiveLock);
             }
             catch
             {
@@ -1471,7 +1493,7 @@ namespace Steam_Desktop_Authenticator
                         if (existingCommitted != null && PendingTransferMarker.IsSameAuthenticatorReplacement(existingCommitted, resolvedStaged.Account))
                         {
                             PendingTransferMarker.DeleteStagedRecoveryBestEffort(resolvedStaged.FilePath);
-                            PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId);
+                            PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId, resolvedStaged.TransferAttemptId);
                             continue;
                         }
                     }
@@ -1504,7 +1526,8 @@ namespace Steam_Desktop_Authenticator
                                 enforceTransferAttemptBase: true);
                             if (retryResult.Succeeded)
                             {
-                                PendingTransferMarker.DeleteStagedRecoveryBestEffort(resolvedStaged.FilePath);
+                                PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(resolvedStaged.SteamId);
+                                PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId, resolvedStaged.TransferAttemptId);
                                 OnTransferredAccountCommitted(candidate, effectivePassKey);
                             }
                             return retryResult;
@@ -2953,6 +2976,7 @@ namespace Steam_Desktop_Authenticator
                 ulong steamId = account.Session.SteamID;
                 sessionRenewalRequired.Remove(steamId);
                 startupDeferredSessionRenewals.Remove(steamId);
+                sessionRenewalPersistBackoffUntilUtc.Remove(steamId);
                 loginMonitorSchedules.Remove(steamId);
                 unavailableLoginAccounts.Remove(account.AccountName);
             }
@@ -2981,7 +3005,29 @@ namespace Steam_Desktop_Authenticator
                     ulong steamId = currentSession.SteamID;
                     bool newlyMarkedInMemory = sessionRenewalRequired.Add(steamId);
                     bool needsManifestPersist = manifest != null && !manifest.IsSessionMarkedForRenewal(steamId);
-                    if (!newlyMarkedInMemory && !needsManifestPersist)
+                    bool persistRetryAllowed = !sessionRenewalPersistBackoffUntilUtc.TryGetValue(steamId, out DateTime retryAfterUtc) ||
+                        DateTime.UtcNow >= retryAfterUtc;
+
+                    if (!newlyMarkedInMemory && (!needsManifestPersist || !persistRetryAllowed))
+                        return;
+
+                    bool persistedNow = false;
+                    if (needsManifestPersist && (newlyMarkedInMemory || persistRetryAllowed))
+                    {
+                        StorageResult stateResult = manifest.SetSessionNeedsRenewal(steamId, true);
+                        if (stateResult.Succeeded)
+                        {
+                            sessionRenewalPersistBackoffUntilUtc.Remove(steamId);
+                            persistedNow = true;
+                        }
+                        else
+                        {
+                            sessionRenewalPersistBackoffUntilUtc[steamId] = DateTime.UtcNow.Add(SessionRenewalPersistRetryBackoff);
+                            DiagnosticErrorLogger.Log("Session recovery", stateResult.Exception, "The account's unavailable session state could not be persisted.");
+                        }
+                    }
+
+                    if (!newlyMarkedInMemory && !persistedNow)
                         return;
 
                     loginMonitorSchedules.Remove(steamId);
@@ -2994,15 +3040,6 @@ namespace Steam_Desktop_Authenticator
                     {
                         pendingLoginRequests.Remove(requestKey);
                         PruneLoginRequestBookkeeping(requestKey);
-                    }
-
-                    if (manifest != null && !manifest.IsSessionMarkedForRenewal(steamId))
-                    {
-                        StorageResult stateResult = manifest.SetSessionNeedsRenewal(steamId, true);
-                        if (!stateResult.Succeeded)
-                        {
-                            DiagnosticErrorLogger.Log("Session recovery", stateResult.Exception, "The account's unavailable session state could not be persisted.");
-                        }
                     }
 
                     InvalidateTradeConfirmationCache(account);
@@ -3027,6 +3064,7 @@ namespace Steam_Desktop_Authenticator
 
         private void PersistExpiredRefreshTokenStates()
         {
+            DateTime nowUtc = DateTime.UtcNow;
             foreach (SteamGuardAccount account in allAccounts ?? Array.Empty<SteamGuardAccount>())
             {
                 SessionData session = account?.Session;
@@ -3034,13 +3072,15 @@ namespace Steam_Desktop_Authenticator
                     continue;
 
                 ulong steamId = session.SteamID;
-                bool alreadyMarked;
+                bool alreadyHandled;
                 lock (sessionStateLock)
                 {
-                    alreadyMarked = sessionRenewalRequired.Contains(steamId) &&
-                        (manifest == null || manifest.IsSessionMarkedForRenewal(steamId));
+                    bool inMemory = sessionRenewalRequired.Contains(steamId);
+                    bool persisted = manifest == null || manifest.IsSessionMarkedForRenewal(steamId);
+                    bool backedOff = sessionRenewalPersistBackoffUntilUtc.TryGetValue(steamId, out DateTime retryAfterUtc) && nowUtc < retryAfterUtc;
+                    alreadyHandled = inMemory && (persisted || backedOff);
                 }
-                if (!alreadyMarked)
+                if (!alreadyHandled)
                     MarkSessionRenewalRequired(account, "The refresh token is expired or malformed.", session);
             }
         }
@@ -3887,6 +3927,8 @@ namespace Steam_Desktop_Authenticator
                 lock (sessionStateLock)
                 {
                     sessionRenewalRequired.RemoveWhere(steamId => !activeSteamIds.Contains(steamId));
+                    foreach (ulong steamId in sessionRenewalPersistBackoffUntilUtc.Keys.Where(id => !activeSteamIds.Contains(id)).ToArray())
+                        sessionRenewalPersistBackoffUntilUtc.Remove(steamId);
                 }
                 foreach (string accountName in unavailableLoginAccounts.Keys.Where(accountName => !activeAccountNames.Contains(accountName)).ToArray())
                     unavailableLoginAccounts.Remove(accountName);
@@ -5968,6 +6010,10 @@ namespace Steam_Desktop_Authenticator
                 await confirmationsSemaphore.WaitAsync(lifetimeCancellationSource.Token);
                 try
                 {
+                    if (TryGetTradeRateLimitMessage(out string activeRateLimitMessage))
+                        throw new TradeRateLimitedException(activeRateLimitMessage);
+
+                    tradeConfirmationScheduler.RecordGlobalDispatch();
                     bool steamAcceptedAction = await RunAvailableSteamAccountOperationAsync(account, () =>
                         RunTradeConfirmationActionWithRefreshRetryAsync(
                             account,
@@ -5984,6 +6030,11 @@ namespace Steam_Desktop_Authenticator
                 {
                     confirmationsSemaphore.Release();
                 }
+            }
+            catch (TradeRateLimitedException ex)
+            {
+                if (!lifetimeCancellationSource.IsCancellationRequested)
+                    AstroMessageBox.Show(ex.Message, "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             catch (Exception ex) when (IsRateLimitedResponse(ex))
             {
