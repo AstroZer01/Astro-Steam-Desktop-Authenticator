@@ -129,9 +129,6 @@ namespace Steam_Desktop_Authenticator
 
             try
             {
-            // Force TLS 1.2 for Steam API compatibility
-            System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
-
             // Parse command line arguments
             CommandLineOptions options = new();
             Parser.Default.ParseArguments<CommandLineOptions>(args)

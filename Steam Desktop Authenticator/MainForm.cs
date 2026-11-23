@@ -2007,7 +2007,7 @@ namespace Steam_Desktop_Authenticator
                             bool allowAdditionalIp = !String.IsNullOrWhiteSpace(manifest.LoginActionAutoAllowIp) &&
                                 AreSameIpv4Address(request.IPAddress, manifest.LoginActionAutoAllowIp);
                             bool allowCurrentDeviceIp = false;
-                            if (manifest.LoginActionAutoAllowCurrentDeviceIp)
+                            if (!allowAdditionalIp && manifest.LoginActionAutoAllowCurrentDeviceIp && IsValidIpv4Address(request.IPAddress))
                             {
                                 if (!currentDeviceIpChecked)
                                 {
@@ -2145,20 +2145,19 @@ namespace Steam_Desktop_Authenticator
             if (IsDisposed || Disposing || account == null || confirmation == null)
                 return;
 
-            string title = confirmation.ConfType == Confirmation.EMobileConfirmationType.MarketListing
-                ? "Market confirmation needed"
-                : "Trade confirmation needed";
+            string title = TradeConfirmationClassifier.GetNotificationTitle(confirmation.ConfType);
+            string notificationTab = TradeConfirmationClassifier.GetNotificationTab(confirmation.ConfType);
             string detail = String.IsNullOrWhiteSpace(confirmation.Headline) ? "New Steam confirmation" : confirmation.Headline;
             string message = account.AccountName + " · " + detail;
-            trayNotificationClickAction = OpenTradeConfirmationsFromNotification;
+            trayNotificationClickAction = () => OpenTradeConfirmationsFromNotification(notificationTab);
             trayIcon.Visible = true;
             trayIcon.BalloonTipTitle = title;
             trayIcon.BalloonTipText = message;
             trayIcon.BalloonTipIcon = ToolTipIcon.Info;
             trayIcon.ShowBalloonTip(10000);
 
-            var popup = new LoginNotificationPopup(title, message, ToolTipIcon.Info, "Click to open Trade Confirmations");
-            popup.NotificationClicked += (sender, args) => OpenTradeConfirmationsFromNotification();
+            var popup = new LoginNotificationPopup(title, message, ToolTipIcon.Info, "Click to open Confirmations");
+            popup.NotificationClicked += (sender, args) => OpenTradeConfirmationsFromNotification(notificationTab);
             popup.FormClosed += (sender, args) => activeLoginNotificationPopups.Remove(popup);
             activeLoginNotificationPopups.Add(popup);
             popup.ShowAtBottomRight((activeLoginNotificationPopups.Count - 1) * 126);
@@ -2662,16 +2661,12 @@ namespace Steam_Desktop_Authenticator
             }
 
             var settings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
-            string jsonStr = JsonConvert.SerializeObject(entries.Select(entry => new
-            {
-                Id = BuildTradeConfirmationKey(entry.Account, entry.Confirmation),
-                AccountName = entry.Account.AccountName,
-                Headline = entry.Confirmation.Headline,
-                Creator = entry.Confirmation.Creator.ToString(),
-                Icon = entry.Confirmation.Icon,
-                Summary = entry.Confirmation.Summary,
-                Type = entry.Confirmation.ConfType.ToString()
-            }), settings);
+            string jsonStr = JsonConvert.SerializeObject(
+                entries.Select(entry => TradeConfirmationClassifier.CreateWebPayload(
+                    BuildTradeConfirmationKey(entry.Account, entry.Confirmation),
+                    entry.Account.AccountName,
+                    entry.Confirmation)),
+                settings);
             string jsError = String.IsNullOrWhiteSpace(errorMessage) ? "null" : JsonConvert.SerializeObject(errorMessage);
             long revision = Interlocked.Increment(ref tradeViewRevision);
             string jsSelection = JsonConvert.SerializeObject(selectionToPublish);
@@ -2744,26 +2739,80 @@ namespace Steam_Desktop_Authenticator
                 IPAddress.Parse(first).Equals(IPAddress.Parse(second));
         }
 
-        private static async Task<string> GetCurrentPublicIpv4Async(CancellationToken cancellationToken = default)
+        private const int MaximumPublicIpResponseBytes = 256;
+        private static readonly TimeSpan PublicIpLookupTimeout = TimeSpan.FromSeconds(5);
+
+        internal static async Task<string> GetCurrentPublicIpv4Async(CancellationToken cancellationToken = default)
         {
             try
             {
-                using (var client = ProxyService.CreateActiveHttpClient())
+                using (ProxyService.ActiveHttpClientLease clientLease = ProxyService.AcquireActiveHttpClient())
                 {
-                    client.Timeout = TimeSpan.FromSeconds(5);
-                    string candidate = (await client.GetStringAsync("https://api.ipify.org", cancellationToken)).Trim();
-                    return IsValidIpv4Address(candidate) ? candidate : null;
+                    return await GetCurrentPublicIpv4Async(clientLease.Client, PublicIpLookupTimeout, cancellationToken);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }
+
+        internal static async Task<string> GetCurrentPublicIpv4Async(
+            HttpClient client,
+            TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            if (client == null)
+                throw new ArgumentNullException(nameof(client));
+            if (timeout <= TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
+                throw new ArgumentOutOfRangeException(nameof(timeout));
+
+            try
+            {
+                using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, "https://api.ipify.org"))
+                {
+                    timeoutSource.CancelAfter(timeout);
+                    using (HttpResponseMessage response = await client.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        timeoutSource.Token))
+                    {
+                        if (!response.IsSuccessStatusCode || response.Content == null)
+                            return null;
+                        if (response.Content.Headers.ContentLength > MaximumPublicIpResponseBytes)
+                            return null;
+
+                        string candidate = (await ReadBoundedResponseBodyAsync(
+                            response.Content,
+                            MaximumPublicIpResponseBytes,
+                            "The public IP lookup returned an oversized response.",
+                            timeoutSource.Token)).Trim();
+                        return IsValidIpv4Address(candidate) ? candidate : null;
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
             catch (HttpRequestException)
             {
                 return null;
             }
-            catch (TaskCanceledException)
+            catch (IOException)
+            {
+                return null;
+            }
+            catch (InvalidDataException)
+            {
+                return null;
+            }
+            catch (DecoderFallbackException)
             {
                 return null;
             }
@@ -2779,10 +2828,37 @@ namespace Steam_Desktop_Authenticator
             _ = ExecuteScriptSafelyAsync("switchTab('login-actions');", "Login actions navigation");
         }
 
-        private void OpenTradeConfirmationsFromNotification()
+        private void OpenTradeConfirmationsFromNotification(string confirmationTab = null)
         {
             trayRestore_Click(this, EventArgs.Empty);
-            _ = ExecuteScriptSafelyAsync("switchTab('trades');", "Trade confirmations navigation");
+            string script = TradeConfirmationClassifier.IsSelectableTab(confirmationTab)
+                ? $"openTradeConfirmations({JsonConvert.SerializeObject(confirmationTab)});"
+                : "switchTab('trades');";
+            _ = ExecuteScriptSafelyAsync(script, "Trade confirmations navigation");
+        }
+
+        internal bool PersistTradeConfirmationSelectedTab(string tabName)
+        {
+            if (manifest == null || !TradeConfirmationClassifier.IsSelectableTab(tabName))
+                return false;
+
+            if (String.Equals(manifest.TradeConfirmationSelectedTab, tabName, StringComparison.Ordinal))
+                return true;
+
+            StorageResult saveResult = manifest.SaveSettingsWithResult(staged =>
+            {
+                staged.TradeConfirmationSelectedTab = tabName;
+            });
+            if (!saveResult.Succeeded)
+            {
+                DiagnosticErrorLogger.Log(
+                    "Trade confirmation tab",
+                    saveResult.Exception,
+                    saveResult.UserMessage ?? "The selected confirmation tab could not be saved.");
+                return false;
+            }
+
+            return true;
         }
 
         private async Task FetchLoginActionsForManualRefreshAsync()
@@ -3289,9 +3365,45 @@ namespace Steam_Desktop_Authenticator
             {
                 if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
                 {
-                    int to = listAccounts.SelectedIndex - (e.KeyCode == Keys.Up ? 1 : -1);
-                    manifest.MoveEntry(listAccounts.SelectedIndex, to);
-                    loadAccountsList();
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+
+                    if (manifest == null)
+                        return;
+
+                    int selectedIndex = listAccounts.SelectedIndex;
+                    int delta = e.KeyCode == Keys.Up ? -1 : 1;
+                    string[] visibleNames = listAccounts.Items.Cast<object>().Select(item => item?.ToString()).ToArray();
+                    SteamGuardAccount[] accountsSnapshot;
+                    lock (accountGenerationLock)
+                    {
+                        accountsSnapshot = allAccounts;
+                    }
+
+                    if (!TryResolveAccountForReorder(accountsSnapshot, visibleNames, selectedIndex, out ulong sourceSteamId))
+                        return;
+
+                    long revisionBefore = manifest.StorageRevision;
+                    StorageResult moveResult = manifest.MoveEntryBySteamIdOffsetWithResult(sourceSteamId, delta);
+                    if (!moveResult.Succeeded)
+                    {
+                        DiagnosticErrorLogger.Log("Account reordering", moveResult.Exception, "The updated account order could not be saved.");
+                        if (moveResult.FailureKind == StorageFailureKind.Validation)
+                        {
+                            RefreshAccountListPreservingFilter(sourceSteamId);
+                            return;
+                        }
+
+                        AstroMessageBox.Show(
+                            moveResult.UserMessage ?? "The account order could not be saved.",
+                            "Account Order",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    if (manifest.StorageRevision != revisionBefore)
+                        RefreshAccountListPreservingFilter(sourceSteamId);
                 }
                 return;
             }
@@ -3304,6 +3416,72 @@ namespace Steam_Desktop_Authenticator
             txtAccSearch.Focus();
             txtAccSearch.Text = e.KeyCode.ToString();
             txtAccSearch.SelectionStart = 1;
+        }
+
+        private void RefreshAccountListPreservingFilter(ulong? preferredSteamId)
+        {
+            loadAccountsList(preferredSteamId);
+            if (!String.IsNullOrEmpty(txtAccSearch.Text))
+            {
+                txtAccSearch_TextChanged(this, EventArgs.Empty);
+                string preferredName = preferredSteamId.HasValue
+                    ? allAccounts.FirstOrDefault(account => account.Session?.SteamID == preferredSteamId.Value)?.AccountName
+                    : null;
+                int filteredIndex = !String.IsNullOrWhiteSpace(preferredName)
+                    ? listAccounts.Items.IndexOf(preferredName)
+                    : -1;
+                if (filteredIndex >= 0)
+                    listAccounts.SelectedIndex = filteredIndex;
+                else if (listAccounts.Items.Count > 0)
+                    listAccounts.SelectedIndex = 0;
+            }
+        }
+
+        internal static bool TryResolveAccountForReorder(
+            SteamGuardAccount[] accounts,
+            IReadOnlyList<string> visibleAccountNames,
+            int selectedIndex,
+            out ulong steamId)
+        {
+            steamId = 0;
+
+            if (accounts == null || visibleAccountNames == null ||
+                selectedIndex < 0 || selectedIndex >= visibleAccountNames.Count)
+            {
+                return false;
+            }
+
+            return TryResolveUniqueSteamIdByAccountName(accounts, visibleAccountNames[selectedIndex], out steamId);
+        }
+
+        private static bool TryResolveUniqueSteamIdByAccountName(
+            SteamGuardAccount[] accounts,
+            string accountName,
+            out ulong steamId)
+        {
+            steamId = 0;
+            if (String.IsNullOrEmpty(accountName))
+                return false;
+
+            bool matched = false;
+            ulong matchedSteamId = 0;
+            foreach (SteamGuardAccount account in accounts)
+            {
+                if (account == null || !String.Equals(account.AccountName, accountName, StringComparison.Ordinal))
+                    continue;
+
+                if (matched || account.Session == null || account.Session.SteamID == 0)
+                    return false;
+
+                matched = true;
+                matchedSteamId = account.Session.SteamID;
+            }
+
+            if (!matched)
+                return false;
+
+            steamId = matchedSteamId;
+            return true;
         }
 
         private static bool IsKeyAChar(Keys key)
@@ -3430,7 +3608,7 @@ namespace Steam_Desktop_Authenticator
         }
 
         // Logic for version checking
-        private static readonly HttpClient defaultUpdateClient = new HttpClient();
+        private static readonly HttpClient defaultUpdateClient = CreateDefaultUpdateClient();
         private const int MaximumUpdateResponseBytes = 1024 * 1024;
         private const string AutomaticUpdateChecksDisabledMessage = "Automatic update checks are disabled. You can check manually anytime.";
         private static readonly TimeSpan UpdateRequestTimeout = TimeSpan.FromSeconds(20);
@@ -3439,6 +3617,20 @@ namespace Steam_Desktop_Authenticator
         private string updateCheckStatusTone = "info";
         private Version availableUpdateVersion;
         private string availableUpdateDownloadUrl;
+
+        internal static SocketsHttpHandler CreateDefaultUpdateHttpHandler()
+        {
+            return new SocketsHttpHandler
+            {
+                AutomaticDecompression = DecompressionMethods.All,
+                PooledConnectionLifetime = SteamNetworkConfiguration.DefaultPooledConnectionLifetime
+            };
+        }
+
+        private static HttpClient CreateDefaultUpdateClient()
+        {
+            return new HttpClient(CreateDefaultUpdateHttpHandler());
+        }
 
         internal async Task CheckForUpdatesAsync(bool isStartupCheck)
         {
@@ -3885,6 +4077,8 @@ namespace Steam_Desktop_Authenticator
                 // Set autostart checkbox
                 bool isAutoStart = WindowsStartup.IsEnabled();
                 _ = ExecuteScriptSafelyAsync($"setAutoStart({isAutoStart.ToString().ToLowerInvariant()});", "Startup setting UI");
+                string savedConfirmationTab = TradeConfirmationClassifier.NormalizeSelectableTab(manifest?.TradeConfirmationSelectedTab);
+                _ = ExecuteScriptSafelyAsync($"hydrateConfirmationTab({JsonConvert.SerializeObject(savedConfirmationTab)});", "Trade confirmation tab UI");
                 _ = PublishAvailableUpdateAsync();
                 _ = PublishUpdateCheckStateAsync(isCheckingForUpdates, updateCheckStatusMessage, updateCheckStatusTone);
 
@@ -4239,21 +4433,40 @@ namespace Steam_Desktop_Authenticator
                     StringComparison.OrdinalIgnoreCase);
         }
 
-        private static async Task<string> ReadResponseBodyWithLimitAsync(HttpContent content, CancellationToken cancellationToken)
+        private static Task<string> ReadResponseBodyWithLimitAsync(HttpContent content, CancellationToken cancellationToken)
+        {
+            return ReadBoundedResponseBodyAsync(
+                content,
+                MaximumUpdateResponseBytes,
+                "The update service returned an oversized response.",
+                cancellationToken);
+        }
+
+        private static async Task<string> ReadBoundedResponseBodyAsync(
+            HttpContent content,
+            int maximumBytes,
+            string oversizedMessage,
+            CancellationToken cancellationToken)
         {
             if (content == null)
-                throw new InvalidDataException("The update service returned an empty response.");
+                throw new InvalidDataException("The service returned an empty response.");
+            if (content.Headers.ContentLength > maximumBytes)
+                throw new InvalidDataException(oversizedMessage);
 
-            using (Stream responseStream = await content.ReadAsStreamAsync())
+            using (Stream responseStream = await content.ReadAsStreamAsync(cancellationToken))
             using (MemoryStream responseBody = new MemoryStream())
             {
-                byte[] buffer = new byte[81920];
+                byte[] buffer = new byte[Math.Min(81920, Math.Max(256, maximumBytes + 1))];
                 int bytesRead;
                 int totalBytes = 0;
-                while ((bytesRead = await responseStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                while (true)
                 {
-                    if (bytesRead > MaximumUpdateResponseBytes - totalBytes)
-                        throw new InvalidDataException("The update service returned an oversized response.");
+                    int maxBytesToRead = Math.Min(buffer.Length, (maximumBytes - totalBytes) + 1);
+                    bytesRead = await responseStream.ReadAsync(buffer, 0, maxBytesToRead, cancellationToken);
+                    if (bytesRead <= 0)
+                        break;
+                    if (bytesRead > maximumBytes - totalBytes)
+                        throw new InvalidDataException(oversizedMessage);
                     responseBody.Write(buffer, 0, bytesRead);
                     totalBytes += bytesRead;
                 }
@@ -4458,6 +4671,15 @@ namespace Steam_Desktop_Authenticator
                     return;
                 if (tabName == "authenticator" || tabName == "trades" || tabName == "login-actions" || tabName == "settings")
                     activeWebTab = tabName;
+            }
+            else if (action == "confirmation_tab_changed")
+            {
+                if (!TryGetWebMessageString(payload, "tabName", 32, out string tabName, true))
+                    return;
+                bool persisted = PersistTradeConfirmationSelectedTab(tabName);
+                _ = ExecuteScriptSafelyAsync(
+                    $"confirmationTabPersistCompleted({JsonConvert.SerializeObject(tabName)}, {persisted.ToString().ToLowerInvariant()});",
+                    "Trade confirmation tab persistence");
             }
             else if (action == "load_trades_cache")
             {

@@ -764,6 +764,542 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False(File.Exists(backupPath));
         }
 
+        [Fact]
+        public void MoveEntryWithResult_ReordersAndPersistsWithoutChangingAccountRevisions()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000000000UL;
+            ulong secondId = 76561198000000001UL;
+            ulong thirdId = 76561198000000002UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(thirdId), false).Succeeded);
+
+            long revisionBefore = manifest.StorageRevision;
+            long firstAccountRevBefore = manifest.GetAccountStorageRevision(firstId);
+            long secondAccountRevBefore = manifest.GetAccountStorageRevision(secondId);
+            long thirdAccountRevBefore = manifest.GetAccountStorageRevision(thirdId);
+
+            StorageResult result = manifest.MoveEntryWithResult(2, 0);
+
+            Assert.True(result.Succeeded);
+            Assert.Equal(new[] { thirdId, firstId, secondId }, manifest.Entries.Select(e => e.SteamID).ToArray());
+            Assert.Equal(revisionBefore + 1, manifest.StorageRevision);
+            Assert.Equal(firstAccountRevBefore, manifest.GetAccountStorageRevision(firstId));
+            Assert.Equal(secondAccountRevBefore, manifest.GetAccountStorageRevision(secondId));
+            Assert.Equal(thirdAccountRevBefore, manifest.GetAccountStorageRevision(thirdId));
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(new[] { thirdId, firstId, secondId }, reloaded.Entries.Select(e => e.SteamID).ToArray());
+        }
+
+        [Fact]
+        public void MoveEntryWithResult_ReturnsValidationFailureForInvalidBoundsAndNullEntries()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000001UL), false).Succeeded);
+            long revisionBefore = manifest.StorageRevision;
+
+            StorageResult negativeFrom = manifest.MoveEntryWithResult(-1, 0);
+            StorageResult negativeTo = manifest.MoveEntryWithResult(0, -1);
+            StorageResult outOfRangeFrom = manifest.MoveEntryWithResult(2, 0);
+            StorageResult outOfRangeTo = manifest.MoveEntryWithResult(0, 2);
+
+            Assert.All(new[] { negativeFrom, negativeTo, outOfRangeFrom, outOfRangeTo }, result =>
+            {
+                Assert.False(result.Succeeded);
+                Assert.Equal(StorageFailureKind.Validation, result.FailureKind);
+            });
+            Assert.Equal(new[] { 76561198000000000UL, 76561198000000001UL }, manifest.Entries.Select(e => e.SteamID).ToArray());
+            Assert.Equal(revisionBefore, manifest.StorageRevision);
+
+            Manifest nullEntriesManifest = new Manifest { Entries = null };
+            StorageResult nullResult = nullEntriesManifest.MoveEntryWithResult(0, 0);
+            Assert.False(nullResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, nullResult.FailureKind);
+        }
+
+        [Fact]
+        public void MoveEntryWithResult_NoOpWhenIndicesMatchDoesNotMutateOrWrite()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+            long revisionBefore = manifest.StorageRevision;
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            File.WriteAllText(Path.Combine(maDirectory, ".asda-storage-transaction.json"), "invalid json");
+
+            StorageResult result = manifest.MoveEntryWithResult(0, 0);
+
+            Assert.True(result.Succeeded);
+            Assert.Equal(revisionBefore, manifest.StorageRevision);
+        }
+
+        [Fact]
+        public void MoveEntryWithResult_PreservesInMemoryOrderWhenSaveFails()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000000000UL;
+            ulong secondId = 76561198000000001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+            long revisionBefore = manifest.StorageRevision;
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(journalPath, "corrupted journal");
+
+            StorageResult result = manifest.MoveEntryWithResult(0, 1);
+
+            Assert.False(result.Succeeded);
+            Assert.Equal(StorageFailureKind.Io, result.FailureKind);
+            Assert.Equal(new[] { firstId, secondId }, manifest.Entries.Select(e => e.SteamID).ToArray());
+            Assert.Equal(revisionBefore, manifest.StorageRevision);
+
+            File.Delete(journalPath);
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(new[] { firstId, secondId }, reloaded.Entries.Select(e => e.SteamID).ToArray());
+        }
+
+        [Fact]
+        public void MoveEntryWithResult_PreservesRetainedObsoleteCleanupThroughRecovery()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000000000UL;
+            ulong secondId = 76561198000000001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-obsolete.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(obsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", "retained-obsolete.maFile", null);
+
+            long revisionBefore = manifest.StorageRevision;
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                StorageResult result = manifest.MoveEntryWithResult(0, 1);
+
+                Assert.True(result.Succeeded);
+                Assert.Equal(new[] { secondId, firstId }, manifest.Entries.Select(e => e.SteamID).ToArray());
+                Assert.Equal(revisionBefore + 1, manifest.StorageRevision);
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(journalPath));
+                Assert.Empty(Directory.EnumerateFiles(maDirectory, ".manifest.*.bak"));
+            }
+
+            // Once unlocked, normal startup recovery must delete the retained obsolete file and preserve the reordered manifest.
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(new[] { secondId, firstId }, reloaded.Entries.Select(e => e.SteamID).ToArray());
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void SaveAccount_DeletesManifestBackupBeforeObsoleteCleanupWhenRetainedObsoleteIsLocked()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = CreateAccount(76561198000000000UL);
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string retainedObsoletePath = Path.Combine(maDirectory, "retained-locked.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(retainedObsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", "retained-locked.maFile", null);
+
+            account.Session.AccessToken = "updated-access-token";
+            using (new FileStream(retainedObsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.True(manifest.SaveAccount(account, false).Succeeded);
+                Assert.Empty(Directory.EnumerateFiles(maDirectory, ".manifest.*.bak"));
+                Assert.True(File.Exists(retainedObsoletePath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal("updated-access-token", Assert.Single(reloaded.GetAllAccounts()).Session.AccessToken);
+            Assert.False(File.Exists(retainedObsoletePath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void MoveEntryWithResult_RollbackOnBlockedManifestReplacementDoesNotOrphanRetainedObsoleteFile()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000000000UL;
+            ulong secondId = 76561198000000001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+            Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-obsolete.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(obsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", "retained-obsolete.maFile", null);
+
+            long revisionBefore = manifest.StorageRevision;
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            using (new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult result = manifest.MoveEntryWithResult(0, 1);
+
+                Assert.False(result.Succeeded);
+                Assert.Equal(new[] { firstId, secondId }, manifest.Entries.Select(e => e.SteamID).ToArray());
+                Assert.Equal(revisionBefore, manifest.StorageRevision);
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            // Once unlocked, startup recovery must preserve the original order and clean up the retained obsolete file.
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(new[] { firstId, secondId }, reloaded.Entries.Select(e => e.SteamID).ToArray());
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void StartupRecovery_UncommittedTransactionPreservesAndCleansRetainedObsoleteFiles()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-crash-obsolete.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(obsoletePath, "obsolete");
+
+            JObject uncommittedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(File.ReadAllText(manifestPath) + "uncommitted"),
+                ["created_filenames"] = new JArray(),
+                ["obsolete_filenames"] = new JArray(),
+                ["retained_obsolete_filenames"] = new JArray("retained-crash-obsolete.maFile"),
+                ["backup_filename"] = TestBackupFilename
+            };
+            File.WriteAllText(journalPath, uncommittedJournal.ToString(Formatting.None));
+
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Manifest whileLocked = Manifest.GetManifest(true);
+                Assert.Single(whileLocked.Entries);
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            Manifest afterUnlock = Manifest.GetManifest(true);
+            Assert.Single(afterUnlock.Entries);
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void StartupRecovery_UncommittedRetainedObsoletePreservesLockedManifestBackupUntilUnlocked()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-locked-obsolete.maFile");
+            string backupPath = Path.Combine(maDirectory, TestBackupFilename);
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(obsoletePath, "obsolete");
+            File.Copy(manifestPath, backupPath);
+
+            JObject uncommittedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(File.ReadAllText(manifestPath) + "uncommitted"),
+                ["created_filenames"] = new JArray(),
+                ["obsolete_filenames"] = new JArray(),
+                ["retained_obsolete_filenames"] = new JArray("retained-locked-obsolete.maFile"),
+                ["backup_filename"] = TestBackupFilename
+            };
+            File.WriteAllText(journalPath, uncommittedJournal.ToString(Formatting.None));
+
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            using (new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(backupPath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            Manifest recovered = Manifest.GetManifest(true);
+            Assert.Single(recovered.Entries);
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(backupPath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void StartupRecovery_CommittedBlockedBackupDoesNotClearCreatedFilenamesOrTouchObsoleteFiles()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string backupPath = Path.Combine(maDirectory, TestBackupFilename);
+            string obsoletePath = Path.Combine(maDirectory, "committed-obsolete.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string createdFilename = manifest.Entries[0].Filename;
+
+            // Pre-commit backup had zero entries; current manifest has the committed account.
+            File.WriteAllText(backupPath, JsonConvert.SerializeObject(Manifest.GenerateNewManifest(false)));
+            File.WriteAllText(obsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), createdFilename, "committed-obsolete.maFile", TestBackupFilename);
+
+            // Keep obsoletePath unlocked while locking only backupPath to prove recovery fails closed
+            // before touching obsolete files or clearing created_filenames.
+            using (new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+                JObject journalWhileLocked = JObject.Parse(File.ReadAllText(journalPath));
+                Assert.Equal(new[] { createdFilename }, journalWhileLocked["created_filenames"].Values<string>().ToArray());
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(backupPath));
+            }
+
+            // Once unlocked, recovery deletes the backup before obsolete cleanup and preserves the committed account.
+            Manifest recovered = Manifest.GetManifest(true);
+            Assert.Single(recovered.Entries);
+            Assert.Equal(createdFilename, recovered.Entries[0].Filename);
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(backupPath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void StartupRecovery_CleansRetainedObsoleteFileEvenWhenManifestChangesBeforeJournalRebase()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000000000UL), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string obsoletePath = Path.Combine(maDirectory, "retained-before-settings-crash.maFile");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(obsoletePath, "obsolete");
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", "retained-before-settings-crash.maFile", null);
+
+            // Transition the journal into cleanup-only retained state while obsoletePath is locked.
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Manifest reloadedWhileLocked = Manifest.GetManifest(true);
+                Assert.Single(reloadedWhileLocked.Entries);
+                Assert.True(File.Exists(journalPath));
+            }
+
+            // Simulate SaveWithResult updating manifest.json and crashing before RebaseRetainedStorageTransaction runs.
+            JObject updatedManifest = JObject.Parse(File.ReadAllText(manifestPath));
+            updatedManifest["minimize_to_tray"] = !(updatedManifest["minimize_to_tray"]?.Value<bool>() ?? true);
+            File.WriteAllText(manifestPath, updatedManifest.ToString(Formatting.None));
+
+            // Next startup sees a hash mismatch against the cleanup-only journal, yet must still clean up the retained obsolete file.
+            Manifest recovered = Manifest.GetManifest(true);
+            Assert.Single(recovered.Entries);
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void FailedImportOverlappingRetainedObsoleteFile_PreservesCleanupOnRestart()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong existingId = 76561198000000000UL;
+            ulong importedId = 76561198000000001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(existingId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string overlappingFilename = "overlapping-retained.maFile";
+            string overlappingPath = Path.Combine(maDirectory, overlappingFilename);
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            File.WriteAllText(overlappingPath, JsonConvert.SerializeObject(CreateAccount(importedId)));
+
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Single(candidates);
+            WriteJournal(maDirectory, File.ReadAllText(manifestPath), "unused-created.maFile", overlappingFilename, null);
+
+            // Keep overlappingPath readable so import can read/validate it, while preventing deletion,
+            // and hold manifest.json open so File.Replace fails and rolls back.
+            using (new FileStream(overlappingPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult result = manifest.ImportUnmanagedMaFiles(candidates);
+                Assert.False(result.Succeeded);
+                Assert.Single(manifest.Entries);
+                Assert.True(File.Exists(overlappingPath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            // Once unlocked, startup recovery must still delete the retained obsolete file rather than orphaning it.
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Single(reloaded.Entries);
+            Assert.False(File.Exists(overlappingPath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void StartupRecovery_RejectsRetainedObsoleteFilenameThatTargetsALiveAccountFile(bool manifestCommitted)
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string liveFilename = manifest.Entries[0].Filename;
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string manifestHashSource = manifestCommitted
+                ? File.ReadAllText(manifestPath)
+                : File.ReadAllText(manifestPath) + "uncommitted";
+
+            JObject tamperedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(manifestHashSource),
+                ["created_filenames"] = new JArray(),
+                ["obsolete_filenames"] = new JArray(),
+                ["retained_obsolete_filenames"] = new JArray(liveFilename),
+                ["backup_filename"] = TestBackupFilename
+            };
+            File.WriteAllText(journalPath, tamperedJournal.ToString(Formatting.None));
+
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(Path.Combine(maDirectory, liveFilename)));
+            Assert.True(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void MoveEntryBySteamIdOffsetWithResult_MovesInConsistentDirectionWithoutReversingOnSortedList()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount accountAlpha = CreateAccount(76561198000000000UL);
+            accountAlpha.AccountName = "alpha";
+            SteamGuardAccount accountBravo = CreateAccount(76561198000000001UL);
+            accountBravo.AccountName = "bravo";
+            SteamGuardAccount accountZulu = CreateAccount(76561198000000002UL);
+            accountZulu.AccountName = "zulu";
+
+            Assert.True(manifest.SaveAccount(accountAlpha, false).Succeeded);
+            Assert.True(manifest.SaveAccount(accountBravo, false).Succeeded);
+            Assert.True(manifest.SaveAccount(accountZulu, false).Succeeded);
+
+            string[] sortedDisplay = new[] { "alpha", "bravo", "zulu" };
+            SteamGuardAccount[] loadedAccounts = manifest.GetAllAccounts();
+            Assert.True(MainForm.TryResolveAccountForReorder(loadedAccounts, sortedDisplay, 1, out ulong bravoId));
+            Assert.Equal(accountBravo.Session.SteamID, bravoId);
+
+            // Pressing Ctrl+Up twice on Bravo moves it to index 0 and keeps it at index 0 rather than reversing back.
+            Assert.True(manifest.MoveEntryBySteamIdOffsetWithResult(bravoId, -1).Succeeded);
+            Assert.Equal(
+                new[] { accountBravo.Session.SteamID, accountAlpha.Session.SteamID, accountZulu.Session.SteamID },
+                Manifest.GetManifest(true).Entries.Select(e => e.SteamID).ToArray());
+
+            long revisionAtTop = manifest.StorageRevision;
+            Assert.True(manifest.MoveEntryBySteamIdOffsetWithResult(bravoId, -1).Succeeded);
+            Assert.Equal(revisionAtTop, manifest.StorageRevision);
+            Assert.Equal(
+                new[] { accountBravo.Session.SteamID, accountAlpha.Session.SteamID, accountZulu.Session.SteamID },
+                Manifest.GetManifest(true).Entries.Select(e => e.SteamID).ToArray());
+
+            // Pressing Ctrl+Down moves Bravo back down one slot, and zero/bottom-boundary offsets are no-ops.
+            Assert.True(manifest.MoveEntryBySteamIdOffsetWithResult(bravoId, 1).Succeeded);
+            Assert.Equal(
+                new[] { accountAlpha.Session.SteamID, accountBravo.Session.SteamID, accountZulu.Session.SteamID },
+                Manifest.GetManifest(true).Entries.Select(e => e.SteamID).ToArray());
+
+            long revisionBeforeNoOps = manifest.StorageRevision;
+            Assert.True(manifest.MoveEntryBySteamIdOffsetWithResult(bravoId, 0).Succeeded);
+            Assert.True(manifest.MoveEntryBySteamIdOffsetWithResult(accountZulu.Session.SteamID, 1).Succeeded);
+            Assert.Equal(revisionBeforeNoOps, manifest.StorageRevision);
+
+            // Ambiguous duplicate names (both session-backed or mixed with sessionless) must be rejected.
+            SteamGuardAccount duplicateSessionlessAlpha = new SteamGuardAccount { AccountName = "alpha", Session = null };
+            Assert.False(MainForm.TryResolveAccountForReorder(
+                new[] { accountAlpha, duplicateSessionlessAlpha, accountBravo },
+                sortedDisplay,
+                0,
+                out _));
+
+            SteamGuardAccount duplicateSessionBackedAlpha = CreateAccount(76561198000000009UL);
+            duplicateSessionBackedAlpha.AccountName = "alpha";
+            Assert.False(MainForm.TryResolveAccountForReorder(
+                new[] { accountAlpha, duplicateSessionBackedAlpha, accountBravo },
+                sortedDisplay,
+                0,
+                out _));
+
+            // Invalid zero or missing SteamIDs return a validation failure.
+            StorageResult zeroIdResult = manifest.MoveEntryBySteamIdOffsetWithResult(0, -1);
+            Assert.False(zeroIdResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, zeroIdResult.FailureKind);
+
+            StorageResult missingResult = manifest.MoveEntryBySteamIdOffsetWithResult(76561198000000099UL, -1);
+            Assert.False(missingResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, missingResult.FailureKind);
+        }
+
+        [Fact]
+        public async Task ConcurrentMoveEntryAndSaveAccount_PreservesReorderAndSavedAccount()
+        {
+            for (int round = 0; round < 5; round++)
+            {
+                Manifest manifest = Manifest.GenerateNewManifest(false);
+                ulong firstId = 76561198000000100UL + (ulong)(round * 10);
+                ulong secondId = firstId + 1;
+                ulong thirdId = firstId + 2;
+                Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+                Assert.True(manifest.SaveAccount(CreateAccount(secondId), false).Succeeded);
+
+                using (System.Threading.Barrier startBarrier = new System.Threading.Barrier(2))
+                {
+                    Task<StorageResult> reorderTask = Task.Run(() =>
+                    {
+                        startBarrier.SignalAndWait();
+                        StorageResult result = StorageResult.Success();
+                        // Odd number of moves leaves [secondId, firstId] regardless of when thirdId is appended.
+                        for (int i = 0; i < 5; i++)
+                        {
+                            result = manifest.MoveEntryBySteamIdOffsetWithResult(
+                                i % 2 == 0 ? secondId : firstId,
+                                -1);
+                            if (!result.Succeeded)
+                                return result;
+                        }
+                        return result;
+                    });
+
+                    Task<StorageResult> saveTask = Task.Run(() =>
+                    {
+                        startBarrier.SignalAndWait();
+                        SteamGuardAccount third = CreateAccount(thirdId);
+                        third.Session.AccessToken = "concurrent-token-" + round;
+                        return manifest.SaveAccount(third, false);
+                    });
+
+                    StorageResult[] results = await Task.WhenAll(reorderTask, saveTask);
+                    Assert.All(results, result => Assert.True(result.Succeeded));
+                }
+
+                Manifest reloaded = Manifest.GetManifest(true);
+                ulong[] persistedOrder = reloaded.Entries.Select(e => e.SteamID).ToArray();
+                Assert.Equal(new[] { secondId, firstId, thirdId }, persistedOrder);
+                Assert.Equal(
+                    "concurrent-token-" + round,
+                    Assert.Single(reloaded.GetAllAccounts(), account => account.Session.SteamID == thirdId).Session.AccessToken);
+            }
+        }
+
         public void Dispose()
         {
             Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);

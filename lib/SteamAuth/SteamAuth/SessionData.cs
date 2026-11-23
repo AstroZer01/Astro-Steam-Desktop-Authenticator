@@ -18,6 +18,9 @@ namespace SteamAuth
         private const int MaximumTokenLength = 16 * 1024;
         private const int MaximumTokenComponentLength = 8 * 1024;
         private readonly IAuthenticatorProtocolTransport protocolTransport;
+        private TokenState accessTokenState;
+        private TokenState refreshTokenState;
+        private long tokenExpirationParseCount;
 
         public SessionData()
             : this(new SteamProtobufAuthenticatorTransport())
@@ -31,11 +34,27 @@ namespace SteamAuth
 
         public ulong SteamID { get; set; }
 
-        public string AccessToken { get; set; }
+        public string AccessToken
+        {
+            get => Volatile.Read(ref accessTokenState)?.Token;
+            set => SetTokenState(ref accessTokenState, value);
+        }
 
-        public string RefreshToken { get; set; }
+        public string RefreshToken
+        {
+            get => Volatile.Read(ref refreshTokenState)?.Token;
+            set => SetTokenState(ref refreshTokenState, value);
+        }
 
         public string SessionID { get; set; }
+
+        internal long TokenExpirationParseCount => Volatile.Read(ref tokenExpirationParseCount);
+
+        internal bool HasCachedAccessTokenExpiration => Volatile.Read(ref accessTokenState)?.ExpirationUnixSeconds.HasValue == true;
+
+        internal bool HasCachedRefreshTokenExpiration => Volatile.Read(ref refreshTokenState)?.ExpirationUnixSeconds.HasValue == true;
+
+        internal Action<string> BeforeTokenExpirationCacheStore { get; set; }
 
         /// <summary>
         /// Refresh your access token, optionally also getting a new refresh token
@@ -45,10 +64,12 @@ namespace SteamAuth
         /// <exception cref="Exception"></exception>
         public async Task RefreshAccessToken(bool allowRenewal = false, CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrEmpty(this.RefreshToken))
+            TokenState currentRefreshState = Volatile.Read(ref refreshTokenState);
+            string currentRefreshToken = currentRefreshState?.Token;
+            if (string.IsNullOrEmpty(currentRefreshToken))
                 throw new SteamSessionException(SteamSessionFailureKind.InvalidSession, "Refresh token is empty.");
 
-            if (IsTokenExpired(this.RefreshToken))
+            if (IsTokenExpired(currentRefreshState, ref refreshTokenState))
                 throw new SteamSessionException(SteamSessionFailureKind.InvalidSession, "Refresh token is expired.");
 
             try
@@ -58,7 +79,7 @@ namespace SteamAuth
                     "GenerateAccessTokenForApp",
                     new CAuthentication_AccessToken_GenerateForApp_Request
                     {
-                        RefreshToken = RefreshToken,
+                        RefreshToken = currentRefreshToken,
                         Steamid = SteamID,
                         RenewalType = allowRenewal ? ETokenRenewalType.KEtokenRenewalTypeAllow : ETokenRenewalType.KEtokenRenewalTypeNone
                     },
@@ -101,24 +122,26 @@ namespace SteamAuth
 
         public bool IsAccessTokenExpired()
         {
-            if (string.IsNullOrEmpty(this.AccessToken))
+            TokenState state = Volatile.Read(ref accessTokenState);
+            if (string.IsNullOrEmpty(state?.Token))
                 return true;
 
-            return IsTokenExpired(this.AccessToken);
+            return IsTokenExpired(state, ref accessTokenState);
         }
 
         public bool IsRefreshTokenExpired()
         {
-            if (string.IsNullOrEmpty(this.RefreshToken))
+            TokenState state = Volatile.Read(ref refreshTokenState);
+            if (string.IsNullOrEmpty(state?.Token))
                 return true;
 
-            return IsTokenExpired(this.RefreshToken);
+            return IsTokenExpired(state, ref refreshTokenState);
         }
 
-        private bool IsTokenExpired(string token)
+        private bool IsTokenExpired(TokenState observed, ref TokenState stateField)
         {
             // Compare expire time of the token to the current time
-            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() > GetTokenExpirationTime(token);
+            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() > GetTokenExpirationTime(observed, ref stateField);
         }
 
         /// <summary>
@@ -127,26 +150,57 @@ namespace SteamAuth
         /// <returns></returns>
         public bool IsRefreshTokenAboutToExpire()
         {
-            return IsRefreshTokenExpired() || IsTokenAboutToExpire(RefreshToken);
+            TokenState state = Volatile.Read(ref refreshTokenState);
+            if (string.IsNullOrEmpty(state?.Token))
+                return true;
+
+            long expiration = GetTokenExpirationTime(state, ref refreshTokenState);
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            return now > expiration || now + (24 * 60 * 60) > expiration;
         }
 
         /// <summary>
-        /// Returns if the token will expire
+        /// Fetches JWT expiration time, atomically caching the parsed timestamp on the active token state.
         /// </summary>
-        /// <param name="token"></param>
-        /// <returns></returns>
-        private bool IsTokenAboutToExpire(string token)
+        private long GetTokenExpirationTime(TokenState observed, ref TokenState stateField)
         {
-            // Compare expire time of the token to the current time
-            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (24 * 60 * 60) > GetTokenExpirationTime(token);
+            string token = observed?.Token;
+            if (String.IsNullOrWhiteSpace(token) || token.Length > MaximumTokenLength)
+                return 0;
+
+            if (observed.ExpirationUnixSeconds.HasValue)
+                return observed.ExpirationUnixSeconds.Value;
+
+            long expiration = ParseTokenExpirationTime(token);
+            Interlocked.Increment(ref tokenExpirationParseCount);
+            BeforeTokenExpirationCacheStore?.Invoke(token);
+            TokenState updated = new TokenState(token, expiration);
+            Interlocked.CompareExchange(ref stateField, updated, observed);
+            return expiration;
+        }
+
+        private static void SetTokenState(ref TokenState stateField, string value)
+        {
+            while (true)
+            {
+                TokenState current = Volatile.Read(ref stateField);
+                if (current == null && value == null)
+                    return;
+                if (current != null && String.Equals(current.Token, value, StringComparison.Ordinal))
+                    return;
+
+                TokenState replacement = value == null ? null : new TokenState(value, null);
+                if (Interlocked.CompareExchange(ref stateField, replacement, current) == current)
+                    return;
+            }
         }
 
         /// <summary>
-        /// Fetches JWT expiration time.
+        /// Parses JWT expiration time from a raw token string.
         /// </summary>
         /// <param name="token"></param>
         /// <returns></returns>
-        private long GetTokenExpirationTime(string token)
+        private static long ParseTokenExpirationTime(string token)
         {
             if (String.IsNullOrWhiteSpace(token))
                 return 0;
@@ -198,6 +252,19 @@ namespace SteamAuth
             {
                 return 0;
             }
+        }
+
+        private sealed class TokenState
+        {
+            internal TokenState(string token, long? expirationUnixSeconds)
+            {
+                Token = token;
+                ExpirationUnixSeconds = expirationUnixSeconds;
+            }
+
+            internal string Token { get; }
+
+            internal long? ExpirationUnixSeconds { get; }
         }
 
         public CookieContainer GetCookies()
