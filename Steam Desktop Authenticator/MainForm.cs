@@ -299,16 +299,17 @@ namespace Steam_Desktop_Authenticator
 
                     if (result.Kind == SilentReloginOutcomeKind.Succeeded)
                     {
+                        lock (sessionStateLock)
+                        {
+                            sessionRenewalRequired.Remove(steamId);
+                            startupDeferredSessionRenewals.Remove(steamId);
+                            sessionRenewalPersistBackoffUntilUtc.Remove(steamId);
+                        }
                         tradeConfirmationScheduler.OnSettingsChanged(steamId, TimeSpan.FromSeconds(3));
                         TryBeginInvoke(() =>
                         {
                             if (IsDisposed || Disposing)
                                 return;
-                            lock (sessionStateLock)
-                            {
-                                sessionRenewalRequired.Remove(steamId);
-                                startupDeferredSessionRenewals.Remove(steamId);
-                            }
                             loadAccountsList(currentAccount?.Session?.SteamID);
                         });
                     }
@@ -1449,6 +1450,9 @@ namespace Steam_Desktop_Authenticator
                 List<StagedTransferRecoveryRecord> stagedRecoveries = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(allAccounts, passKey, manifest);
                 foreach (StagedTransferRecoveryRecord staged in stagedRecoveries)
                 {
+                    if (String.IsNullOrEmpty(staged?.FilePath) || !File.Exists(staged.FilePath))
+                        continue;
+
                     StagedTransferRecoveryRecord resolvedStaged = staged;
                     string recoveryPassKey = passKey;
 

@@ -410,6 +410,12 @@ namespace Steam_Desktop_Authenticator
 
                         if (!saveResult.Succeeded)
                         {
+                            string currentGenerationId = manifest.GetSavedCredentialStatus(steamId, passKey).CredentialGenerationId;
+                            if (String.IsNullOrEmpty(currentGenerationId) ||
+                                String.Equals(currentGenerationId, capturedGenerationId, StringComparison.Ordinal))
+                            {
+                                cooldownUntilUtc[steamId] = utcNowProvider().Add(TransientFailureCooldown);
+                            }
                             DiagnosticErrorLogger.Log("Silent re-login", saveResult.Exception, "Silent re-login session could not be committed atomically.");
                             return new SilentReloginResult { Kind = SilentReloginOutcomeKind.PersistenceRejected, SteamId = steamId };
                         }

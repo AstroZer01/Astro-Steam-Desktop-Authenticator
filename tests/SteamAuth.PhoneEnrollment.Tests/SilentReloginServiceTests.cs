@@ -342,6 +342,55 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False(manifest.GetSavedCredentialStatus(steamId, passKey).HasSavedPassword);
         }
 
+        [Fact]
+        public async Task PersistenceRejected_EntersTransientCooldownWhenGenerationUnchanged_PreventingLoginStorm()
+        {
+            const string passKey = "StrongPasskey!88";
+            ulong steamId = 76561198000003008UL;
+            SteamGuardAccount account = CreateAccount(steamId, "persist_reject_user");
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(account, true, passKey).Succeeded);
+            Assert.True(manifest.SetAllowSavedSteamPasswords(true).Succeeded);
+            Assert.True(manifest.SaveAccountPassword(steamId, "valid-pw", passKey).Succeeded);
+
+            DateTime now = new DateTime(2026, 11, 23, 10, 0, 0, DateTimeKind.Utc);
+            var transport = new FakeCredentialLoginTransport
+            {
+                Handler = (acc, pw, ct) =>
+                {
+                    // Mutate the account's storage revision mid-login so SaveAccount rejects with PersistenceRejected
+                    // while keeping the saved credential generation unchanged.
+                    Assert.True(manifest.SaveAccount(CreateAccount(steamId, "persist_reject_user"), true, passKey).Succeeded);
+                    return Task.FromResult(new SilentReloginTransportResult
+                    {
+                        Kind = SilentReloginOutcomeKind.Succeeded,
+                        Session = new SessionData
+                        {
+                            SteamID = steamId,
+                            AccessToken = "new-at",
+                            RefreshToken = "new-rt"
+                        }
+                    });
+                }
+            };
+
+            SilentReloginService service = new SilentReloginService(transport, () => now);
+            SilentReloginResult first = await service.TryRecoverAccountSessionAsync(manifest, account, passKey, CancellationToken.None);
+            Assert.Equal(SilentReloginOutcomeKind.PersistenceRejected, first.Kind);
+            Assert.Equal(1, transport.CallCount);
+
+            // Must enter cooldown immediately so 1s timer ticks cannot trigger a login storm
+            Assert.False(service.CanAttemptRecovery(manifest, steamId, passKey));
+            SilentReloginResult duringCooldown = await service.TryRecoverAccountSessionAsync(manifest, account, passKey, CancellationToken.None);
+            Assert.Equal(SilentReloginOutcomeKind.NotEligible, duringCooldown.Kind);
+            Assert.Equal(1, transport.CallCount);
+
+            // After TransientFailureCooldown elapses, recovery is eligible again
+            now = now.Add(SilentReloginService.TransientFailureCooldown).AddSeconds(1);
+            Assert.True(service.CanAttemptRecovery(manifest, steamId, passKey));
+        }
+
         public void Dispose()
         {
             Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);
