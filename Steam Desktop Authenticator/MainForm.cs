@@ -66,6 +66,7 @@ namespace Steam_Desktop_Authenticator
         private readonly TradeConfirmationScheduler tradeConfirmationScheduler = new TradeConfirmationScheduler();
         private readonly SilentReloginService silentReloginService = new SilentReloginService();
         private readonly ConcurrentDictionary<ulong, Task> activeSilentReloginTasks = new ConcurrentDictionary<ulong, Task>();
+        private readonly ConcurrentDictionary<ulong, byte> transferFencedSteamIds = new ConcurrentDictionary<ulong, byte>();
         private readonly object loginRateLimitLock = new object();
         private DateTime loginRateLimitedUntilUtc = DateTime.MinValue;
         private readonly Dictionary<ulong, LoginMonitorSchedule> loginMonitorSchedules = new Dictionary<ulong, LoginMonitorSchedule>();
@@ -188,6 +189,12 @@ namespace Steam_Desktop_Authenticator
             });
         }
 
+        private bool IsAccountBusyWithRecoveryOrTransfer(ulong steamId)
+        {
+            return steamId != 0 &&
+                (silentReloginService.IsRecoveryInProgress(steamId) || transferFencedSteamIds.ContainsKey(steamId));
+        }
+
         private async Task<(bool Acquired, T Result)> TryRunAvailableSteamAccountOperationNowAsync<T>(
             SteamGuardAccount account,
             Func<Task<T>> operation,
@@ -196,7 +203,7 @@ namespace Steam_Desktop_Authenticator
             Func<Exception, bool> shouldDeferFailureMarking = null)
         {
             ulong steamId = account?.Session?.SteamID ?? 0;
-            if (steamId != 0 && silentReloginService.IsRecoveryInProgress(steamId))
+            if (IsAccountBusyWithRecoveryOrTransfer(steamId))
                 return (false, default);
 
             SessionData sessionAtOperationStart = null;
@@ -246,6 +253,8 @@ namespace Steam_Desktop_Authenticator
         {
             ulong steamId = account?.Session?.SteamID ?? 0;
             if (manifest == null || steamId == 0 || String.IsNullOrEmpty(passKey))
+                return;
+            if (transferFencedSteamIds.ContainsKey(steamId))
                 return;
             if (!manifest.Encrypted || !manifest.AllowSavedSteamPasswords)
                 return;
@@ -825,7 +834,9 @@ namespace Steam_Desktop_Authenticator
             btnManageEncryption.Enabled = manifest.Entries.Count > 0;
 
             loadAccountsList();
-            loginApprovalService = new LoginApprovalService(account => PersistLoginSession(account));
+            loginApprovalService = new LoginApprovalService(
+                account => manifest?.GetAccountStorageRevision(account?.Session?.SteamID ?? 0) ?? 0,
+                (account, session, expectedRevision) => PersistLoginSession(account, session, expectedRevision));
 
             try
             {
@@ -892,6 +903,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             loadAccountsList();
+            ReconcilePendingTransfersOnStartup();
             if (manifest.CredentialsStoreMissingWarning)
             {
                 DiagnosticErrorLogger.Log("Credential storage", new FileNotFoundException("The referenced encrypted credential store file was not found."), "Saved Steam passwords are unavailable because the credential store file is missing.");
@@ -1214,6 +1226,183 @@ namespace Steam_Desktop_Authenticator
                 loginForm.ShowDialog(this);
             }
             this.loadAccountsList();
+        }
+
+        private sealed class TransferFenceHandle : IDisposable
+        {
+            private readonly ConcurrentDictionary<ulong, byte> fencedIds;
+            private readonly ulong steamId;
+            private IDisposable exclusiveLock;
+
+            public TransferFenceHandle(ConcurrentDictionary<ulong, byte> fencedIds, ulong steamId, IDisposable exclusiveLock)
+            {
+                this.fencedIds = fencedIds;
+                this.steamId = steamId;
+                this.exclusiveLock = exclusiveLock;
+            }
+
+            public void Dispose()
+            {
+                IDisposable lockToRelease = Interlocked.Exchange(ref exclusiveLock, null);
+                try
+                {
+                    lockToRelease?.Dispose();
+                }
+                finally
+                {
+                    fencedIds.TryRemove(steamId, out _);
+                }
+            }
+        }
+
+        private async Task<IDisposable> BeginTransferFenceAsync(ulong steamId, CancellationToken cancellationToken)
+        {
+            if (steamId == 0)
+                return null;
+
+            transferFencedSteamIds[steamId] = 0;
+            try
+            {
+                IDisposable exclusiveLock = await steamAccountOperationCoordinator.AcquireExclusiveLockAsync(steamId, cancellationToken);
+                return new TransferFenceHandle(transferFencedSteamIds, steamId, exclusiveLock);
+            }
+            catch
+            {
+                transferFencedSteamIds.TryRemove(steamId, out _);
+                throw;
+            }
+        }
+
+        private void OnTransferredAccountCommitted(SteamGuardAccount committedAccount, string usedPassKey)
+        {
+            if (committedAccount?.Session == null || committedAccount.Session.SteamID == 0)
+                return;
+
+            ulong steamId = committedAccount.Session.SteamID;
+            if (manifest != null && manifest.Encrypted && String.IsNullOrEmpty(this.passKey) && !String.IsNullOrEmpty(usedPassKey))
+            {
+                this.passKey = usedPassKey;
+                btnManageEncryption.Text = "Remove Encryption";
+            }
+
+            lock (accountGenerationLock)
+            {
+                // Synchronously retire any previous SteamGuardAccount generation for this SteamID
+                // BEFORE RecoveryCodeForm is shown so concurrent refreshes cannot overwrite it.
+                List<SteamGuardAccount> updated = (allAccounts ?? Array.Empty<SteamGuardAccount>())
+                    .Where(existing => existing?.Session?.SteamID != steamId)
+                    .ToList();
+                updated.Add(committedAccount);
+                allAccounts = updated.ToArray();
+            }
+
+            ClearSessionRecoveryState(committedAccount);
+            InvalidateTradeConfirmationCache(committedAccount);
+            lock (sessionStateLock)
+            {
+                foreach (string requestKey in pendingLoginRequests.Keys
+                    .Where(key => key.StartsWith(steamId.ToString(CultureInfo.InvariantCulture) + ":", StringComparison.Ordinal))
+                    .ToArray())
+                {
+                    pendingLoginRequests.Remove(requestKey);
+                    PruneLoginRequestBookkeeping(requestKey);
+                }
+            }
+
+            if (!IsDisposed && !Disposing)
+            {
+                if (InvokeRequired)
+                    Invoke((MethodInvoker)(() => loadAccountsList(steamId)));
+                else
+                    loadAccountsList(steamId);
+            }
+        }
+
+        private void StartAuthenticatorTransferFlow()
+        {
+            using (LoginForm loginForm = new LoginForm(
+                LoginForm.LoginType.Transfer,
+                account: null,
+                passKey: this.passKey,
+                beginTransferFenceAsync: BeginTransferFenceAsync,
+                onAccountCommitted: OnTransferredAccountCommitted))
+            {
+                loginForm.ShowDialog(this);
+            }
+            this.loadAccountsList();
+        }
+
+        private void ReconcilePendingTransfersOnStartup()
+        {
+            if (manifest == null)
+                return;
+
+            List<StagedTransferRecoveryRecord> stagedRecoveries = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(allAccounts, passKey);
+            foreach (StagedTransferRecoveryRecord staged in stagedRecoveries)
+            {
+                if (staged.RequiresPasskey)
+                {
+                    AstroMessageBox.Show(
+                        "A passkey-protected staged authenticator transfer recovery file was found for SteamID " +
+                        staged.SteamId.ToString(CultureInfo.InvariantCulture) +
+                        ", but no manifest passkey is currently unlocked. Unlock your encrypted manifest or keep the recovery file safe.",
+                        "Staged Transfer Recovery",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    continue;
+                }
+
+                if (staged.Account == null)
+                    continue;
+
+                using (TransferSaveRecoveryForm recoveryForm = new TransferSaveRecoveryForm(
+                    staged.Account,
+                    "A transferred authenticator for " + (staged.Account.AccountName ?? staged.SteamId.ToString(CultureInfo.InvariantCulture)) +
+                    " was staged before a previous save completed or the app closed.",
+                    staged.FilePath,
+                    stagingFailed: false,
+                    manifestPassKey: passKey,
+                    retryLocalSave: candidate =>
+                    {
+                        StorageResult retryResult = manifest.SaveAccount(candidate, manifest.Encrypted, passKey);
+                        if (retryResult.Succeeded)
+                            OnTransferredAccountCommitted(candidate, passKey);
+                        return retryResult;
+                    }))
+                {
+                    recoveryForm.ShowDialog(this);
+                    if (recoveryForm.LocalSaveSucceeded)
+                    {
+                        loadAccountsList(staged.SteamId);
+                    }
+                }
+            }
+
+            List<PendingTransferMarkerRecord> unresolvedMarkers = PendingTransferMarker.EnumerateMarkers();
+            foreach (PendingTransferMarkerRecord marker in unresolvedMarkers)
+            {
+                string accountDisplay = String.IsNullOrWhiteSpace(marker.AccountName)
+                    ? "SteamID " + marker.SteamId.ToString(CultureInfo.InvariantCulture)
+                    : marker.AccountName + " (" + marker.SteamId.ToString(CultureInfo.InvariantCulture) + ")";
+                string whenText = marker.DispatchedAtUtc == DateTime.MinValue
+                    ? "an earlier session"
+                    : marker.DispatchedAtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+
+                DialogResult decision = AstroMessageBox.ShowWithCustomButtons(
+                    "An authenticator transfer for " + accountDisplay + " was interrupted after sending the SMS code (" + whenText + ").\n\n" +
+                    "Steam may have already replaced your previous authenticator. Do NOT automatically resend an SMS code. Verify your Steam Mobile App or Steam Support recovery status first.\n\n" +
+                    "Dismiss this warning only after you have verified the account.",
+                    "Unresolved Authenticator Transfer",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning,
+                    "Dismiss Notice",
+                    "Keep Notice");
+
+                if (decision == DialogResult.Yes)
+                {
+                    PendingTransferMarker.DeleteMarkerBestEffort(marker.SteamId);
+                }
+            }
         }
 
         private void SetQrScanWaitingState(bool isWaiting, int remainingSeconds = 0)
@@ -2022,7 +2211,7 @@ namespace Steam_Desktop_Authenticator
             DispatchEligibleSilentReloginsForExpiredAccounts(allAccounts);
             SteamGuardAccount[] accountsToMonitor = (allAccounts ?? Array.Empty<SteamGuardAccount>())
                 .Where(account => IsSessionAvailableForAccountOperations(account) &&
-                    !silentReloginService.IsRecoveryInProgress(account.Session.SteamID))
+                    !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID))
                 .ToArray();
             if (accountsToMonitor.Length == 0)
                 return;
@@ -2242,7 +2431,7 @@ namespace Steam_Desktop_Authenticator
             PersistExpiredRefreshTokenStates();
             DispatchEligibleSilentReloginsForExpiredAccounts(allAccounts);
             if (!allAccounts.Any(account => IsSessionAvailableForAccountOperations(account) &&
-                !silentReloginService.IsRecoveryInProgress(account.Session.SteamID)))
+                !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID)))
                 return;
             if (!await loginActionsSemaphore.WaitAsync(0))
                 return;
@@ -2252,7 +2441,7 @@ namespace Steam_Desktop_Authenticator
                 string currentDeviceIp = null;
                 bool currentDeviceIpChecked = false;
                 SteamGuardAccount nextAccount = GetNextLoginAccountToMonitor();
-                if (nextAccount == null || silentReloginService.IsRecoveryInProgress(nextAccount.Session.SteamID))
+                if (nextAccount == null || IsAccountBusyWithRecoveryOrTransfer(nextAccount.Session.SteamID))
                     return;
 
                 foreach (SteamGuardAccount account in new[] { nextAccount })
@@ -2761,7 +2950,8 @@ namespace Steam_Desktop_Authenticator
         private SteamGuardAccount GetNextLoginAccountToMonitor()
         {
             SteamGuardAccount[] accountsToMonitor = (allAccounts ?? Array.Empty<SteamGuardAccount>())
-                .Where(IsSessionAvailableForAccountOperations)
+                .Where(account => IsSessionAvailableForAccountOperations(account) &&
+                    !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID))
                 .ToArray();
             if (accountsToMonitor.Length == 0)
                 return null;
@@ -3122,7 +3312,7 @@ namespace Steam_Desktop_Authenticator
             PersistExpiredRefreshTokenStates();
             DispatchEligibleSilentReloginsForExpiredAccounts(allAccounts);
             if (!allAccounts.Any(account => IsSessionAvailableForAccountOperations(account) &&
-                !silentReloginService.IsRecoveryInProgress(account.Session.SteamID)))
+                !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID)))
                 return;
             if (!await loginActionsSemaphore.WaitAsync(0))
                 return;
@@ -3133,7 +3323,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     if (!IsSessionAvailableForAccountOperations(account))
                         continue;
-                    if (silentReloginService.IsRecoveryInProgress(account.Session.SteamID))
+                    if (IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID))
                         continue;
 
                     LoginApprovalFetchResult result;
@@ -5044,6 +5234,10 @@ namespace Steam_Desktop_Authenticator
             {
                 TryBeginInvoke(() => btnSteamLogin_Click(this, EventArgs.Empty));
             }
+            else if (action == "transfer_account")
+            {
+                TryBeginInvoke(() => StartAuthenticatorTransferFlow());
+            }
             else if (action == "setup_encryption")
             {
                 TryBeginInvoke(() => btnManageEncryption_Click(this, EventArgs.Empty));
@@ -5438,11 +5632,11 @@ namespace Steam_Desktop_Authenticator
             }
 
             SteamGuardAccount[] accountsToLoad = selectionToLoad == "all"
-                ? allAccounts.Where(account => IsSessionAvailableForAccountOperations(account) && !silentReloginService.IsRecoveryInProgress(account.Session.SteamID)).ToArray()
+                ? allAccounts.Where(account => IsSessionAvailableForAccountOperations(account) && !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID)).ToArray()
                 : allAccounts.Where(account => IsSessionAvailableForAccountOperations(account) &&
-                    !silentReloginService.IsRecoveryInProgress(account.Session.SteamID) &&
+                    !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID) &&
                     (account.Session.SteamID.ToString(CultureInfo.InvariantCulture) == selectionToLoad || account.AccountName == selectionToLoad)).ToArray();
-            if (accountsToLoad.Length == 0 && IsSessionAvailableForAccountOperations(currentAccount) && !silentReloginService.IsRecoveryInProgress(currentAccount.Session.SteamID))
+            if (accountsToLoad.Length == 0 && IsSessionAvailableForAccountOperations(currentAccount) && !IsAccountBusyWithRecoveryOrTransfer(currentAccount.Session.SteamID))
                 accountsToLoad = new[] { currentAccount };
             if (accountsToLoad.Length == 0)
             {

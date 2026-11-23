@@ -72,5 +72,28 @@ namespace Steam_Desktop_Authenticator
                 accountLock.Release();
             }
         }
+
+        public async Task<IDisposable> AcquireExclusiveLockAsync(ulong steamId, CancellationToken cancellationToken = default)
+        {
+            SemaphoreSlim accountLock = accountLocks.GetOrAdd(steamId, _ => new SemaphoreSlim(1, 1));
+            await accountLock.WaitAsync(cancellationToken);
+            return new ReleaseHandle(accountLock);
+        }
+
+        private sealed class ReleaseHandle : IDisposable
+        {
+            private SemaphoreSlim semaphore;
+
+            public ReleaseHandle(SemaphoreSlim semaphore)
+            {
+                this.semaphore = semaphore;
+            }
+
+            public void Dispose()
+            {
+                SemaphoreSlim toRelease = Interlocked.Exchange(ref semaphore, null);
+                toRelease?.Release();
+            }
+        }
     }
 }
