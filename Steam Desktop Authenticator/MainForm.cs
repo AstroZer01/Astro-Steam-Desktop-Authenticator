@@ -300,11 +300,11 @@ namespace Steam_Desktop_Authenticator
                     }
                     else if (result.Kind == SilentReloginOutcomeKind.InvalidPassword)
                     {
-                        MarkSessionRenewalRequired(account, "Steam rejected the saved password for automatic session renewal.");
                         TryBeginInvoke(() =>
                         {
                             if (IsDisposed || Disposing)
                                 return;
+                            MarkSessionRenewalRequired(account, "Steam rejected the saved password for automatic session renewal.");
                             PublishAccountHealthMetadata(steamId);
                             if (result.RejectionPersistFailed)
                             {
@@ -326,7 +326,11 @@ namespace Steam_Desktop_Authenticator
                         result.Kind == SilentReloginOutcomeKind.InteractiveRequired ||
                         result.Kind == SilentReloginOutcomeKind.AccountMismatch)
                     {
-                        MarkSessionRenewalRequired(account, "Interactive Steam login is required to renew this session.");
+                        TryBeginInvoke(() =>
+                        {
+                            if (!IsDisposed && !Disposing)
+                                MarkSessionRenewalRequired(account, "Interactive Steam login is required to renew this session.");
+                        });
                     }
                 }
                 catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
@@ -1315,6 +1319,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             ClearSessionRecoveryState(committedAccount);
+            silentReloginService.ClearTransientCooldown(steamId);
             InvalidateTradeConfirmationCache(committedAccount);
             lock (sessionStateLock)
             {
@@ -1346,6 +1351,10 @@ namespace Steam_Desktop_Authenticator
                 onAccountCommitted: OnTransferredAccountCommitted))
             {
                 loginForm.ShowDialog(this);
+                if (loginForm.SavedPasswordUpdated && loginForm.SavedPasswordUpdatedSteamId.HasValue)
+                {
+                    silentReloginService.ClearAccountRuntimeState(loginForm.SavedPasswordUpdatedSteamId.Value);
+                }
             }
             RefreshUnresolvedTransferMarkers();
             this.loadAccountsList();
@@ -1356,126 +1365,135 @@ namespace Steam_Desktop_Authenticator
             if (manifest == null)
                 return;
 
-            List<StagedTransferRecoveryRecord> stagedRecoveries = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(allAccounts, passKey, manifest);
-            foreach (StagedTransferRecoveryRecord staged in stagedRecoveries)
-            {
-                StagedTransferRecoveryRecord resolvedStaged = staged;
-                string recoveryPassKey = passKey;
-
-                if (resolvedStaged.RequiresPasskey)
-                {
-                    while (true)
-                    {
-                        using (InputForm passForm = new InputForm(
-                            "A passkey-protected staged authenticator transfer recovery was found for SteamID " +
-                            resolvedStaged.SteamId.ToString(CultureInfo.InvariantCulture) +
-                            ". Enter the passkey used during that transfer to unlock and recover it:",
-                            true))
-                        {
-                            passForm.ShowInputDialog(this);
-                            if (passForm.Canceled)
-                            {
-                                resolvedStaged = null;
-                                break;
-                            }
-
-                            string candidatePassKey = passForm.txtBox.Text;
-                            StagedTransferRecoveryRecord decrypted = PendingTransferMarker.TryLoadStagedRecoveryWithPasskey(resolvedStaged.FilePath, candidatePassKey);
-                            if (decrypted?.Account != null)
-                            {
-                                resolvedStaged = decrypted;
-                                recoveryPassKey = candidatePassKey;
-                                break;
-                            }
-
-                            AstroMessageBox.Show(
-                                "That passkey could not unlock the staged transfer recovery file. Try again or cancel to keep it staged.",
-                                "Staged Transfer Recovery",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Error);
-                        }
-                    }
-
-                    if (resolvedStaged?.Account == null)
-                        continue;
-
-                    SteamGuardAccount existingCommitted = FindLoadedAccountBySteamId(allAccounts, resolvedStaged.SteamId);
-                    if (existingCommitted != null && PendingTransferMarker.IsSameAuthenticatorReplacement(existingCommitted, resolvedStaged.Account))
-                    {
-                        PendingTransferMarker.DeleteStagedRecoveryBestEffort(resolvedStaged.FilePath);
-                        PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId);
-                        continue;
-                    }
-                }
-
-                if (resolvedStaged.Account == null)
-                    continue;
-
-                bool saveEncrypted = manifest.Encrypted || (manifest.Entries.Count == 0 && !String.IsNullOrEmpty(recoveryPassKey));
-                string effectivePassKey = saveEncrypted ? (manifest.Encrypted ? passKey : recoveryPassKey) : null;
-                long expectedRevisionAtRecovery = manifest.GetAccountStorageRevision(resolvedStaged.SteamId);
-
-                using (TransferSaveRecoveryForm recoveryForm = new TransferSaveRecoveryForm(
-                    resolvedStaged.Account,
-                    "A transferred authenticator for " + (resolvedStaged.Account.AccountName ?? resolvedStaged.SteamId.ToString(CultureInfo.InvariantCulture)) +
-                    " was staged before a previous save completed or the app closed.",
-                    resolvedStaged.FilePath,
-                    stagingFailed: false,
-                    manifestPassKey: effectivePassKey ?? recoveryPassKey,
-                    retryLocalSave: candidate =>
-                    {
-                        StorageResult retryResult = manifest.SaveAccount(
-                            candidate,
-                            saveEncrypted,
-                            effectivePassKey,
-                            expectedStorageRevision: manifest.Entries.Any(entry => entry.SteamID == resolvedStaged.SteamId)
-                                ? expectedRevisionAtRecovery
-                                : (long?)null,
-                            transferAttemptId: resolvedStaged.TransferAttemptId,
-                            rejectSupersededTransferAttempt: true);
-                        if (retryResult.Succeeded)
-                        {
-                            PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(resolvedStaged.SteamId);
-                            OnTransferredAccountCommitted(candidate, effectivePassKey);
-                        }
-                        return retryResult;
-                    }))
-                {
-                    recoveryForm.ShowDialog(this);
-                    if (recoveryForm.LocalSaveSucceeded)
-                    {
-                        loadAccountsList(resolvedStaged.SteamId);
-                    }
-                }
-            }
-
-            List<PendingTransferMarkerRecord> unresolvedMarkers = PendingTransferMarker.EnumerateMarkers();
-            foreach (PendingTransferMarkerRecord marker in unresolvedMarkers)
-            {
-                string accountDisplay = String.IsNullOrWhiteSpace(marker.AccountName)
-                    ? "SteamID " + marker.SteamId.ToString(CultureInfo.InvariantCulture)
-                    : marker.AccountName + " (" + marker.SteamId.ToString(CultureInfo.InvariantCulture) + ")";
-                string whenText = marker.DispatchedAtUtc == DateTime.MinValue
-                    ? "an earlier session"
-                    : marker.DispatchedAtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
-
-                DialogResult decision = AstroMessageBox.ShowWithCustomButtons(
-                    "An authenticator transfer for " + accountDisplay + " was interrupted after sending the SMS code (" + whenText + ").\n\n" +
-                    "Steam may have already replaced your previous authenticator. Automation and account operations remain paused for this account until resolved. Verify your Steam Mobile App or Steam Support recovery status first.\n\n" +
-                    "Dismiss this warning only after you have verified the account.",
-                    "Unresolved Authenticator Transfer",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Warning,
-                    "Dismiss Notice",
-                    "Keep Notice");
-
-                if (decision == DialogResult.Yes)
-                {
-                    PendingTransferMarker.DeleteMarkerBestEffort(marker.SteamId);
-                }
-            }
-
+            // Fence unresolved markers immediately BEFORE showing any dialogs so an error or early exit
+            // can never leave background automation running against an unresolved transfer.
             RefreshUnresolvedTransferMarkers();
+            try
+            {
+                List<StagedTransferRecoveryRecord> stagedRecoveries = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(allAccounts, passKey, manifest);
+                foreach (StagedTransferRecoveryRecord staged in stagedRecoveries)
+                {
+                    StagedTransferRecoveryRecord resolvedStaged = staged;
+                    string recoveryPassKey = passKey;
+
+                    if (resolvedStaged.RequiresPasskey)
+                    {
+                        while (true)
+                        {
+                            using (InputForm passForm = new InputForm(
+                                "A passkey-protected staged authenticator transfer recovery was found for SteamID " +
+                                resolvedStaged.SteamId.ToString(CultureInfo.InvariantCulture) +
+                                ". Enter the passkey used during that transfer to unlock and recover it:",
+                                true))
+                            {
+                                passForm.ShowInputDialog(this);
+                                if (passForm.Canceled)
+                                {
+                                    resolvedStaged = null;
+                                    break;
+                                }
+
+                                string candidatePassKey = passForm.txtBox.Text;
+                                StagedTransferRecoveryRecord decrypted = PendingTransferMarker.TryLoadStagedRecoveryWithPasskey(resolvedStaged.FilePath, candidatePassKey);
+                                if (decrypted?.Account != null)
+                                {
+                                    resolvedStaged = decrypted;
+                                    recoveryPassKey = candidatePassKey;
+                                    break;
+                                }
+
+                                AstroMessageBox.Show(
+                                    "That passkey could not unlock the staged transfer recovery file. Try again or cancel to keep it staged.",
+                                    "Staged Transfer Recovery",
+                                    MessageBoxButtons.OK,
+                                    MessageBoxIcon.Error);
+                            }
+                        }
+
+                        if (resolvedStaged?.Account == null)
+                            continue;
+
+                        SteamGuardAccount existingCommitted = FindLoadedAccountBySteamId(allAccounts, resolvedStaged.SteamId);
+                        if (existingCommitted != null && PendingTransferMarker.IsSameAuthenticatorReplacement(existingCommitted, resolvedStaged.Account))
+                        {
+                            PendingTransferMarker.DeleteStagedRecoveryBestEffort(resolvedStaged.FilePath);
+                            PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId);
+                            continue;
+                        }
+                    }
+
+                    if (resolvedStaged.Account == null)
+                        continue;
+
+                    bool saveEncrypted = manifest.Encrypted || (manifest.Entries.Count == 0 && !String.IsNullOrEmpty(recoveryPassKey));
+                    string effectivePassKey = saveEncrypted ? (manifest.Encrypted ? passKey : recoveryPassKey) : null;
+                    long expectedRevisionAtRecovery = manifest.GetAccountStorageRevision(resolvedStaged.SteamId);
+
+                    using (TransferSaveRecoveryForm recoveryForm = new TransferSaveRecoveryForm(
+                        resolvedStaged.Account,
+                        "A transferred authenticator for " + (resolvedStaged.Account.AccountName ?? resolvedStaged.SteamId.ToString(CultureInfo.InvariantCulture)) +
+                        " was staged before a previous save completed or the app closed.",
+                        resolvedStaged.FilePath,
+                        stagingFailed: false,
+                        manifestPassKey: effectivePassKey ?? recoveryPassKey,
+                        retryLocalSave: candidate =>
+                        {
+                            StorageResult retryResult = manifest.SaveAccount(
+                                candidate,
+                                saveEncrypted,
+                                effectivePassKey,
+                                expectedStorageRevision: manifest.Entries.Any(entry => entry.SteamID == resolvedStaged.SteamId)
+                                    ? expectedRevisionAtRecovery
+                                    : (long?)null,
+                                transferAttemptId: resolvedStaged.TransferAttemptId,
+                                expectedPreviousTransferAttemptId: resolvedStaged.PreviousCommittedTransferAttemptId,
+                                enforceTransferAttemptBase: true);
+                            if (retryResult.Succeeded)
+                            {
+                                PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(resolvedStaged.SteamId);
+                                OnTransferredAccountCommitted(candidate, effectivePassKey);
+                            }
+                            return retryResult;
+                        }))
+                    {
+                        recoveryForm.ShowDialog(this);
+                        if (recoveryForm.LocalSaveSucceeded)
+                        {
+                            loadAccountsList(resolvedStaged.SteamId);
+                        }
+                    }
+                }
+
+                List<PendingTransferMarkerRecord> unresolvedMarkers = PendingTransferMarker.EnumerateMarkers();
+                foreach (PendingTransferMarkerRecord marker in unresolvedMarkers)
+                {
+                    string accountDisplay = String.IsNullOrWhiteSpace(marker.AccountName)
+                        ? "SteamID " + marker.SteamId.ToString(CultureInfo.InvariantCulture)
+                        : marker.AccountName + " (" + marker.SteamId.ToString(CultureInfo.InvariantCulture) + ")";
+                    string whenText = marker.DispatchedAtUtc == DateTime.MinValue
+                        ? "an earlier session"
+                        : marker.DispatchedAtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+
+                    DialogResult decision = AstroMessageBox.ShowWithCustomButtons(
+                        "An authenticator transfer for " + accountDisplay + " was interrupted after sending the SMS code (" + whenText + ").\n\n" +
+                        "Steam may have already replaced your previous authenticator. Automation and account operations remain paused for this account until resolved. Verify your Steam Mobile App or Steam Support recovery status first.\n\n" +
+                        "Dismiss this warning only after you have verified the account.",
+                        "Unresolved Authenticator Transfer",
+                        MessageBoxButtons.OKCancel,
+                        MessageBoxIcon.Warning,
+                        "Dismiss Notice",
+                        "Keep Notice");
+
+                    if (decision == DialogResult.OK)
+                    {
+                        PendingTransferMarker.DeleteMarkerBestEffort(marker.SteamId);
+                    }
+                }
+            }
+            finally
+            {
+                RefreshUnresolvedTransferMarkers();
+            }
         }
 
         private void SetQrScanWaitingState(bool isWaiting, int remainingSeconds = 0)
@@ -3708,6 +3726,8 @@ namespace Steam_Desktop_Authenticator
                     bool succeeded = loginForm.RefreshSucceeded;
                     if (succeeded && account.Session != null)
                     {
+                        if (loginForm.SavedPasswordUpdated)
+                            silentReloginService.ClearAccountRuntimeState(account.Session.SteamID);
                         ClearSessionRecoveryState(account);
                         InvalidateTradeConfirmationCache(account);
                     }

@@ -1089,6 +1089,17 @@ namespace Steam_Desktop_Authenticator
             return matchingEntries.Count == 1 ? matchingEntries[0] : null;
         }
 
+        public string GetLastTransferAttemptId(ulong steamId)
+        {
+            if (steamId == 0)
+                return null;
+
+            lock (storageLock)
+            {
+                return Entries?.FirstOrDefault(entry => entry != null && entry.SteamID == steamId)?.LastTransferAttemptId;
+            }
+        }
+
         public StorageResult SaveAccount(
             SteamGuardAccount account,
             bool encrypt,
@@ -1099,7 +1110,8 @@ namespace Steam_Desktop_Authenticator
             string expectedCredentialGenerationId = null,
             string credentialPassKey = null,
             string transferAttemptId = null,
-            bool rejectSupersededTransferAttempt = false)
+            string expectedPreviousTransferAttemptId = null,
+            bool enforceTransferAttemptBase = false)
         {
             lock (storageLock)
             {
@@ -1156,12 +1168,16 @@ namespace Steam_Desktop_Authenticator
                 ManifestEntry previousEntry = stagedManifest.Entries.FirstOrDefault(entry => entry.SteamID == account.Session.SteamID);
                 if (previousEntry == null && !allowCreate)
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account is no longer managed by this authenticator.");
-                if (rejectSupersededTransferAttempt &&
-                    previousEntry != null &&
-                    !String.IsNullOrWhiteSpace(previousEntry.LastTransferAttemptId) &&
-                    !String.Equals(previousEntry.LastTransferAttemptId, transferAttemptId, StringComparison.Ordinal))
+                if (enforceTransferAttemptBase && previousEntry != null)
                 {
-                    return StorageResult.Failure(StorageFailureKind.Validation, "A newer authenticator transfer has already been saved for this account.");
+                    string currentAttemptId = previousEntry.LastTransferAttemptId;
+                    bool matchesBaseline = String.Equals(currentAttemptId ?? String.Empty, expectedPreviousTransferAttemptId ?? String.Empty, StringComparison.Ordinal);
+                    bool matchesSameAttempt = !String.IsNullOrWhiteSpace(transferAttemptId) &&
+                        String.Equals(currentAttemptId, transferAttemptId, StringComparison.Ordinal);
+                    if (!matchesBaseline && !matchesSameAttempt)
+                    {
+                        return StorageResult.Failure(StorageFailureKind.Validation, "A newer authenticator transfer has already been saved for this account.");
+                    }
                 }
                 string filename = account.Session.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
                 ManifestEntry newEntry = new ManifestEntry()

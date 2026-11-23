@@ -345,25 +345,26 @@ namespace Steam_Desktop_Authenticator
                 }
             }
 
+            string suffix = steamId != 0 ? "_" + steamId.ToString(CultureInfo.InvariantCulture) : "_account";
+            int maxBaseLength = Math.Max(8, MaximumExportFilenameStemLength - suffix.Length - 8);
+
             string stem = sb.ToString().Trim().TrimEnd('.', ' ');
+            if (stem.Length > maxBaseLength)
+                stem = stem.Substring(0, maxBaseLength).TrimEnd('.', ' ');
             if (String.IsNullOrEmpty(stem))
                 stem = steamId != 0 ? steamId.ToString(CultureInfo.InvariantCulture) : "account";
 
-            // Check stem before first '.' against ALL Windows reserved device names (including COM¹-COM³, LPT¹-LPT³).
+            // Check stem before first '.' against ALL Windows reserved device names (including COM¹-COM³, LPT¹-LPT³)
+            // AFTER truncation/trimming so long inputs like "CON" + spaces + "x" cannot truncate back to "CON".
             int firstDotIndex = stem.IndexOf('.');
             string deviceCandidate = firstDotIndex >= 0 ? stem.Substring(0, firstDotIndex) : stem;
             deviceCandidate = deviceCandidate.TrimEnd(' ');
             if (WindowsReservedDeviceNames.Contains(deviceCandidate))
             {
                 stem = "_" + stem;
+                if (stem.Length > maxBaseLength)
+                    stem = stem.Substring(0, maxBaseLength).TrimEnd('.', ' ');
             }
-
-            string suffix = steamId != 0 ? "_" + steamId.ToString(CultureInfo.InvariantCulture) : "_account";
-            int maxBaseLength = Math.Max(8, MaximumExportFilenameStemLength - suffix.Length - 8);
-            if (stem.Length > maxBaseLength)
-                stem = stem.Substring(0, maxBaseLength).TrimEnd('.', ' ');
-            if (String.IsNullOrEmpty(stem))
-                stem = steamId != 0 ? steamId.ToString(CultureInfo.InvariantCulture) : "account";
 
             string candidate = stem + safeExtension;
             if (usedNamesCaseInsensitive == null)

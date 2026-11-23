@@ -175,6 +175,15 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void SanitizeExportFilename_NeutralizesReservedDeviceNamesEvenAfterLongTruncation()
+        {
+            string paddedReserved = "CON" + new string(' ', 80) + "suffix";
+            string sanitized = AccountExportService.SanitizeExportFilename(paddedReserved, 76561198000001051UL, extension: ".maFile");
+            Assert.StartsWith("_", sanitized, StringComparison.Ordinal);
+            Assert.NotEqual("CON.maFile", sanitized, StringComparer.OrdinalIgnoreCase);
+        }
+
+        [Fact]
         public void SanitizeExportFilename_EnforcesCaseInsensitiveUniqueness()
         {
             var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

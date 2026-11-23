@@ -353,13 +353,81 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 encrypt: true,
                 passKey: chosenPassKey,
                 transferAttemptId: unlocked.TransferAttemptId,
-                rejectSupersededTransferAttempt: true);
+                expectedPreviousTransferAttemptId: unlocked.PreviousCommittedTransferAttemptId,
+                enforceTransferAttemptBase: true);
             Assert.True(commitResult.Succeeded);
 
             Manifest afterRestart = Manifest.GetManifest(true);
             Assert.True(afterRestart.Encrypted);
             SteamGuardAccount committed = Assert.Single(afterRestart.GetAllAccounts(chosenPassKey));
             Assert.Equal("R77777", committed.RevocationCode);
+        }
+
+        [Fact]
+        public void SecondTransferAfterPreviousCommittedTransfer_PreservesStagedRecoveryAndAllowsRetryCommit()
+        {
+            ulong steamId = 76561198000000078UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+
+            SteamGuardAccount firstCommitted = new SteamGuardAccount
+            {
+                AccountName = "second_transfer_user",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(1, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(21, 20).Select(i => (byte)i).ToArray()),
+                RevocationCode = "R10001",
+                TokenGID = "gid-1",
+                SerialNumber = "1001",
+                DeviceID = "android:1",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = steamId, AccessToken = "at1", RefreshToken = "rt1" }
+            };
+            Assert.True(manifest.SaveAccount(firstCommitted, encrypt: false, transferAttemptId: "attempt-1").Succeeded);
+
+            // Second transfer captures baseline "attempt-1" and stages "attempt-2" before initial SaveAccount fails/crashes
+            string baselineAttemptId = manifest.GetLastTransferAttemptId(steamId);
+            Assert.Equal("attempt-1", baselineAttemptId);
+
+            SteamGuardAccount secondStaged = new SteamGuardAccount
+            {
+                AccountName = "second_transfer_user",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(41, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(61, 20).Select(i => (byte)i).ToArray()),
+                RevocationCode = "R20002",
+                TokenGID = "gid-2",
+                SerialNumber = "2002",
+                DeviceID = "android:2",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = steamId, AccessToken = "at2", RefreshToken = "rt2" }
+            };
+
+            string stagedPath = PendingTransferMarker.TryStageProtectedReplacement(
+                secondStaged,
+                manifestEncrypted: false,
+                passKey: null,
+                out bool stagingFailed,
+                transferAttemptId: "attempt-2",
+                previousCommittedTransferAttemptId: baselineAttemptId);
+            Assert.False(stagingFailed);
+            Assert.True(File.Exists(stagedPath));
+
+            // Restart reconciliation MUST preserve "attempt-2" (NOT delete it as superseded!)
+            var pending = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(new[] { firstCommitted }, passKey: null, manifest: manifest);
+            StagedTransferRecoveryRecord recovered = Assert.Single(pending);
+            Assert.Equal("attempt-2", recovered.TransferAttemptId);
+            Assert.Equal("attempt-1", recovered.PreviousCommittedTransferAttemptId);
+            Assert.Equal("R20002", recovered.Account.RevocationCode);
+
+            // Retry Local Save MUST succeed because baseline matches "attempt-1"
+            StorageResult retryResult = manifest.SaveAccount(
+                recovered.Account,
+                encrypt: false,
+                transferAttemptId: recovered.TransferAttemptId,
+                expectedPreviousTransferAttemptId: recovered.PreviousCommittedTransferAttemptId,
+                enforceTransferAttemptBase: true);
+            Assert.True(retryResult.Succeeded);
+
+            SteamGuardAccount persisted = Assert.Single(Manifest.GetManifest(true).GetAllAccounts());
+            Assert.Equal("R20002", persisted.RevocationCode);
         }
 
         [Fact]
@@ -396,24 +464,31 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             string olderAttemptId = "attempt-1";
             string newerAttemptId = "attempt-2";
-            string olderStagedPath = PendingTransferMarker.TryStageProtectedReplacement(oldStaged, manifestEncrypted: false, passKey: null, out bool stagingFailed, transferAttemptId: olderAttemptId);
+            string olderStagedPath = PendingTransferMarker.TryStageProtectedReplacement(
+                oldStaged,
+                manifestEncrypted: false,
+                passKey: null,
+                out bool stagingFailed,
+                transferAttemptId: olderAttemptId,
+                previousCommittedTransferAttemptId: null);
             Assert.False(stagingFailed);
             Assert.True(File.Exists(olderStagedPath));
 
             // Newer transfer commits cleanly with newerAttemptId
             Assert.True(manifest.SaveAccount(newerCommitted, encrypt: false, transferAttemptId: newerAttemptId).Succeeded);
 
-            // Reconcile must see olderAttemptId != newerAttemptId, delete the obsolete staged copy, and offer NOTHING!
+            // Reconcile must see committedAttemptId ("attempt-2") != older baseline (null), delete obsolete staged copy, and offer NOTHING!
             var pending = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(new[] { newerCommitted }, passKey: null, manifest: manifest);
             Assert.Empty(pending);
             Assert.False(File.Exists(olderStagedPath));
 
-            // Even a direct save attempt with rejectSupersededTransferAttempt must be rejected!
+            // Even a direct save attempt with enforceTransferAttemptBase must be rejected!
             StorageResult overwriteAttempt = manifest.SaveAccount(
                 oldStaged,
                 encrypt: false,
                 transferAttemptId: olderAttemptId,
-                rejectSupersededTransferAttempt: true);
+                expectedPreviousTransferAttemptId: null,
+                enforceTransferAttemptBase: true);
             Assert.False(overwriteAttempt.Succeeded);
 
             SteamGuardAccount persisted = Assert.Single(Manifest.GetManifest(true).GetAllAccounts());

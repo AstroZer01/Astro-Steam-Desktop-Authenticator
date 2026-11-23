@@ -310,6 +310,13 @@ namespace Steam_Desktop_Authenticator
             cooldownUntilUtc.TryRemove(steamId, out _);
         }
 
+        public void ClearTransientCooldown(ulong steamId)
+        {
+            if (steamId == 0)
+                return;
+            cooldownUntilUtc.TryRemove(steamId, out _);
+        }
+
         public bool CanAttemptRecovery(Manifest manifest, ulong steamId, string passKey)
         {
             if (manifest == null || steamId == 0 || String.IsNullOrEmpty(passKey))

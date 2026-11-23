@@ -27,6 +27,7 @@ namespace Steam_Desktop_Authenticator
         private readonly Action<SteamGuardAccount, string> onAccountCommitted;
         private bool savePasswordRequested;
         public bool SavedPasswordUpdated { get; private set; }
+        public ulong? SavedPasswordUpdatedSteamId { get; private set; }
 
         public LoginForm(
             LoginType loginReason = LoginType.Initial,
@@ -626,7 +627,7 @@ namespace Steam_Desktop_Authenticator
                         confirmationCodeForm.ShowInputDialog(this);
                     if (confirmationCodeForm.Canceled)
                     {
-                        if (!manifest.RemoveAccount(linker.LinkedAccount))
+                        if (!manifest.RemoveAccount(linker.LinkedAccount, passKey))
                         {
                             const string removalError = "The unfinished authenticator record could not be removed safely. It may still be present in the app; restart the app before making further account changes.";
                             DiagnosticErrorLogger.Log("Authenticator storage", new InvalidOperationException(removalError), "Removing the unfinished authenticator record after setup cancellation failed.");
@@ -674,7 +675,7 @@ namespace Steam_Desktop_Authenticator
 
                     case AuthenticatorLinker.FinalizeResult.UnableToGenerateCorrectCodes:
                         AstroMessageBox.Show("Unable to generate the proper codes to finalize this authenticator. The authenticator should not have been linked. In the off-chance it was, please write down your revocation code, as this is the last chance to see it: " + linker.LinkedAccount.RevocationCode);
-                        manifest.RemoveAccount(linker.LinkedAccount);
+                        manifest.RemoveAccount(linker.LinkedAccount, passKey);
                         this.Close();
                         return;
 
@@ -924,6 +925,7 @@ namespace Steam_Desktop_Authenticator
                 if (credResult.Succeeded)
                 {
                     SavedPasswordUpdated = true;
+                    SavedPasswordUpdatedSteamId = steamId;
                     if (credResult.ObsoleteCleanupPending)
                     {
                         extraNotice = "\n\nYour password was saved. The previous encrypted credential file could not be removed immediately and will be cleaned up automatically on the next save or restart.";
@@ -1017,7 +1019,15 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            bool encrypt = manifest.Encrypted || (manifest.Entries.Count == 0 && resolvedPassKey != null);
+            bool encrypt = manifest.Encrypted || (manifest.Entries.Count == 0 && !String.IsNullOrEmpty(resolvedPassKey));
+            if (encrypt && String.IsNullOrEmpty(resolvedPassKey))
+            {
+                AstroMessageBox.Show("An encryption passkey is required before starting an authenticator transfer on an encrypted manifest.", "Authenticator Transfer", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ResetLoginButton(cancellationToken);
+                return;
+            }
+
+            string previousCommittedTransferAttemptId = manifest.GetLastTransferAttemptId(sessionData.SteamID);
             IDisposable transferFence = null;
             try
             {
@@ -1030,6 +1040,7 @@ namespace Steam_Desktop_Authenticator
                     manifest,
                     encrypt,
                     resolvedPassKey,
+                    previousCommittedTransferAttemptId,
                     committedAccount => onAccountCommitted?.Invoke(committedAccount, resolvedPassKey));
 
                 AuthenticatorTransferCoordinator coordinator = new AuthenticatorTransferCoordinator(
@@ -1071,7 +1082,8 @@ namespace Steam_Desktop_Authenticator
                                     encrypt,
                                     resolvedPassKey,
                                     transferAttemptId: outcome.TransferAttemptId,
-                                    rejectSupersededTransferAttempt: true);
+                                    expectedPreviousTransferAttemptId: previousCommittedTransferAttemptId,
+                                    enforceTransferAttemptBase: true);
                                 if (retryResult.Succeeded)
                                 {
                                     PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(candidate.Session.SteamID);
@@ -1139,6 +1151,16 @@ namespace Steam_Desktop_Authenticator
             if (man.Entries.Count == 0)
             {
                 resolvedPassKey = man.PromptSetupPassKey("Please enter an encryption passkey. Leave blank or hit cancel to not encrypt (VERY INSECURE).");
+                if (String.IsNullOrEmpty(resolvedPassKey) && man.Encrypted)
+                {
+                    StorageResult clearEncResult = man.ChangeEncryptionKey(null, null);
+                    if (!clearEncResult.Succeeded)
+                    {
+                        AstroMessageBox.Show(clearEncResult.UserMessage ?? "Could not reset empty manifest encryption state. Try again or enter an encryption passkey.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return false;
+                    }
+                    resolvedPassKey = null;
+                }
                 return true;
             }
             if (man.Encrypted)
@@ -1170,6 +1192,7 @@ namespace Steam_Desktop_Authenticator
             private readonly Manifest manifest;
             private readonly bool encrypt;
             private readonly string passKey;
+            private readonly string previousCommittedTransferAttemptId;
             private readonly Action<SteamGuardAccount> onCommitted;
 
             public LoginTransferInteraction(
@@ -1177,12 +1200,14 @@ namespace Steam_Desktop_Authenticator
                 Manifest manifest,
                 bool encrypt,
                 string passKey,
+                string previousCommittedTransferAttemptId,
                 Action<SteamGuardAccount> onCommitted)
             {
                 this.owner = owner;
                 this.manifest = manifest;
                 this.encrypt = encrypt;
                 this.passKey = passKey;
+                this.previousCommittedTransferAttemptId = previousCommittedTransferAttemptId;
                 this.onCommitted = onCommitted;
             }
 
@@ -1214,7 +1239,13 @@ namespace Steam_Desktop_Authenticator
 
             public string TryStageProtectedReplacement(SteamGuardAccount replacement, string transferAttemptId, out bool stagingFailed)
             {
-                return PendingTransferMarker.TryStageProtectedReplacement(replacement, encrypt, passKey, out stagingFailed, transferAttemptId);
+                return PendingTransferMarker.TryStageProtectedReplacement(
+                    replacement,
+                    encrypt,
+                    passKey,
+                    out stagingFailed,
+                    transferAttemptId,
+                    previousCommittedTransferAttemptId);
             }
 
             public void CleanupStagedReplacement(string stagedRecoveryPath)
@@ -1228,7 +1259,9 @@ namespace Steam_Desktop_Authenticator
                     replacement,
                     encrypt,
                     passKey,
-                    transferAttemptId: transferAttemptId);
+                    transferAttemptId: transferAttemptId,
+                    expectedPreviousTransferAttemptId: previousCommittedTransferAttemptId,
+                    enforceTransferAttemptBase: true);
                 if (result.Succeeded)
                 {
                     failureMessage = null;
@@ -1249,7 +1282,9 @@ namespace Steam_Desktop_Authenticator
                     replacement,
                     encrypt,
                     passKey,
-                    transferAttemptId: transferAttemptId);
+                    transferAttemptId: transferAttemptId,
+                    expectedPreviousTransferAttemptId: transferAttemptId,
+                    enforceTransferAttemptBase: true);
                 if (result.Succeeded)
                     onCommitted?.Invoke(replacement);
             }

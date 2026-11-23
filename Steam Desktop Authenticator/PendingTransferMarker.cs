@@ -38,6 +38,7 @@ namespace Steam_Desktop_Authenticator
         public ulong SteamId { get; set; }
         public DateTime StagedAtUtc { get; set; }
         public string TransferAttemptId { get; set; }
+        public string PreviousCommittedTransferAttemptId { get; set; }
         public SteamGuardAccount Account { get; set; }
         public bool RequiresPasskey { get; set; }
     }
@@ -82,6 +83,9 @@ namespace Steam_Desktop_Authenticator
             [JsonProperty("transfer_attempt_id", NullValueHandling = NullValueHandling.Ignore)]
             public string TransferAttemptId { get; set; }
 
+            [JsonProperty("previous_committed_transfer_attempt_id", NullValueHandling = NullValueHandling.Ignore)]
+            public string PreviousCommittedTransferAttemptId { get; set; }
+
             [JsonProperty("salt", NullValueHandling = NullValueHandling.Ignore)]
             public string Salt { get; set; }
 
@@ -105,6 +109,9 @@ namespace Steam_Desktop_Authenticator
 
             [JsonProperty("transfer_attempt_id", NullValueHandling = NullValueHandling.Ignore)]
             public string TransferAttemptId { get; set; }
+
+            [JsonProperty("previous_committed_transfer_attempt_id", NullValueHandling = NullValueHandling.Ignore)]
+            public string PreviousCommittedTransferAttemptId { get; set; }
 
             [JsonProperty("account")]
             public SteamGuardAccount Account { get; set; }
@@ -232,7 +239,8 @@ namespace Steam_Desktop_Authenticator
             bool manifestEncrypted,
             string passKey,
             out bool stagingFailed,
-            string transferAttemptId = null)
+            string transferAttemptId = null,
+            string previousCommittedTransferAttemptId = null)
         {
             stagingFailed = false;
             if (account?.Session == null || account.Session.SteamID == 0)
@@ -248,6 +256,7 @@ namespace Steam_Desktop_Authenticator
                 Directory.CreateDirectory(recoveryDir);
 
                 string effectiveAttemptId = String.IsNullOrWhiteSpace(transferAttemptId) ? Guid.NewGuid().ToString("N") : transferAttemptId;
+                string normalizedPreviousAttemptId = String.IsNullOrWhiteSpace(previousCommittedTransferAttemptId) ? null : previousCommittedTransferAttemptId;
                 string fileName = RecoveryFilePrefix +
                     account.Session.SteamID.ToString(CultureInfo.InvariantCulture) + "-" +
                     Guid.NewGuid().ToString("N") +
@@ -259,6 +268,7 @@ namespace Steam_Desktop_Authenticator
                     CanonicalDataDirectory = canonicalDataDir,
                     SteamId = account.Session.SteamID,
                     TransferAttemptId = effectiveAttemptId,
+                    PreviousCommittedTransferAttemptId = normalizedPreviousAttemptId,
                     Account = account
                 };
                 byte[] plaintextBytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(innerPayload, MarkerJsonSettings));
@@ -293,6 +303,7 @@ namespace Steam_Desktop_Authenticator
                             SteamId = account.Session.SteamID,
                             StagedAtUtc = DateTime.UtcNow,
                             TransferAttemptId = effectiveAttemptId,
+                            PreviousCommittedTransferAttemptId = normalizedPreviousAttemptId,
                             Salt = saltB64,
                             Nonce = Convert.ToBase64String(nonce),
                             Tag = Convert.ToBase64String(tag),
@@ -311,6 +322,7 @@ namespace Steam_Desktop_Authenticator
                             SteamId = account.Session.SteamID,
                             StagedAtUtc = DateTime.UtcNow,
                             TransferAttemptId = effectiveAttemptId,
+                            PreviousCommittedTransferAttemptId = normalizedPreviousAttemptId,
                             Payload = Convert.ToBase64String(dpapiBytes)
                         };
                     }
@@ -411,22 +423,24 @@ namespace Steam_Desktop_Authenticator
                     if (loaded == null)
                         continue;
 
-                    // If a newer transfer attempt has already been committed for this SteamID,
-                    // this older staged copy is superseded and MUST NOT overwrite the newer authenticator.
-                    if (committedAttemptIds.TryGetValue(loaded.SteamId, out string committedAttemptId) &&
-                        !String.IsNullOrWhiteSpace(committedAttemptId) &&
-                        !String.Equals(committedAttemptId, loaded.TransferAttemptId, StringComparison.Ordinal))
-                    {
-                        DeleteFileBestEffort(filePath);
-                        continue;
-                    }
+                    committedAttemptIds.TryGetValue(loaded.SteamId, out string committedAttemptId);
 
+                    // 1. This exact transfer attempt already committed -> silently clean up redundant staged copy & marker.
                     if (!String.IsNullOrWhiteSpace(loaded.TransferAttemptId) &&
-                        committedAttemptIds.TryGetValue(loaded.SteamId, out string exactCommittedAttempt) &&
-                        String.Equals(exactCommittedAttempt, loaded.TransferAttemptId, StringComparison.Ordinal))
+                        !String.IsNullOrWhiteSpace(committedAttemptId) &&
+                        String.Equals(committedAttemptId, loaded.TransferAttemptId, StringComparison.Ordinal))
                     {
                         DeleteFileBestEffort(filePath);
                         DeleteMarkerBestEffort(loaded.SteamId);
+                        continue;
+                    }
+
+                    // 2. Compare committedAttemptId against the baseline captured when this transfer started.
+                    //    If committedAttemptId changed to a DIFFERENT attempt ID in between, this staged copy was superseded!
+                    if (!String.IsNullOrWhiteSpace(committedAttemptId) &&
+                        !String.Equals(committedAttemptId, loaded.PreviousCommittedTransferAttemptId, StringComparison.Ordinal))
+                    {
+                        DeleteFileBestEffort(filePath);
                         continue;
                     }
 
@@ -510,6 +524,7 @@ namespace Steam_Desktop_Authenticator
                                 SteamId = envelope.SteamId,
                                 StagedAtUtc = envelope.StagedAtUtc,
                                 TransferAttemptId = envelope.TransferAttemptId,
+                                PreviousCommittedTransferAttemptId = envelope.PreviousCommittedTransferAttemptId,
                                 RequiresPasskey = true
                             };
                         }
@@ -546,7 +561,9 @@ namespace Steam_Desktop_Authenticator
                         !String.Equals(innerPayload.CanonicalDataDirectory, expectedCanonicalDataDir, StringComparison.OrdinalIgnoreCase) ||
                         innerPayload.SteamId != envelope.SteamId ||
                         (!String.IsNullOrEmpty(envelope.TransferAttemptId) &&
-                         !String.Equals(innerPayload.TransferAttemptId, envelope.TransferAttemptId, StringComparison.Ordinal)))
+                         !String.Equals(innerPayload.TransferAttemptId, envelope.TransferAttemptId, StringComparison.Ordinal)) ||
+                        (!String.IsNullOrEmpty(envelope.PreviousCommittedTransferAttemptId) &&
+                         !String.Equals(innerPayload.PreviousCommittedTransferAttemptId, envelope.PreviousCommittedTransferAttemptId, StringComparison.Ordinal)))
                     {
                         return null;
                     }
@@ -557,6 +574,7 @@ namespace Steam_Desktop_Authenticator
                         SteamId = envelope.SteamId,
                         StagedAtUtc = envelope.StagedAtUtc,
                         TransferAttemptId = innerPayload.TransferAttemptId ?? envelope.TransferAttemptId,
+                        PreviousCommittedTransferAttemptId = innerPayload.PreviousCommittedTransferAttemptId ?? envelope.PreviousCommittedTransferAttemptId,
                         Account = innerPayload.Account,
                         RequiresPasskey = false
                     };
