@@ -181,10 +181,48 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        public static void DeleteMarkerBestEffort(ulong steamId)
+        public static PendingTransferMarkerRecord TryReadMarker(ulong steamId)
+        {
+            if (steamId == 0)
+                return null;
+
+            string markerPath = GetMarkerPath(steamId);
+            if (!File.Exists(markerPath))
+                return null;
+
+            try
+            {
+                string content = File.ReadAllText(markerPath, new UTF8Encoding(false, true));
+                PendingTransferMarkerRecord record = JsonConvert.DeserializeObject<PendingTransferMarkerRecord>(content, MarkerJsonSettings);
+                if (record == null)
+                    record = new PendingTransferMarkerRecord { SteamId = steamId };
+                if (record.SteamId == 0)
+                    record.SteamId = steamId;
+                record.FilePath = markerPath;
+                return record;
+            }
+            catch
+            {
+                return new PendingTransferMarkerRecord { SteamId = steamId, FilePath = markerPath };
+            }
+        }
+
+        public static void DeleteMarkerBestEffort(ulong steamId, string expectedTransferAttemptId = null)
         {
             if (steamId == 0)
                 return;
+
+            if (!String.IsNullOrWhiteSpace(expectedTransferAttemptId))
+            {
+                PendingTransferMarkerRecord current = TryReadMarker(steamId);
+                if (current != null &&
+                    !String.IsNullOrWhiteSpace(current.TransferAttemptId) &&
+                    !String.Equals(current.TransferAttemptId, expectedTransferAttemptId, StringComparison.Ordinal))
+                {
+                    // Marker belongs to a different transfer attempt; never delete it.
+                    return;
+                }
+            }
 
             DeleteFileBestEffort(GetMarkerPath(steamId));
         }
@@ -424,14 +462,25 @@ namespace Steam_Desktop_Authenticator
                         continue;
 
                     committedAttemptIds.TryGetValue(loaded.SteamId, out string committedAttemptId);
+                    PendingTransferMarkerRecord activeMarker = TryReadMarker(loaded.SteamId);
 
-                    // 1. This exact transfer attempt already committed -> silently clean up redundant staged copy & marker.
+                    // 0. If an active pending marker exists for a DIFFERENT transfer attempt,
+                    //    this staged recovery belongs to an older attempt and MUST NOT be offered or clear the newer marker.
+                    if (activeMarker != null &&
+                        !String.IsNullOrWhiteSpace(activeMarker.TransferAttemptId) &&
+                        !String.Equals(activeMarker.TransferAttemptId, loaded.TransferAttemptId, StringComparison.Ordinal))
+                    {
+                        DeleteFileBestEffort(filePath);
+                        continue;
+                    }
+
+                    // 1. This exact transfer attempt already committed -> silently clean up redundant staged copy & matching marker.
                     if (!String.IsNullOrWhiteSpace(loaded.TransferAttemptId) &&
                         !String.IsNullOrWhiteSpace(committedAttemptId) &&
                         String.Equals(committedAttemptId, loaded.TransferAttemptId, StringComparison.Ordinal))
                     {
                         DeleteFileBestEffort(filePath);
-                        DeleteMarkerBestEffort(loaded.SteamId);
+                        DeleteMarkerBestEffort(loaded.SteamId, loaded.TransferAttemptId);
                         continue;
                     }
 
@@ -449,9 +498,9 @@ namespace Steam_Desktop_Authenticator
                         IsSameAuthenticatorReplacement(committed, loaded.Account))
                     {
                         // Crash happened AFTER SaveAccount committed but before cleanup!
-                        // Silently clean up the redundant staged recovery and pending marker.
+                        // Silently clean up the redundant staged recovery and matching pending marker.
                         DeleteFileBestEffort(filePath);
-                        DeleteMarkerBestEffort(loaded.SteamId);
+                        DeleteMarkerBestEffort(loaded.SteamId, loaded.TransferAttemptId);
                         continue;
                     }
 
@@ -539,9 +588,26 @@ namespace Steam_Desktop_Authenticator
                         plaintextBytes = new byte[ciphertext.Length];
                         passwordBytes = Encoding.UTF8.GetBytes(passKey);
                         keyBytes = Rfc2898DeriveBytes.Pbkdf2(passwordBytes, salt, RecoveryKdfIterations, HashAlgorithmName.SHA256, 32);
-                        using (AesGcm aesGcm = new AesGcm(keyBytes, 16))
+                        try
                         {
-                            aesGcm.Decrypt(nonce, ciphertext, tag, plaintextBytes, aad);
+                            using (AesGcm aesGcm = new AesGcm(keyBytes, 16))
+                            {
+                                aesGcm.Decrypt(nonce, ciphertext, tag, plaintextBytes, aad);
+                            }
+                        }
+                        catch (CryptographicException)
+                        {
+                            // Staged recovery was encrypted with a different passkey (e.g., manifest passkey changed).
+                            // Surface it as RequiresPasskey so startup can prompt for the original transfer passkey.
+                            return new StagedTransferRecoveryRecord
+                            {
+                                FilePath = filePath,
+                                SteamId = envelope.SteamId,
+                                StagedAtUtc = envelope.StagedAtUtc,
+                                TransferAttemptId = envelope.TransferAttemptId,
+                                PreviousCommittedTransferAttemptId = envelope.PreviousCommittedTransferAttemptId,
+                                RequiresPasskey = true
+                            };
                         }
                     }
                     else if (String.Equals(envelope.Mode, "dpapi", StringComparison.Ordinal))

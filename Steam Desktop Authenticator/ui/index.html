@@ -1121,7 +1121,13 @@
         const overrideEnabled = document.getElementById('acct-opt-override').checked;
         const autoConfirmTrades = document.getElementById('acct-opt-auto-trades').checked;
         const autoConfirmMarket = document.getElementById('acct-opt-auto-market').checked;
-        const rawInterval = document.getElementById('acct-opt-interval').value.trim();
+        const intervalInput = document.getElementById('acct-opt-interval');
+        if (intervalInput.validity && intervalInput.validity.badInput) {
+            err.textContent = 'Check interval must be a whole number between 3 and 3600 seconds.';
+            err.classList.remove('hidden');
+            return;
+        }
+        const rawInterval = intervalInput.value.trim();
         let checkInterval = null;
         if (rawInterval !== '') {
             const parsed = Number(rawInterval);

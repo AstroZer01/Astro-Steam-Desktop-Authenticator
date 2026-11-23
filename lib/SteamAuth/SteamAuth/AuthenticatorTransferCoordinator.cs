@@ -31,8 +31,9 @@ namespace SteamAuth
     {
         bool HasUnresolvedPendingTransfer(ulong steamId);
         bool WritePreDispatchMarker(ulong steamId, string accountName, string deviceId, string transferAttemptId);
-        void ClearPreDispatchMarker(ulong steamId);
+        void ClearPreDispatchMarker(ulong steamId, string expectedTransferAttemptId);
         string RequestTransferSmsCode(bool previousCodeWasInvalid);
+        IDisposable EnterIrreversibleContinueSection(out CancellationToken continueCancellationToken);
         string TryStageProtectedReplacement(SteamGuardAccount replacement, string transferAttemptId, out bool stagingFailed);
         void CleanupStagedReplacement(string stagedRecoveryPath);
         bool PersistReplacementAccount(SteamGuardAccount replacement, string transferAttemptId, out string failureMessage);
@@ -125,20 +126,35 @@ namespace SteamAuth
                     };
                 }
 
-                AuthenticatorLinker.TransferFinishStatus finishStatus = await linker.FinishAuthenticatorTransferAsync(smsCode, cancellationToken);
+                AuthenticatorLinker.TransferFinishStatus finishStatus;
+                string stagedPath = null;
+                bool stagingFailed = false;
+                SteamGuardAccount replacement = null;
+                using (interaction.EnterIrreversibleContinueSection(out CancellationToken continueToken))
+                {
+                    CancellationToken effectiveToken = continueToken.CanBeCanceled ? continueToken : cancellationToken;
+                    finishStatus = await linker.FinishAuthenticatorTransferAsync(smsCode, effectiveToken);
+                    if (finishStatus == AuthenticatorLinker.TransferFinishStatus.Success)
+                    {
+                        replacement = linker.LinkedAccount;
+                        // Stage protected recovery copy IMMEDIATELY upon receiving valid replacement BEFORE leaving the protected section or calling SaveAccount!
+                        stagedPath = interaction.TryStageProtectedReplacement(replacement, transferAttemptId, out stagingFailed);
+                    }
+                }
+
                 switch (finishStatus)
                 {
                     case AuthenticatorLinker.TransferFinishStatus.CanceledBeforeDispatch:
-                        interaction.ClearPreDispatchMarker(steamId);
+                        interaction.ClearPreDispatchMarker(steamId, transferAttemptId);
                         return new TransferCoordinatorOutcome { Kind = TransferCoordinatorResultKind.Canceled };
 
                     case AuthenticatorLinker.TransferFinishStatus.BadSmsCode:
-                        interaction.ClearPreDispatchMarker(steamId);
+                        interaction.ClearPreDispatchMarker(steamId, transferAttemptId);
                         previousCodeWasInvalid = true;
                         continue;
 
                     case AuthenticatorLinker.TransferFinishStatus.RateLimited:
-                        interaction.ClearPreDispatchMarker(steamId);
+                        interaction.ClearPreDispatchMarker(steamId, transferAttemptId);
                         return new TransferCoordinatorOutcome
                         {
                             Kind = TransferCoordinatorResultKind.RateLimited,
@@ -146,7 +162,7 @@ namespace SteamAuth
                         };
 
                     case AuthenticatorLinker.TransferFinishStatus.Rejected:
-                        interaction.ClearPreDispatchMarker(steamId);
+                        interaction.ClearPreDispatchMarker(steamId, transferAttemptId);
                         return new TransferCoordinatorOutcome
                         {
                             Kind = TransferCoordinatorResultKind.Failed,
@@ -172,10 +188,6 @@ namespace SteamAuth
                         };
 
                     case AuthenticatorLinker.TransferFinishStatus.Success:
-                        SteamGuardAccount replacement = linker.LinkedAccount;
-                        // Stage protected recovery copy IMMEDIATELY upon receiving valid replacement BEFORE SaveAccount!
-                        string stagedPath = interaction.TryStageProtectedReplacement(replacement, transferAttemptId, out bool stagingFailed);
-
                         if (!interaction.PersistReplacementAccount(replacement, transferAttemptId, out string saveFailure))
                         {
                             return new TransferCoordinatorOutcome
@@ -192,7 +204,7 @@ namespace SteamAuth
                         // SaveAccount succeeded -> clean up staging and pre-dispatch marker immediately!
                         if (!String.IsNullOrEmpty(stagedPath))
                             interaction.CleanupStagedReplacement(stagedPath);
-                        interaction.ClearPreDispatchMarker(steamId);
+                        interaction.ClearPreDispatchMarker(steamId, transferAttemptId);
 
                         // Optional short-timeout non-fatal DeviceID enrichment AFTER durable save
                         if (await linker.TryEnrichTransferredDeviceIdAsync(replacement, cancellationToken))

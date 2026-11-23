@@ -466,8 +466,15 @@ namespace SteamAuth
             }
             if (!HasResultCode(response, EResultOK))
             {
-                LastErrorMessage = DescribeFailure(response, "complete the authenticator transfer");
-                return TransferFinishStatus.Rejected;
+                if (IsDefinitiveTransferNonReplacementResult(response.Result))
+                {
+                    LastErrorMessage = DescribeFailure(response, "complete the authenticator transfer");
+                    return TransferFinishStatus.Rejected;
+                }
+
+                LastErrorMessage = DescribeFailure(response, "confirm whether Steam completed the authenticator transfer") +
+                    " The remote outcome is unknown; check your Steam account before retrying.";
+                return TransferFinishStatus.OutcomeUnknown;
             }
             if (response.Body == null)
             {
@@ -546,6 +553,26 @@ namespace SteamAuth
                     SteamAuthDiagnostics.Log(ex, "Optional post-transfer QueryStatus device enrichment did not complete.");
                     return false;
                 }
+            }
+        }
+
+        private static bool IsDefinitiveTransferNonReplacementResult(int steamResult)
+        {
+            switch (steamResult)
+            {
+                case 8:  // InvalidParam
+                case 11: // InvalidState
+                case 15: // AccessDenied
+                case 21: // NotLoggedOn
+                case 27: // Expired
+                case 42: // NoMatch
+                case 43: // AccountNotFound
+                case 65: // InvalidLoginAuthCode
+                case 88: // TwoFactorCodeMismatch
+                case 96: // SMSCodeExpired
+                    return true;
+                default:
+                    return false;
             }
         }
 

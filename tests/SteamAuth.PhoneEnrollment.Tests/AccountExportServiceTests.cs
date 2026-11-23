@@ -151,6 +151,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 AccountExportService.ValidateExportDestination(@"\\?\" + Path.Combine(liveMaDir, "alias.maFile")));
             Assert.Throws<InvalidDataException>(() =>
                 AccountExportService.ValidateExportDestination(@"\\.\" + Path.Combine(liveMaDir, "device.maFile")));
+            Assert.Throws<InvalidDataException>(() =>
+                AccountExportService.ValidateExportDestination("//?/" + Path.Combine(liveMaDir, "fwd.maFile").Replace('\\', '/')));
+            Assert.Throws<InvalidDataException>(() =>
+                AccountExportService.ValidateExportDestination("//./" + Path.Combine(liveMaDir, "fwddev.maFile").Replace('\\', '/')));
+            Assert.Throws<InvalidDataException>(() =>
+                AccountExportService.ValidateExportDestination(@"\\?/" + Path.Combine(liveMaDir, "mixed.maFile").Replace('\\', '/')));
         }
 
         [Theory]

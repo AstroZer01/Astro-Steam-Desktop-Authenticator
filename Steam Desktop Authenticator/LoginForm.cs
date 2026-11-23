@@ -78,9 +78,21 @@ namespace Steam_Desktop_Authenticator
         private const int SteamConnectionTimeoutMilliseconds = 20000;
         private CancellationTokenSource loginCancellationSource;
         private SteamClient activeSteamClient;
+        private volatile bool transferContinueInFlight;
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            if (transferContinueInFlight && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                AstroMessageBox.Show(
+                    "Completing authenticator transfer with Steam — please wait a few seconds so your replacement secrets are received and staged safely.",
+                    "Authenticator Transfer In Progress",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
             loginCancellationSource?.Cancel();
             activeSteamClient?.Disconnect();
             base.OnFormClosing(e);
@@ -1050,7 +1062,7 @@ namespace Steam_Desktop_Authenticator
                     username);
 
                 TransferCoordinatorOutcome outcome = await coordinator.ExecuteAsync(cancellationToken);
-                if (IsDisposed || Disposing)
+                if ((IsDisposed || Disposing) && outcome.Kind != TransferCoordinatorResultKind.ReplacementReceivedSavePending)
                     return;
 
                 switch (outcome.Kind)
@@ -1090,18 +1102,26 @@ namespace Steam_Desktop_Authenticator
                                     onAccountCommitted?.Invoke(candidate, resolvedPassKey);
                                 }
                                 return retryResult;
-                            }))
+                            },
+                            transferAttemptId: outcome.TransferAttemptId))
                         {
-                            recoveryForm.ShowDialog(this);
+                            if (!IsDisposed && !Disposing && IsHandleCreated)
+                                recoveryForm.ShowDialog(this);
+                            else
+                                recoveryForm.ShowDialog();
                             if (recoveryForm.LocalSaveSucceeded)
                             {
                                 TrySaveVerifiedPasswordAfterCommit(manifest, sessionData.SteamID, password, resolvedPassKey, showRefreshNotice: false);
-                                ShowRecoveryCode(
-                                    outcome.LinkedAccount,
-                                    "Authenticator transferred and saved successfully! Keep this new recovery code safe.");
+                                if (!IsDisposed && !Disposing)
+                                {
+                                    ShowRecoveryCode(
+                                        outcome.LinkedAccount,
+                                        "Authenticator transferred and saved successfully! Keep this new recovery code safe.");
+                                }
                             }
                         }
-                        this.Close();
+                        if (!IsDisposed && !Disposing)
+                            this.Close();
                         return;
 
                     case TransferCoordinatorResultKind.OutcomeUnknown:
@@ -1188,7 +1208,7 @@ namespace Steam_Desktop_Authenticator
 
         private sealed class LoginTransferInteraction : IAuthenticatorTransferInteraction
         {
-            private readonly Form owner;
+            private readonly LoginForm owner;
             private readonly Manifest manifest;
             private readonly bool encrypt;
             private readonly string passKey;
@@ -1196,7 +1216,7 @@ namespace Steam_Desktop_Authenticator
             private readonly Action<SteamGuardAccount> onCommitted;
 
             public LoginTransferInteraction(
-                Form owner,
+                LoginForm owner,
                 Manifest manifest,
                 bool encrypt,
                 string passKey,
@@ -1216,7 +1236,37 @@ namespace Steam_Desktop_Authenticator
             public bool WritePreDispatchMarker(ulong steamId, string accountName, string deviceId, string transferAttemptId) =>
                 PendingTransferMarker.TryWriteMarker(steamId, accountName, deviceId, transferAttemptId);
 
-            public void ClearPreDispatchMarker(ulong steamId) => PendingTransferMarker.DeleteMarkerBestEffort(steamId);
+            public void ClearPreDispatchMarker(ulong steamId, string expectedTransferAttemptId) =>
+                PendingTransferMarker.DeleteMarkerBestEffort(steamId, expectedTransferAttemptId);
+
+            public IDisposable EnterIrreversibleContinueSection(out CancellationToken continueCancellationToken)
+            {
+                CancellationTokenSource boundedCts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                continueCancellationToken = boundedCts.Token;
+                if (owner != null)
+                    owner.transferContinueInFlight = true;
+                return new ContinueSectionGuard(owner, boundedCts);
+            }
+
+            private sealed class ContinueSectionGuard : IDisposable
+            {
+                private readonly LoginForm owner;
+                private CancellationTokenSource cts;
+
+                public ContinueSectionGuard(LoginForm owner, CancellationTokenSource cts)
+                {
+                    this.owner = owner;
+                    this.cts = cts;
+                }
+
+                public void Dispose()
+                {
+                    if (owner != null)
+                        owner.transferContinueInFlight = false;
+                    CancellationTokenSource toDispose = Interlocked.Exchange(ref cts, null);
+                    toDispose?.Dispose();
+                }
+            }
 
             public string RequestTransferSmsCode(bool previousCodeWasInvalid)
             {

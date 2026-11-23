@@ -109,7 +109,9 @@ namespace Steam_Desktop_Authenticator
         // Generation-scoped metadata-only cache (never caches plaintext passwords)
         // so 1-second UI/monitor eligibility checks do not re-run 600k PBKDF2.
         private string cachedCredentialMetadataFilename;
+        private string cachedCredentialMetadataPassKeyHash;
         private Dictionary<ulong, SavedCredentialStatus> cachedCredentialMetadata;
+        private bool cachedCredentialMetadataFailed;
         // Refresh persistence only needs to reject changes to the account it
         // captured. A manifest-wide revision would make an unrelated account
         // update abort an otherwise safe refresh.
@@ -1375,15 +1377,13 @@ namespace Steam_Desktop_Authenticator
             AllowSavedSteamPasswords = source.AllowSavedSteamPasswords;
             if (!String.Equals(CredentialsStoreFilename, source.CredentialsStoreFilename, StringComparison.Ordinal))
             {
-                cachedCredentialMetadataFilename = null;
-                cachedCredentialMetadata = null;
+                InvalidateCredentialMetadataCacheLocked();
             }
             CredentialsStoreFilename = source.CredentialsStoreFilename;
             if (String.IsNullOrWhiteSpace(CredentialsStoreFilename))
             {
                 CredentialsStoreMissingWarning = false;
-                cachedCredentialMetadataFilename = null;
-                cachedCredentialMetadata = null;
+                InvalidateCredentialMetadataCacheLocked();
             }
             storageRevision++;
         }
@@ -2387,66 +2387,136 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private void InvalidateCredentialMetadataCacheLocked()
+        {
+            cachedCredentialMetadataFilename = null;
+            cachedCredentialMetadataPassKeyHash = null;
+            cachedCredentialMetadata = null;
+            cachedCredentialMetadataFailed = false;
+        }
+
+        private Dictionary<ulong, SavedCredentialStatus> GetOrLoadCredentialMetadataCacheLocked(string passKey)
+        {
+            if (String.IsNullOrEmpty(passKey) ||
+                !this.Encrypted ||
+                !this.AllowSavedSteamPasswords ||
+                String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+            {
+                InvalidateCredentialMetadataCacheLocked();
+                return null;
+            }
+
+            string passKeyHash = GetContentHash(passKey);
+            if (String.Equals(cachedCredentialMetadataFilename, this.CredentialsStoreFilename, StringComparison.Ordinal) &&
+                String.Equals(cachedCredentialMetadataPassKeyHash, passKeyHash, StringComparison.Ordinal))
+            {
+                return cachedCredentialMetadataFailed ? null : cachedCredentialMetadata;
+            }
+
+            try
+            {
+                Dictionary<ulong, SavedCredentialRecord> records = LoadCredentialRecordsLocked(passKey, createIfMissing: false);
+                if (records == null)
+                {
+                    cachedCredentialMetadataFilename = this.CredentialsStoreFilename;
+                    cachedCredentialMetadataPassKeyHash = passKeyHash;
+                    cachedCredentialMetadata = new Dictionary<ulong, SavedCredentialStatus>();
+                    cachedCredentialMetadataFailed = false;
+                    return cachedCredentialMetadata;
+                }
+
+                Dictionary<ulong, SavedCredentialStatus> loaded = new Dictionary<ulong, SavedCredentialStatus>();
+                foreach (KeyValuePair<ulong, SavedCredentialRecord> kvp in records)
+                {
+                    loaded[kvp.Key] = new SavedCredentialStatus(
+                        hasSavedPassword: !String.IsNullOrEmpty(kvp.Value.Password),
+                        passwordRejected: kvp.Value.PasswordRejected,
+                        passwordRejectedUtc: kvp.Value.PasswordRejectedUtc,
+                        credentialGenerationId: kvp.Value.CredentialGenerationId,
+                        updatedUtc: kvp.Value.UpdatedUtc);
+                }
+
+                cachedCredentialMetadataFilename = this.CredentialsStoreFilename;
+                cachedCredentialMetadataPassKeyHash = passKeyHash;
+                cachedCredentialMetadata = loaded;
+                cachedCredentialMetadataFailed = false;
+                return loaded;
+            }
+            catch (Exception ex)
+            {
+                // Cache the failed state for this store generation + passkey so 1-second ticks
+                // do not repeatedly run 600k PBKDF2 on the UI thread against a corrupt/unreadable store.
+                cachedCredentialMetadataFilename = this.CredentialsStoreFilename;
+                cachedCredentialMetadataPassKeyHash = passKeyHash;
+                cachedCredentialMetadata = null;
+                cachedCredentialMetadataFailed = true;
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "Saved credential statuses could not be loaded.");
+                return null;
+            }
+        }
+
+        public StorageResult PruneOrphanedSavedCredentials(string passKey)
+        {
+            if (String.IsNullOrEmpty(passKey))
+                return StorageResult.Success();
+
+            lock (storageLock)
+            {
+                if (!this.Encrypted || !this.AllowSavedSteamPasswords || String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                    return StorageResult.Success();
+
+                try
+                {
+                    Dictionary<ulong, SavedCredentialRecord> records = LoadCredentialRecordsLocked(passKey, createIfMissing: false);
+                    if (records == null || records.Count == 0)
+                        return StorageResult.Success();
+
+                    HashSet<ulong> activeSteamIds = new HashSet<ulong>(
+                        (Entries ?? Enumerable.Empty<ManifestEntry>())
+                            .Where(entry => entry != null && entry.SteamID != 0)
+                            .Select(entry => entry.SteamID));
+                    ulong[] orphanedIds = records.Keys.Where(id => !activeSteamIds.Contains(id)).ToArray();
+                    if (orphanedIds.Length == 0)
+                        return StorageResult.Success();
+
+                    foreach (ulong orphanId in orphanedIds)
+                        records.Remove(orphanId);
+
+                    return CommitCredentialRecordsLocked(records, passKey);
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Io, "Orphaned saved credentials could not be pruned.", ex);
+                }
+            }
+        }
+
         public SavedCredentialStatus GetSavedCredentialStatus(ulong steamId, string passKey)
         {
             if (steamId == 0 || String.IsNullOrEmpty(passKey))
                 return SavedCredentialStatus.None;
 
-            Dictionary<ulong, SavedCredentialStatus> statuses = GetSavedCredentialStatuses(passKey);
-            return statuses.TryGetValue(steamId, out SavedCredentialStatus status)
-                ? status
-                : SavedCredentialStatus.None;
+            lock (storageLock)
+            {
+                Dictionary<ulong, SavedCredentialStatus> cache = GetOrLoadCredentialMetadataCacheLocked(passKey);
+                if (cache != null && cache.TryGetValue(steamId, out SavedCredentialStatus status))
+                    return status;
+                return SavedCredentialStatus.None;
+            }
         }
 
         public Dictionary<ulong, SavedCredentialStatus> GetSavedCredentialStatuses(string passKey)
         {
-            Dictionary<ulong, SavedCredentialStatus> statuses = new Dictionary<ulong, SavedCredentialStatus>();
             if (String.IsNullOrEmpty(passKey))
-                return statuses;
+                return new Dictionary<ulong, SavedCredentialStatus>();
 
             lock (storageLock)
             {
-                if (!this.Encrypted || !this.AllowSavedSteamPasswords || String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
-                {
-                    cachedCredentialMetadataFilename = null;
-                    cachedCredentialMetadata = null;
-                    return statuses;
-                }
-
-                if (cachedCredentialMetadata != null &&
-                    String.Equals(cachedCredentialMetadataFilename, this.CredentialsStoreFilename, StringComparison.Ordinal))
-                {
-                    return new Dictionary<ulong, SavedCredentialStatus>(cachedCredentialMetadata);
-                }
-
-                try
-                {
-                    Dictionary<ulong, SavedCredentialRecord> records = LoadCredentialRecordsLocked(passKey, createIfMissing: false);
-                    if (records == null)
-                        return statuses;
-
-                    Dictionary<ulong, SavedCredentialStatus> loaded = new Dictionary<ulong, SavedCredentialStatus>();
-                    foreach (KeyValuePair<ulong, SavedCredentialRecord> kvp in records)
-                    {
-                        loaded[kvp.Key] = new SavedCredentialStatus(
-                            hasSavedPassword: !String.IsNullOrEmpty(kvp.Value.Password),
-                            passwordRejected: kvp.Value.PasswordRejected,
-                            passwordRejectedUtc: kvp.Value.PasswordRejectedUtc,
-                            credentialGenerationId: kvp.Value.CredentialGenerationId,
-                            updatedUtc: kvp.Value.UpdatedUtc);
-                    }
-
-                    cachedCredentialMetadataFilename = this.CredentialsStoreFilename;
-                    cachedCredentialMetadata = loaded;
-                    return new Dictionary<ulong, SavedCredentialStatus>(loaded);
-                }
-                catch (Exception ex)
-                {
-                    DiagnosticErrorLogger.Log("Authenticator storage", ex, "Saved credential statuses could not be loaded.");
-                }
+                Dictionary<ulong, SavedCredentialStatus> cache = GetOrLoadCredentialMetadataCacheLocked(passKey);
+                return cache != null
+                    ? new Dictionary<ulong, SavedCredentialStatus>(cache)
+                    : new Dictionary<ulong, SavedCredentialStatus>();
             }
-
-            return statuses;
         }
 
         private SavedCredentialRecord TryLoadSavedCredentialRecordLocked(ulong steamId, string passKey)

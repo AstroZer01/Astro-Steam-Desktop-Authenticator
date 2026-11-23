@@ -264,8 +264,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
             ulong steamId1 = 76561198000000071UL;
             ulong steamId2 = 76561198000000072UL;
 
-            Assert.True(PendingTransferMarker.TryWriteMarker(steamId1, "acct1", "android:1"));
-            Assert.True(PendingTransferMarker.TryWriteMarker(steamId2, "acct2", "android:2"));
+            Assert.True(PendingTransferMarker.TryWriteMarker(steamId1, "acct1", "android:1", "attempt-acct1"));
+            Assert.True(PendingTransferMarker.TryWriteMarker(steamId2, "acct2", "android:2", "attempt-acct2"));
             Assert.True(PendingTransferMarker.HasMarker(steamId1));
             Assert.True(PendingTransferMarker.HasMarker(steamId2));
 
@@ -289,7 +289,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Session = new SessionData { SteamID = steamId2 }
             };
 
-            string stagedPath = PendingTransferMarker.TryStageProtectedReplacement(stagedAccount, manifestEncrypted: true, passKey: "strong-passkey", out bool stagingFailed);
+            string stagedPath = PendingTransferMarker.TryStageProtectedReplacement(stagedAccount, manifestEncrypted: true, passKey: "strong-passkey", out bool stagingFailed, transferAttemptId: "attempt-acct2");
             Assert.False(stagingFailed);
             Assert.NotNull(stagedPath);
             Assert.True(File.Exists(stagedPath));
@@ -534,6 +534,138 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void StagedRecoveryFromAttemptA_IsDiscardedWhenNewerAttemptBMarkerExists_AndMarkerDeleteRequiresMatchingAttemptId()
+        {
+            ulong steamId = 76561198000000079UL;
+            SteamGuardAccount attemptAAccount = new SteamGuardAccount
+            {
+                AccountName = "dual_attempt",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(1, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(21, 20).Select(i => (byte)i).ToArray()),
+                RevocationCode = "RAAAAA",
+                DeviceID = "android:a",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = steamId }
+            };
+
+            string stagedA = PendingTransferMarker.TryStageProtectedReplacement(
+                attemptAAccount,
+                manifestEncrypted: false,
+                passKey: null,
+                out bool stagingFailed,
+                transferAttemptId: "attempt-A",
+                previousCommittedTransferAttemptId: null);
+            Assert.False(stagingFailed);
+            Assert.True(File.Exists(stagedA));
+
+            // Newer attempt B leaves an unresolved marker
+            Assert.True(PendingTransferMarker.TryWriteMarker(steamId, "dual_attempt", "android:b", "attempt-B"));
+
+            // Deleting marker with attempt-A MUST NOT delete attempt-B's marker!
+            PendingTransferMarker.DeleteMarkerBestEffort(steamId, "attempt-A");
+            Assert.True(PendingTransferMarker.HasMarker(steamId));
+
+            // Reconciliation MUST discard obsolete staged A and preserve attempt B's marker!
+            var pending = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(Array.Empty<SteamGuardAccount>(), passKey: null);
+            Assert.Empty(pending);
+            Assert.False(File.Exists(stagedA));
+            Assert.True(PendingTransferMarker.HasMarker(steamId));
+        }
+
+        [Fact]
+        public void ChangedManifestPasskey_SurfacesStagedRecoveryAsRequiresPasskeyInsteadOfDroppingIt()
+        {
+            ulong steamId = 76561198000000080UL;
+            SteamGuardAccount stagedAccount = new SteamGuardAccount
+            {
+                AccountName = "rekey_user",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(1, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(21, 20).Select(i => (byte)i).ToArray()),
+                RevocationCode = "RKEY01",
+                DeviceID = "android:key",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = steamId }
+            };
+
+            string stagedPath = PendingTransferMarker.TryStageProtectedReplacement(
+                stagedAccount,
+                manifestEncrypted: true,
+                passKey: "old-passkey-A",
+                out bool stagingFailed,
+                transferAttemptId: "attempt-rekey");
+            Assert.False(stagingFailed);
+
+            // Reconciling with a DIFFERENT current manifest passkey B must NOT silently drop the staged copy!
+            var discovered = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(Array.Empty<SteamGuardAccount>(), passKey: "new-passkey-B");
+            StagedTransferRecoveryRecord record = Assert.Single(discovered);
+            Assert.True(record.RequiresPasskey);
+            Assert.Equal(stagedPath, record.FilePath);
+
+            // Unlocking with the original passkey A succeeds!
+            StagedTransferRecoveryRecord unlocked = PendingTransferMarker.TryLoadStagedRecoveryWithPasskey(record.FilePath, "old-passkey-A");
+            Assert.NotNull(unlocked?.Account);
+            Assert.Equal("RKEY01", unlocked.Account.RevocationCode);
+        }
+
+        [Theory]
+        [InlineData(2)]  // Fail
+        [InlineData(16)] // Timeout
+        [InlineData(20)] // ServiceUnavailable
+        [InlineData(50)] // RemoteCallFailed
+        public async Task FinishAuthenticatorTransferAsync_AmbiguousNonOkEResult_ReturnsOutcomeUnknownToPreserveMarker(int ambiguousResult)
+        {
+            var transport = new FakeTransferTransport(
+                Response(ambiguousResult, new CTwoFactor_RemoveAuthenticatorViaChallengeContinue_Response()));
+            var linker = CreateLinker(transport, 76561198000000081UL);
+
+            Assert.Equal(AuthenticatorLinker.TransferFinishStatus.OutcomeUnknown, await linker.FinishAuthenticatorTransferAsync("12345"));
+        }
+
+        [Fact]
+        public void PruneOrphanedSavedCredentials_RemovesSavedPasswordForMissingMaFileWhileKeepingActiveAccount()
+        {
+            const string passKey = "StrongPasskey!Prune1";
+            ulong activeId = 76561198000000082UL;
+            ulong prunedId = 76561198000000083UL;
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount activeAcc = new SteamGuardAccount
+            {
+                AccountName = "active_acct",
+                SharedSecret = Convert.ToBase64String(new byte[20]),
+                IdentitySecret = Convert.ToBase64String(new byte[20]),
+                DeviceID = "android:act",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = activeId }
+            };
+            SteamGuardAccount prunedAcc = new SteamGuardAccount
+            {
+                AccountName = "pruned_acct",
+                SharedSecret = Convert.ToBase64String(new byte[20]),
+                IdentitySecret = Convert.ToBase64String(new byte[20]),
+                DeviceID = "android:prn",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = prunedId }
+            };
+            Assert.True(manifest.SaveAccount(activeAcc, true, passKey).Succeeded);
+            Assert.True(manifest.SaveAccount(prunedAcc, true, passKey).Succeeded);
+            Assert.True(manifest.SetAllowSavedSteamPasswords(true).Succeeded);
+            Assert.True(manifest.SaveAccountPassword(activeId, "pw-active", passKey).Succeeded);
+            Assert.True(manifest.SaveAccountPassword(prunedId, "pw-pruned", passKey).Succeeded);
+
+            // Simulate missing .maFile for prunedAcc and startup reload
+            string prunedFile = manifest.Entries.Single(e => e.SteamID == prunedId).Filename;
+            File.Delete(Path.Combine(tempDir, "maFiles", prunedFile));
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Single(reloaded.Entries);
+            Assert.True(reloaded.PruneOrphanedSavedCredentials(passKey).Succeeded);
+
+            Assert.True(reloaded.GetSavedCredentialStatus(activeId, passKey).HasSavedPassword);
+            Assert.False(reloaded.GetSavedCredentialStatus(prunedId, passKey).HasSavedPassword);
+        }
+
+        [Fact]
         public async Task GenerationFence_DrainsInFlightOperation_AndLoginApprovalServicePassesCapturedStorageRevision()
         {
             ulong steamId = 76561198000000088UL;
@@ -713,10 +845,21 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 return true;
             }
 
-            public void ClearPreDispatchMarker(ulong steamId)
+            public void ClearPreDispatchMarker(ulong steamId, string expectedTransferAttemptId)
             {
                 HasMarker = false;
                 events.Add("marker_clear");
+            }
+
+            public IDisposable EnterIrreversibleContinueSection(out CancellationToken continueCancellationToken)
+            {
+                continueCancellationToken = CancellationToken.None;
+                return new NoopDisposable();
+            }
+
+            private sealed class NoopDisposable : IDisposable
+            {
+                public void Dispose() { }
             }
 
             public string RequestTransferSmsCode(bool previousCodeWasInvalid)

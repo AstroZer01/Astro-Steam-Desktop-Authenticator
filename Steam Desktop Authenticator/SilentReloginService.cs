@@ -323,6 +323,8 @@ namespace Steam_Desktop_Authenticator
                 return false;
             if (!manifest.Encrypted || !manifest.AllowSavedSteamPasswords)
                 return false;
+            if (PendingTransferMarker.HasMarker(steamId))
+                return false;
             if (IsRecoveryInProgress(steamId))
                 return false;
 
@@ -355,6 +357,8 @@ namespace Steam_Desktop_Authenticator
                 return new SilentReloginResult { Kind = SilentReloginOutcomeKind.NotEligible, SteamId = steamId };
 
             if (!manifest.Encrypted || !manifest.AllowSavedSteamPasswords)
+                return new SilentReloginResult { Kind = SilentReloginOutcomeKind.NotEligible, SteamId = steamId };
+            if (PendingTransferMarker.HasMarker(steamId))
                 return new SilentReloginResult { Kind = SilentReloginOutcomeKind.NotEligible, SteamId = steamId };
 
             if (!activeRecoveries.TryAdd(steamId, 0))

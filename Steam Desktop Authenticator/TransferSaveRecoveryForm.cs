@@ -14,6 +14,7 @@ namespace Steam_Desktop_Authenticator
         private readonly Func<SteamGuardAccount, StorageResult> retryLocalSave;
         private readonly string manifestPassKey;
         private readonly string stagedRecoveryPath;
+        private readonly string transferAttemptId;
         private readonly Label lblStatus;
         private bool savedOrBackedUp;
         public bool LocalSaveSucceeded { get; private set; }
@@ -24,12 +25,14 @@ namespace Steam_Desktop_Authenticator
             string stagedRecoveryPath,
             bool stagingFailed,
             string manifestPassKey,
-            Func<SteamGuardAccount, StorageResult> retryLocalSave)
+            Func<SteamGuardAccount, StorageResult> retryLocalSave,
+            string transferAttemptId = null)
         {
             this.replacementAccount = replacementAccount ?? throw new ArgumentNullException(nameof(replacementAccount));
             this.retryLocalSave = retryLocalSave ?? throw new ArgumentNullException(nameof(retryLocalSave));
             this.manifestPassKey = manifestPassKey;
             this.stagedRecoveryPath = stagedRecoveryPath;
+            this.transferAttemptId = transferAttemptId;
 
             Text = "Authenticator Transfer - Save Recovery Required";
             StartPosition = FormStartPosition.CenterParent;
@@ -127,7 +130,7 @@ namespace Steam_Desktop_Authenticator
                 if (!String.IsNullOrEmpty(stagedRecoveryPath))
                     PendingTransferMarker.DeleteStagedRecoveryBestEffort(stagedRecoveryPath);
                 if (replacementAccount.Session != null && replacementAccount.Session.SteamID != 0)
-                    PendingTransferMarker.DeleteMarkerBestEffort(replacementAccount.Session.SteamID);
+                    PendingTransferMarker.DeleteMarkerBestEffort(replacementAccount.Session.SteamID, transferAttemptId);
                 DialogResult = DialogResult.OK;
                 Close();
                 return;
@@ -201,12 +204,41 @@ namespace Steam_Desktop_Authenticator
                     if (!String.IsNullOrWhiteSpace(replacementAccount.RevocationCode))
                     {
                         string codePath = Path.ChangeExtension(sfd.FileName, ".recovery.txt");
-                        AccountExportService.ValidateExportDestination(codePath);
-                        PendingTransferMarker.WriteAllTextAtomicallyFlushed(
-                            codePath,
-                            "Account: " + (replacementAccount.AccountName ?? String.Empty) + Environment.NewLine +
-                            "SteamID: " + steamId.ToString(CultureInfo.InvariantCulture) + Environment.NewLine +
-                            "Revocation Code: " + replacementAccount.RevocationCode + Environment.NewLine);
+                        bool shouldWriteCodeFile = true;
+                        if (File.Exists(codePath))
+                        {
+                            DialogResult overwriteCode = AstroMessageBox.Show(
+                                "The recovery code file already exists:\n" + codePath + "\n\nOverwrite it? Choose No to save the recovery code to a different filename.",
+                                "Recovery Code File Exists",
+                                MessageBoxButtons.YesNoCancel,
+                                MessageBoxIcon.Warning);
+                            if (overwriteCode == DialogResult.Cancel)
+                            {
+                                shouldWriteCodeFile = false;
+                            }
+                            else if (overwriteCode == DialogResult.No)
+                            {
+                                using (SaveFileDialog codeSfd = new SaveFileDialog())
+                                {
+                                    codeSfd.Filter = "Recovery Code Text (*.txt)|*.txt";
+                                    codeSfd.FileName = Path.GetFileName(codePath);
+                                    if (codeSfd.ShowDialog(this) == DialogResult.OK)
+                                        codePath = codeSfd.FileName;
+                                    else
+                                        shouldWriteCodeFile = false;
+                                }
+                            }
+                        }
+
+                        if (shouldWriteCodeFile)
+                        {
+                            AccountExportService.ValidateExportDestination(codePath);
+                            PendingTransferMarker.WriteAllTextAtomicallyFlushed(
+                                codePath,
+                                "Account: " + (replacementAccount.AccountName ?? String.Empty) + Environment.NewLine +
+                                "SteamID: " + steamId.ToString(CultureInfo.InvariantCulture) + Environment.NewLine +
+                                "Revocation Code: " + replacementAccount.RevocationCode + Environment.NewLine);
+                        }
                     }
                     savedOrBackedUp = true;
                     lblStatus.ForeColor = Color.FromArgb(78, 222, 163);
