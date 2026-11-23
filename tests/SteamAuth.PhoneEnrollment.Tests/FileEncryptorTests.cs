@@ -27,6 +27,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(encryptAes.IsDisposed);
             Assert.NotNull(encryptAes.LastEncryptor);
             Assert.True(encryptAes.LastEncryptor.IsDisposed);
+            Assert.NotNull(encryptAes.LastKeyPassedToTransform);
+            Assert.All(encryptAes.LastKeyPassedToTransform, b => Assert.Equal(0, b));
             Assert.True(FileEncryptor.IsValidCiphertext(ciphertext));
 
             TrackingAes decryptAes = null;
@@ -42,6 +44,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(decryptAes.IsDisposed);
             Assert.NotNull(decryptAes.LastDecryptor);
             Assert.True(decryptAes.LastDecryptor.IsDisposed);
+            Assert.NotNull(decryptAes.LastKeyPassedToTransform);
+            Assert.All(decryptAes.LastKeyPassedToTransform, b => Assert.Equal(0, b));
 
             TrackingAes failedDecryptAes = null;
             string failedDecrypt = FileEncryptor.DecryptData(
@@ -56,6 +60,23 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(failedDecryptAes.IsDisposed);
             Assert.NotNull(failedDecryptAes.LastDecryptor);
             Assert.True(failedDecryptAes.LastDecryptor.IsDisposed);
+            Assert.NotNull(failedDecryptAes.LastKeyPassedToTransform);
+            Assert.All(failedDecryptAes.LastKeyPassedToTransform, b => Assert.Equal(0, b));
+
+            TrackingAes failedEncryptAes = null;
+            Assert.Throws<CryptographicException>(() => FileEncryptor.EncryptData(
+                "correct-passkey",
+                salt,
+                iv,
+                plaintext,
+                () => failedEncryptAes = new TrackingAes(throwOnEncryptFinalBlock: true)));
+
+            Assert.NotNull(failedEncryptAes);
+            Assert.True(failedEncryptAes.IsDisposed);
+            Assert.NotNull(failedEncryptAes.LastEncryptor);
+            Assert.True(failedEncryptAes.LastEncryptor.IsDisposed);
+            Assert.NotNull(failedEncryptAes.LastKeyPassedToTransform);
+            Assert.All(failedEncryptAes.LastKeyPassedToTransform, b => Assert.Equal(0, b));
         }
 
         [Fact]
@@ -77,16 +98,31 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [Fact]
         public void EncryptAndDecrypt_RemainByteForByteCompatibleWithLegacyFormat()
         {
-            const string password = "legacy-passkey-ñ-🔐";
-            string salt = Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+            string standardSalt = Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+            string longSalt = Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 });
             string iv = Convert.ToBase64String(new byte[] { 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25 });
-            const string plaintext = "{\"shared_secret\":\"abc123\",\"account_name\":\"legacy-user-é\"}";
 
-            string legacyCiphertext = EncryptWithLegacyPipeline(password, salt, iv, plaintext);
-            string currentCiphertext = FileEncryptor.EncryptData(password, salt, iv, plaintext);
+            (string Password, string Salt, string Plaintext)[] cases =
+            {
+                // Standard Unicode payload
+                ("legacy-passkey-ñ-🔐", standardSalt, "{\"shared_secret\":\"abc123\",\"account_name\":\"legacy-user-é\"}"),
+                // Exact 16-byte and 32-byte block-aligned UTF-8 plaintexts (full 16-byte PKCS#7 padding block)
+                ("block-aligned-key", standardSalt, new string('A', 16)),
+                ("block-aligned-key", standardSalt, new string('B', 32)),
+                // > 64 KiB payload forcing StreamWriter flushes and MemoryStream buffer growth (capacity > length)
+                ("large-payload-key", longSalt, new string('X', 70 * 1024) + "-end"),
+                // > 8-byte salt and whitespace-only password & plaintext
+                ("   ", longSalt, " \t\r\n ")
+            };
 
-            Assert.Equal(legacyCiphertext, currentCiphertext);
-            Assert.Equal(plaintext, FileEncryptor.DecryptData(password, salt, iv, legacyCiphertext));
+            foreach ((string password, string salt, string plaintext) in cases)
+            {
+                string legacyCiphertext = EncryptWithLegacyPipeline(password, salt, iv, plaintext);
+                string currentCiphertext = FileEncryptor.EncryptData(password, salt, iv, plaintext);
+
+                Assert.Equal(legacyCiphertext, currentCiphertext);
+                Assert.Equal(plaintext, FileEncryptor.DecryptData(password, salt, iv, legacyCiphertext));
+            }
         }
 
         [Fact]
@@ -112,19 +148,45 @@ namespace SteamAuth.PhoneEnrollment.Tests
             string validIv = FileEncryptor.GetInitializationVector();
             string validCiphertext = FileEncryptor.EncryptData("pass", validSalt, validIv, "hello");
 
-            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("", validSalt, validIv, "hello"));
-            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", "", validIv, "hello"));
-            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", validSalt, "", "hello"));
-            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", validSalt, validIv, ""));
-            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", Convert.ToBase64String(new byte[7]), validIv, "hello"));
-            Assert.Throws<CryptographicException>(() => FileEncryptor.EncryptData("pass", validSalt, Convert.ToBase64String(new byte[15]), "hello"));
+            int factoryCalls = 0;
+            Func<Aes> failIfCalledFactory = () =>
+            {
+                factoryCalls++;
+                return Aes.Create();
+            };
 
-            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("", validSalt, validIv, validCiphertext));
-            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", "", validIv, validCiphertext));
-            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", validSalt, "", validCiphertext));
-            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", validSalt, validIv, ""));
-            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", Convert.ToBase64String(new byte[7]), validIv, validCiphertext));
-            Assert.Throws<CryptographicException>(() => FileEncryptor.DecryptData("pass", validSalt, Convert.ToBase64String(new byte[15]), validCiphertext));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData(null, validSalt, validIv, "hello", failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("", validSalt, validIv, "hello", failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", null, validIv, "hello", failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", "", validIv, "hello", failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", "   ", validIv, "hello", failIfCalledFactory));
+            Assert.Throws<FormatException>(() => FileEncryptor.EncryptData("pass", "not-base64!", validIv, "hello", failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", validSalt, null, "hello", failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", validSalt, "", "hello", failIfCalledFactory));
+            Assert.Throws<CryptographicException>(() => FileEncryptor.EncryptData("pass", validSalt, "   ", "hello", failIfCalledFactory));
+            Assert.Throws<FormatException>(() => FileEncryptor.EncryptData("pass", validSalt, "not-base64!", "hello", failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", validSalt, validIv, null, failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", validSalt, validIv, "", failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.EncryptData("pass", Convert.ToBase64String(new byte[7]), validIv, "hello", failIfCalledFactory));
+            Assert.Throws<CryptographicException>(() => FileEncryptor.EncryptData("pass", validSalt, Convert.ToBase64String(new byte[15]), "hello", failIfCalledFactory));
+            Assert.Throws<CryptographicException>(() => FileEncryptor.EncryptData("pass", validSalt, Convert.ToBase64String(new byte[17]), "hello", failIfCalledFactory));
+
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData(null, validSalt, validIv, validCiphertext, failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("", validSalt, validIv, validCiphertext, failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", null, validIv, validCiphertext, failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", "", validIv, validCiphertext, failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", "   ", validIv, validCiphertext, failIfCalledFactory));
+            Assert.Throws<FormatException>(() => FileEncryptor.DecryptData("pass", "not-base64!", validIv, validCiphertext, failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", validSalt, null, validCiphertext, failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", validSalt, "", validCiphertext, failIfCalledFactory));
+            Assert.Throws<CryptographicException>(() => FileEncryptor.DecryptData("pass", validSalt, "   ", validCiphertext, failIfCalledFactory));
+            Assert.Throws<FormatException>(() => FileEncryptor.DecryptData("pass", validSalt, "not-base64!", validCiphertext, failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", validSalt, validIv, null, failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", validSalt, validIv, "", failIfCalledFactory));
+            Assert.Throws<ArgumentException>(() => FileEncryptor.DecryptData("pass", Convert.ToBase64String(new byte[7]), validIv, validCiphertext, failIfCalledFactory));
+            Assert.Throws<CryptographicException>(() => FileEncryptor.DecryptData("pass", validSalt, Convert.ToBase64String(new byte[15]), validCiphertext, failIfCalledFactory));
+            Assert.Throws<CryptographicException>(() => FileEncryptor.DecryptData("pass", validSalt, Convert.ToBase64String(new byte[17]), validCiphertext, failIfCalledFactory));
+            Assert.Equal(0, factoryCalls);
         }
 
         private static string EncryptWithLegacyPipeline(string password, string salt, string iv, string plaintext)
@@ -158,10 +220,17 @@ namespace SteamAuth.PhoneEnrollment.Tests
         private sealed class TrackingAes : Aes
         {
             private readonly Aes inner = Aes.Create();
+            private readonly bool throwOnEncryptFinalBlock;
+
+            public TrackingAes(bool throwOnEncryptFinalBlock = false)
+            {
+                this.throwOnEncryptFinalBlock = throwOnEncryptFinalBlock;
+            }
 
             public bool IsDisposed { get; private set; }
             public TrackingCryptoTransform LastEncryptor { get; private set; }
             public TrackingCryptoTransform LastDecryptor { get; private set; }
+            public byte[] LastKeyPassedToTransform { get; private set; }
 
             public override int KeySize
             {
@@ -210,13 +279,15 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             public override ICryptoTransform CreateEncryptor(byte[] rgbKey, byte[] rgbIV)
             {
-                LastEncryptor = new TrackingCryptoTransform(inner.CreateEncryptor(rgbKey, rgbIV));
+                LastKeyPassedToTransform = rgbKey;
+                LastEncryptor = new TrackingCryptoTransform(inner.CreateEncryptor(rgbKey, rgbIV), throwOnEncryptFinalBlock);
                 return LastEncryptor;
             }
 
             public override ICryptoTransform CreateDecryptor(byte[] rgbKey, byte[] rgbIV)
             {
-                LastDecryptor = new TrackingCryptoTransform(inner.CreateDecryptor(rgbKey, rgbIV));
+                LastKeyPassedToTransform = rgbKey;
+                LastDecryptor = new TrackingCryptoTransform(inner.CreateDecryptor(rgbKey, rgbIV), throwOnFinalBlock: false);
                 return LastDecryptor;
             }
 
@@ -237,10 +308,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
         private sealed class TrackingCryptoTransform : ICryptoTransform
         {
             private readonly ICryptoTransform inner;
+            private readonly bool throwOnFinalBlock;
 
-            public TrackingCryptoTransform(ICryptoTransform inner)
+            public TrackingCryptoTransform(ICryptoTransform inner, bool throwOnFinalBlock)
             {
                 this.inner = inner;
+                this.throwOnFinalBlock = throwOnFinalBlock;
             }
 
             public bool IsDisposed { get; private set; }
@@ -253,7 +326,11 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 => inner.TransformBlock(inputBuffer, inputOffset, inputCount, outputBuffer, outputOffset);
 
             public byte[] TransformFinalBlock(byte[] inputBuffer, int inputOffset, int inputCount)
-                => inner.TransformFinalBlock(inputBuffer, inputOffset, inputCount);
+            {
+                if (throwOnFinalBlock)
+                    throw new CryptographicException("Simulated transform failure.");
+                return inner.TransformFinalBlock(inputBuffer, inputOffset, inputCount);
+            }
 
             public void Dispose()
             {

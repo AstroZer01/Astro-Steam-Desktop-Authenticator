@@ -139,12 +139,10 @@ namespace Steam_Desktop_Authenticator
             {
                 using (Aes aes256 = (aesFactory ?? Aes.Create)())
                 {
-                    aes256.IV = ivBytes;
-                    aes256.Key = key;
                     aes256.Padding = PaddingMode.PKCS7;
                     aes256.Mode = CipherMode.CBC;
 
-                    using (ICryptoTransform decryptor = aes256.CreateDecryptor(aes256.Key, aes256.IV))
+                    using (ICryptoTransform decryptor = aes256.CreateDecryptor(key, ivBytes))
                     {
                         // Wrap in a try since a bad password yields a bad key, which throws on padding validation
                         try
@@ -172,7 +170,7 @@ namespace Steam_Desktop_Authenticator
         /// <summary>
         /// Encrypts a string given a password, salt, and initialization vector, then returns result in base64 encoded string.
         /// 
-        /// To retrieve this data, you must decrypt with the same password, salt, IV, and cyphertext that was used during encryption
+        /// To retrieve this data, you must decrypt with the same password, salt, IV, and ciphertext that was used during encryption
         /// </summary>
         /// <param name="password"></param>
         /// <param name="passwordSalt"></param>
@@ -210,12 +208,10 @@ namespace Steam_Desktop_Authenticator
             {
                 using (Aes aes256 = (aesFactory ?? Aes.Create)())
                 {
-                    aes256.Key = key;
-                    aes256.IV = ivBytes;
                     aes256.Padding = PaddingMode.PKCS7;
                     aes256.Mode = CipherMode.CBC;
 
-                    using (ICryptoTransform encryptor = aes256.CreateEncryptor(aes256.Key, aes256.IV))
+                    using (ICryptoTransform encryptor = aes256.CreateEncryptor(key, ivBytes))
                     using (MemoryStream msEncrypt = new MemoryStream())
                     {
                         using (CryptoStream csEncrypt = new CryptoStream(msEncrypt, encryptor, CryptoStreamMode.Write, leaveOpen: true))
