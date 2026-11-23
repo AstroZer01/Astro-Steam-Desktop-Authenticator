@@ -24,18 +24,19 @@ namespace SteamAuth
         public string ErrorMessage { get; set; }
         public string StagedRecoveryPath { get; set; }
         public bool StagingFailed { get; set; }
+        public string TransferAttemptId { get; set; }
     }
 
     public interface IAuthenticatorTransferInteraction
     {
         bool HasUnresolvedPendingTransfer(ulong steamId);
-        bool WritePreDispatchMarker(ulong steamId, string accountName, string deviceId);
+        bool WritePreDispatchMarker(ulong steamId, string accountName, string deviceId, string transferAttemptId);
         void ClearPreDispatchMarker(ulong steamId);
         string RequestTransferSmsCode(bool previousCodeWasInvalid);
-        string TryStageProtectedReplacement(SteamGuardAccount replacement, out bool stagingFailed);
+        string TryStageProtectedReplacement(SteamGuardAccount replacement, string transferAttemptId, out bool stagingFailed);
         void CleanupStagedReplacement(string stagedRecoveryPath);
-        bool PersistReplacementAccount(SteamGuardAccount replacement, out string failureMessage);
-        void PersistEnrichedDeviceId(SteamGuardAccount replacement);
+        bool PersistReplacementAccount(SteamGuardAccount replacement, string transferAttemptId, out string failureMessage);
+        void PersistEnrichedDeviceId(SteamGuardAccount replacement, string transferAttemptId);
     }
 
     public sealed class AuthenticatorTransferCoordinator
@@ -94,6 +95,7 @@ namespace SteamAuth
             }
 
             bool previousCodeWasInvalid = false;
+            string transferAttemptId = Guid.NewGuid().ToString("N");
             while (true)
             {
                 if (cancellationToken.IsCancellationRequested)
@@ -114,7 +116,7 @@ namespace SteamAuth
                 }
 
                 // Write secret-free durable marker BEFORE dispatching Continue!
-                if (!interaction.WritePreDispatchMarker(steamId, accountName, linker.DeviceID))
+                if (!interaction.WritePreDispatchMarker(steamId, accountName, linker.DeviceID, transferAttemptId))
                 {
                     return new TransferCoordinatorOutcome
                     {
@@ -156,7 +158,8 @@ namespace SteamAuth
                         return new TransferCoordinatorOutcome
                         {
                             Kind = TransferCoordinatorResultKind.OutcomeUnknown,
-                            ErrorMessage = linker.LastErrorMessage
+                            ErrorMessage = linker.LastErrorMessage,
+                            TransferAttemptId = transferAttemptId
                         };
 
                     case AuthenticatorLinker.TransferFinishStatus.IncompleteReplacement:
@@ -164,15 +167,16 @@ namespace SteamAuth
                         return new TransferCoordinatorOutcome
                         {
                             Kind = TransferCoordinatorResultKind.IncompleteReplacement,
-                            ErrorMessage = linker.LastErrorMessage
+                            ErrorMessage = linker.LastErrorMessage,
+                            TransferAttemptId = transferAttemptId
                         };
 
                     case AuthenticatorLinker.TransferFinishStatus.Success:
                         SteamGuardAccount replacement = linker.LinkedAccount;
                         // Stage protected recovery copy IMMEDIATELY upon receiving valid replacement BEFORE SaveAccount!
-                        string stagedPath = interaction.TryStageProtectedReplacement(replacement, out bool stagingFailed);
+                        string stagedPath = interaction.TryStageProtectedReplacement(replacement, transferAttemptId, out bool stagingFailed);
 
-                        if (!interaction.PersistReplacementAccount(replacement, out string saveFailure))
+                        if (!interaction.PersistReplacementAccount(replacement, transferAttemptId, out string saveFailure))
                         {
                             return new TransferCoordinatorOutcome
                             {
@@ -180,7 +184,8 @@ namespace SteamAuth
                                 LinkedAccount = replacement,
                                 ErrorMessage = saveFailure ?? "The transferred authenticator could not be saved locally.",
                                 StagedRecoveryPath = stagedPath,
-                                StagingFailed = stagingFailed
+                                StagingFailed = stagingFailed,
+                                TransferAttemptId = transferAttemptId
                             };
                         }
 
@@ -194,7 +199,7 @@ namespace SteamAuth
                         {
                             try
                             {
-                                interaction.PersistEnrichedDeviceId(replacement);
+                                interaction.PersistEnrichedDeviceId(replacement, transferAttemptId);
                             }
                             catch (Exception ex)
                             {
@@ -205,7 +210,8 @@ namespace SteamAuth
                         return new TransferCoordinatorOutcome
                         {
                             Kind = TransferCoordinatorResultKind.Succeeded,
-                            LinkedAccount = replacement
+                            LinkedAccount = replacement,
+                            TransferAttemptId = transferAttemptId
                         };
                 }
             }

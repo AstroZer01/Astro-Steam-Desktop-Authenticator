@@ -325,7 +325,7 @@ namespace SteamAuth
             return AcceptMultipleConfirmations(confs, null, cancellationToken);
         }
 
-        public async Task<bool> AcceptMultipleConfirmations(Confirmation[] confs, Func<bool> beforeSendCheck, CancellationToken cancellationToken = default)
+        public async Task<bool> AcceptMultipleConfirmations(Confirmation[] confs, Func<bool> beforeSendCheck, CancellationToken cancellationToken)
         {
             ValidateConfirmations(confs);
             return await _sendMultiConfirmationAjax(confs, "allow", cancellationToken, beforeSendCheck);

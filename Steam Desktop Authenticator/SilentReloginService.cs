@@ -323,15 +323,15 @@ namespace Steam_Desktop_Authenticator
             if (cooldownUntilUtc.TryGetValue(steamId, out DateTime cooldownEnd) && now < cooldownEnd)
                 return false;
 
-            SavedCredentialRecord record = manifest.GetSavedCredentialRecord(steamId, passKey);
-            if (record == null || String.IsNullOrEmpty(record.Password) || String.IsNullOrEmpty(record.CredentialGenerationId))
+            SavedCredentialStatus status = manifest.GetSavedCredentialStatus(steamId, passKey);
+            if (!status.HasSavedPassword || String.IsNullOrEmpty(status.CredentialGenerationId))
                 return false;
-            if (record.PasswordRejected)
+            if (status.PasswordRejected)
                 return false;
-            if (IsGenerationRejectedInMemory(steamId, record.CredentialGenerationId))
+            if (IsGenerationRejectedInMemory(steamId, status.CredentialGenerationId))
                 return false;
             if (blockedGenerations.TryGetValue(steamId, out string blockedGen) &&
-                String.Equals(blockedGen, record.CredentialGenerationId, StringComparison.Ordinal))
+                String.Equals(blockedGen, status.CredentialGenerationId, StringComparison.Ordinal))
                 return false;
 
             return true;
@@ -370,6 +370,7 @@ namespace Steam_Desktop_Authenticator
 
                 string capturedGenerationId = record.CredentialGenerationId;
                 string capturedPassword = record.Password;
+                long capturedAccountRevision = manifest.GetAccountStorageRevision(steamId);
 
                 SilentReloginTransportResult transportResult = await transport.LoginAsync(account, capturedPassword, cancellationToken);
                 if (transportResult == null)
@@ -390,7 +391,7 @@ namespace Steam_Desktop_Authenticator
                             candidate,
                             encrypt: true,
                             passKey: passKey,
-                            expectedStorageRevision: null,
+                            expectedStorageRevision: capturedAccountRevision,
                             allowCreate: false,
                             requireAllowSavedPasswords: true,
                             expectedCredentialGenerationId: capturedGenerationId,

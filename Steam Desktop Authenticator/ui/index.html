@@ -768,6 +768,8 @@
             const optionsButton = document.createElement('button');
             optionsButton.type = 'button';
             optionsButton.disabled = !acc.steamId;
+            if (acc.steamId)
+                optionsButton.dataset.optionsSteamId = acc.steamId;
             optionsButton.className = acc.steamId
                 ? "shrink-0 rounded-sm p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
                 : "shrink-0 rounded-sm p-1 text-on-surface-variant opacity-50 cursor-not-allowed transition-colors";
@@ -896,6 +898,7 @@
     let accountOptionsSavePending = false;
     let accountOptionsEscapeHandler = null;
     let accountOptionsPreviousFocus = null;
+    let accountListRenderDeferred = false;
 
     function syncAccountOptionsOverrideUI() {
         const overrideEnabled = document.getElementById('acct-opt-override').checked;
@@ -1085,6 +1088,7 @@
 
     function closeAccountOptionsModal() {
         if (accountOptionsSavePending) return;
+        const closedSteamId = accountOptionsTarget ? accountOptionsTarget.steamId : null;
         if (accountOptionsEscapeHandler) {
             document.removeEventListener('keydown', accountOptionsEscapeHandler);
             accountOptionsEscapeHandler = null;
@@ -1093,10 +1097,19 @@
         const modal = document.getElementById('account-options-modal');
         modal.classList.add('hidden');
         modal.classList.remove('flex');
+        if (accountListRenderDeferred) {
+            accountListRenderDeferred = false;
+            renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+        }
         const focusTarget = accountOptionsPreviousFocus;
         accountOptionsPreviousFocus = null;
-        if (focusTarget && focusTarget.isConnected && !focusTarget.disabled)
+        if (focusTarget && focusTarget.isConnected && !focusTarget.disabled) {
             focusTarget.focus();
+        } else if (closedSteamId) {
+            const restoredOptionsBtn = document.querySelector('button[data-options-steam-id="' + closedSteamId + '"]');
+            if (restoredOptionsBtn && !restoredOptionsBtn.disabled)
+                restoredOptionsBtn.focus();
+        }
     }
 
     function saveAccountOptions() {
@@ -1139,6 +1152,9 @@
         if (!metadata || !metadata.steamId) return;
         const existing = allAccs.find(item => item.steamId === metadata.steamId);
         if (!existing) return;
+        const prevCanSave = Boolean(existing.canSavePasswords);
+        const prevHasSaved = Boolean(existing.hasSavedPassword);
+        const prevRejected = Boolean(existing.passwordRejected);
         if (typeof metadata.autoConfirmOverrideEnabled === 'boolean')
             existing.autoConfirmOverrideEnabled = metadata.autoConfirmOverrideEnabled;
         if (typeof metadata.autoConfirmTrades === 'boolean')
@@ -1161,9 +1177,19 @@
             existing.canSavePasswords = metadata.canSavePasswords;
         if (accountOptionsTarget && accountOptionsTarget.steamId === metadata.steamId) {
             updateAccountOptionsHealthBanner(existing);
-            updateAccountOptionsPasswordSection(existing);
+            const passwordStateChanged =
+                prevCanSave !== Boolean(existing.canSavePasswords) ||
+                prevHasSaved !== Boolean(existing.hasSavedPassword) ||
+                prevRejected !== Boolean(existing.passwordRejected);
+            if (passwordStateChanged) {
+                updateAccountOptionsPasswordSection(existing);
+            }
         }
-        renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+        if (accountOptionsTarget) {
+            accountListRenderDeferred = true;
+        } else {
+            renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+        }
     }
 
     function accountSettingsSaved(metadata) {

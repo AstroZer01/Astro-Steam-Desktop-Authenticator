@@ -176,6 +176,41 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False(accepted);
             Assert.Equal(0, postCount);
         }
+
+        [Fact]
+        public void ManualRefreshHealth_UpdatesHealthWithoutPostponingScheduledAutoConfirmation_AndEnforcesGlobalSpacing()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            TradeConfirmationScheduler scheduler = new TradeConfirmationScheduler(() => now, () => 0);
+
+            // Account 1 due immediately (slot 0), Account 2 due at +15s (slot 1)
+            Assert.True(scheduler.TrySelectNextDueAccount(new ulong[] { 101UL, 102UL }, _ => false, 15, out ulong due));
+            Assert.Equal(101UL, due);
+
+            // Simulate global dispatch and verify 2s spacing is reported
+            scheduler.RecordGlobalDispatch();
+            Assert.Equal(TimeSpan.FromSeconds(2), scheduler.GetRemainingGlobalDispatchSpacing());
+
+            now = now.AddSeconds(2);
+            Assert.Equal(TimeSpan.Zero, scheduler.GetRemainingGlobalDispatchSpacing());
+
+            // Manual refresh marks Account 1 healthy without pushing NextCheckUtc forward by 30s
+            scheduler.RecordManualRefreshHealth(101UL);
+            AccountScanHealthSnapshot health = scheduler.GetHealthSnapshot(101UL);
+            Assert.Equal(AccountScanHealthState.Ok, health.State);
+            Assert.Equal(0, health.ConsecutiveFailures);
+            Assert.True(scheduler.TrySelectNextDueAccount(new ulong[] { 101UL, 102UL }, _ => false, 15, out ulong stillDue));
+            Assert.Equal(101UL, stillDue);
+        }
+
+        [Fact]
+        public async Task AcceptMultipleConfirmations_WithDefaultSecondArgument_ResolvesUnambiguously()
+        {
+            // Regression test for overload ambiguity: AcceptMultipleConfirmations(confs, default)
+            // must resolve cleanly to the CancellationToken overload.
+            var account = new SteamGuardAccount();
+            await Assert.ThrowsAsync<ArgumentException>(() => account.AcceptMultipleConfirmations(null, default));
+        }
     }
 
     [Collection("Manifest storage")]

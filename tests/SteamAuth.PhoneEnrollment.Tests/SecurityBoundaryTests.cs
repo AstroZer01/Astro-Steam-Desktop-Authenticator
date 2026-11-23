@@ -82,6 +82,49 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void WelcomeImportValidation_StripsCredentialPropertiesCaseInsensitively()
+        {
+            string stagingDirectory = Path.Combine(Path.GetTempPath(), "asda-import-case-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(stagingDirectory);
+
+            try
+            {
+                string filename = "76561198000003333.maFile";
+                var account = new SteamAuth.SteamGuardAccount
+                {
+                    AccountName = "case_user",
+                    SharedSecret = Convert.ToBase64String(new byte[20]),
+                    IdentitySecret = Convert.ToBase64String(new byte[20]),
+                    DeviceID = "android:case",
+                    FullyEnrolled = true,
+                    Session = new SteamAuth.SessionData { SteamID = 76561198000003333UL }
+                };
+                File.WriteAllText(Path.Combine(stagingDirectory, filename), Newtonsoft.Json.JsonConvert.SerializeObject(account));
+
+                string rawManifest = @"{
+                    ""encrypted"": false,
+                    ""first_run"": false,
+                    ""Allow_Saved_Steam_Passwords"": true,
+                    ""CREDENTIALS_STORE_FILENAME"": ""../escape.asda-cred"",
+                    ""entries"": [{ ""filename"": ""76561198000003333.maFile"", ""steamid"": 76561198000003333 }]
+                }";
+                string manifestPath = Path.Combine(stagingDirectory, "manifest.json");
+                File.WriteAllText(manifestPath, rawManifest);
+
+                WelcomeForm.ValidateStagedManifest(manifestPath, stagingDirectory);
+
+                string cleaned = File.ReadAllText(manifestPath);
+                Assert.DoesNotContain("allow_saved_steam_passwords", cleaned, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("credentials_store_filename", cleaned, StringComparison.OrdinalIgnoreCase);
+            }
+            finally
+            {
+                if (Directory.Exists(stagingDirectory))
+                    Directory.Delete(stagingDirectory, true);
+            }
+        }
+
+        [Fact]
         public void AccountExport_NeverIncludesSavedCredentialStoreEntriesOrPasswords()
         {
             string tempData = Path.Combine(Path.GetTempPath(), "asda-sec-export-" + Guid.NewGuid().ToString("N"));

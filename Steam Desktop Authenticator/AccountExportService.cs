@@ -7,7 +7,9 @@ using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 using System.Text.RegularExpressions;
 using ZXing;
 using ZXing.Common;
@@ -170,7 +172,15 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrWhiteSpace(destinationPath))
                 throw new InvalidDataException("Choose a valid export destination path.");
 
-            string fullDestination = Path.GetFullPath(destinationPath);
+            string trimmedInput = destinationPath.Trim();
+            if (trimmedInput.StartsWith(@"\\?\", StringComparison.Ordinal) ||
+                trimmedInput.StartsWith(@"\\.\", StringComparison.Ordinal) ||
+                trimmedInput.StartsWith(@"\??\", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("Device and extended-length Windows path prefixes are not allowed for export destinations.");
+            }
+
+            string fullDestination = Path.GetFullPath(trimmedInput);
             string liveMaDir = Path.GetFullPath(Path.Combine(Manifest.GetExecutableDir(), "maFiles"))
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             string liveMaDirWithSep = liveMaDir + Path.DirectorySeparatorChar;
@@ -181,11 +191,27 @@ namespace Steam_Desktop_Authenticator
                 throw new InvalidDataException("Exporting into the live maFiles folder is not allowed. Choose a separate folder.");
             }
 
+            WindowsPathIdentity liveMaIdentity = default;
+            bool hasLiveMaIdentity = Directory.Exists(liveMaDir) &&
+                TryGetWindowsPathIdentity(liveMaDir, isDirectory: true, out liveMaIdentity);
+
             if (File.Exists(fullDestination))
             {
                 FileInfo destFile = new FileInfo(fullDestination);
                 if ((destFile.Attributes & FileAttributes.ReparsePoint) != 0)
                     throw new InvalidDataException("The selected export destination file uses an unsupported symbolic link or reparse point.");
+            }
+            else if (Directory.Exists(fullDestination))
+            {
+                DirectoryInfo destDir = new DirectoryInfo(fullDestination);
+                if ((destDir.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException("The selected export destination uses an unsupported symbolic link or junction.");
+                if (hasLiveMaIdentity &&
+                    TryGetWindowsPathIdentity(fullDestination, isDirectory: true, out WindowsPathIdentity destIdentity) &&
+                    destIdentity.Equals(liveMaIdentity))
+                {
+                    throw new InvalidDataException("Exporting into the live maFiles folder is not allowed. Choose a separate folder.");
+                }
             }
 
             string parentDir = Path.GetDirectoryName(fullDestination);
@@ -195,13 +221,105 @@ namespace Steam_Desktop_Authenticator
             DirectoryInfo current = new DirectoryInfo(parentDir);
             while (current != null)
             {
-                if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0)
-                    throw new InvalidDataException("The selected export path traverses an unsupported symbolic link or junction.");
+                if (current.Exists)
+                {
+                    if ((current.Attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidDataException("The selected export path traverses an unsupported symbolic link or junction.");
+
+                    if (hasLiveMaIdentity &&
+                        TryGetWindowsPathIdentity(current.FullName, isDirectory: true, out WindowsPathIdentity ancestorIdentity) &&
+                        ancestorIdentity.Equals(liveMaIdentity))
+                    {
+                        throw new InvalidDataException("Exporting into the live maFiles folder is not allowed. Choose a separate folder.");
+                    }
+                }
 
                 DirectoryInfo parent = current.Parent;
                 if (parent == null || String.Equals(parent.FullName, current.FullName, StringComparison.OrdinalIgnoreCase))
                     break;
                 current = parent;
+            }
+        }
+
+        private readonly struct WindowsPathIdentity : IEquatable<WindowsPathIdentity>
+        {
+            public readonly uint VolumeSerialNumber;
+            public readonly uint FileIndexHigh;
+            public readonly uint FileIndexLow;
+
+            public WindowsPathIdentity(uint volumeSerialNumber, uint fileIndexHigh, uint fileIndexLow)
+            {
+                VolumeSerialNumber = volumeSerialNumber;
+                FileIndexHigh = fileIndexHigh;
+                FileIndexLow = fileIndexLow;
+            }
+
+            public bool Equals(WindowsPathIdentity other)
+            {
+                return VolumeSerialNumber == other.VolumeSerialNumber &&
+                    FileIndexHigh == other.FileIndexHigh &&
+                    FileIndexLow == other.FileIndexLow;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BY_HANDLE_FILE_INFORMATION
+        {
+            public uint FileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileShareAll = 0x00000001 | 0x00000002 | 0x00000004;
+        private const uint OpenExisting = 3;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string lpFileName,
+            uint dwDesiredAccess,
+            uint dwShareMode,
+            IntPtr lpSecurityAttributes,
+            uint dwCreationDisposition,
+            uint dwFlagsAndAttributes,
+            IntPtr hTemplateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle hFile,
+            out BY_HANDLE_FILE_INFORMATION lpFileInformation);
+
+        private static bool TryGetWindowsPathIdentity(string path, bool isDirectory, out WindowsPathIdentity identity)
+        {
+            identity = default;
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                return false;
+
+            using (SafeFileHandle handle = CreateFileW(
+                path,
+                0,
+                FileShareAll,
+                IntPtr.Zero,
+                OpenExisting,
+                isDirectory ? FileFlagBackupSemantics : 0u,
+                IntPtr.Zero))
+            {
+                if (handle.IsInvalid)
+                    return false;
+
+                if (!GetFileInformationByHandle(handle, out BY_HANDLE_FILE_INFORMATION info))
+                    return false;
+
+                identity = new WindowsPathIdentity(info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow);
+                return true;
             }
         }
 

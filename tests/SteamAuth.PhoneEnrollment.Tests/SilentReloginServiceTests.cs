@@ -255,6 +255,93 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False(service.CanAttemptRecovery(manifest, steamId, passKey));
         }
 
+        [Fact]
+        public async Task PausedSilentRenewal_DoesNotOverwriteAuthenticatorReplacedByTransfer()
+        {
+            const string passKey = "StrongPasskey!77";
+            ulong steamId = 76561198000003006UL;
+            SteamGuardAccount oldAccount = CreateAccount(steamId, "race_user");
+            oldAccount.SharedSecret = Convert.ToBase64String(Enumerable.Repeat((byte)0x11, 20).ToArray());
+            oldAccount.RevocationCode = "R11111";
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(oldAccount, true, passKey).Succeeded);
+            Assert.True(manifest.SetAllowSavedSteamPasswords(true).Succeeded);
+            Assert.True(manifest.SaveAccountPassword(steamId, "good-password", passKey).Succeeded);
+
+            var enteredLogin = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLogin = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var transport = new FakeCredentialLoginTransport
+            {
+                Handler = async (acc, pw, ct) =>
+                {
+                    enteredLogin.SetResult(true);
+                    await releaseLogin.Task;
+                    return new SilentReloginTransportResult
+                    {
+                        Kind = SilentReloginOutcomeKind.Succeeded,
+                        Session = new SessionData
+                        {
+                            SteamID = steamId,
+                            AccessToken = "stale-renewal-at",
+                            RefreshToken = "stale-renewal-rt"
+                        }
+                    };
+                }
+            };
+
+            SilentReloginService service = new SilentReloginService(transport);
+            Task<SilentReloginResult> renewalTask = service.TryRecoverAccountSessionAsync(manifest, oldAccount, passKey, CancellationToken.None);
+            await enteredLogin.Task;
+
+            // While renewal is paused, a transfer commits new replacement secrets!
+            SteamGuardAccount transferredReplacement = CreateAccount(steamId, "race_user");
+            transferredReplacement.SharedSecret = Convert.ToBase64String(Enumerable.Repeat((byte)0x99, 20).ToArray());
+            transferredReplacement.RevocationCode = "R99999";
+            Assert.True(manifest.SaveAccount(transferredReplacement, true, passKey, transferAttemptId: "transfer-new").Succeeded);
+
+            // Release the paused renewal -> MUST be rejected by expectedStorageRevision!
+            releaseLogin.SetResult(true);
+            SilentReloginResult renewalResult = await renewalTask;
+            Assert.Equal(SilentReloginOutcomeKind.PersistenceRejected, renewalResult.Kind);
+
+            SteamGuardAccount persisted = Assert.Single(Manifest.GetManifest(true).GetAllAccounts(passKey));
+            Assert.Equal("R99999", persisted.RevocationCode);
+            Assert.Equal(transferredReplacement.SharedSecret, persisted.SharedSecret);
+        }
+
+        [Fact]
+        public void SaveSettingsWithResult_AtomicallyCommitsSettingsAndRetiresCredentialStoreInOneTransaction()
+        {
+            const string passKey = "StrongPasskey!88";
+            ulong steamId = 76561198000003007UL;
+            SteamGuardAccount account = CreateAccount(steamId, "atomic_settings_user");
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(account, true, passKey).Succeeded);
+            Assert.True(manifest.SetAllowSavedSteamPasswords(true).Succeeded);
+            Assert.True(manifest.SaveAccountPassword(steamId, "secret-pw", passKey).Succeeded);
+            string credFile = manifest.CredentialsStoreFilename;
+            Assert.False(String.IsNullOrEmpty(credFile));
+
+            // Single transaction updates proxy settings AND disables saved passwords together
+            StorageResult result = manifest.SaveSettingsWithResult(staged =>
+            {
+                staged.ProxyEnabled = true;
+                staged.ProxyHost = "127.0.0.1";
+                staged.ProxyPort = 8080;
+                staged.AllowSavedSteamPasswords = false;
+            });
+            Assert.True(result.Succeeded);
+            Assert.False(manifest.AllowSavedSteamPasswords);
+            Assert.Null(manifest.CredentialsStoreFilename);
+            Assert.True(manifest.ProxyEnabled);
+            Assert.False(File.Exists(Path.Combine(dataDirectory, "maFiles", credFile)));
+
+            // Cached metadata also reflects empty store cleanly
+            Assert.False(manifest.GetSavedCredentialStatus(steamId, passKey).HasSavedPassword);
+        }
+
         public void Dispose()
         {
             Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);

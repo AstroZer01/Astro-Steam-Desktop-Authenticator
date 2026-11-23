@@ -313,6 +313,152 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void EncryptedFirstAccountTransfer_RecoversIndependentlyAfterRestartWhenManifestClearedEncryption()
+        {
+            const string chosenPassKey = "FirstAccountTransferPass!42";
+            ulong steamId = 76561198000000075UL;
+            SteamGuardAccount replacement = new SteamGuardAccount
+            {
+                AccountName = "first_transfer",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(1, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(21, 20).Select(i => (byte)i).ToArray()),
+                RevocationCode = "R77777",
+                TokenGID = "gid-first",
+                SerialNumber = "111222",
+                DeviceID = "android:first",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = steamId, AccessToken = "at", RefreshToken = "rt" }
+            };
+
+            string attemptId = Guid.NewGuid().ToString("N");
+            string stagedPath = PendingTransferMarker.TryStageProtectedReplacement(replacement, manifestEncrypted: true, passKey: chosenPassKey, out bool stagingFailed, transferAttemptId: attemptId);
+            Assert.False(stagingFailed);
+            Assert.NotNull(stagedPath);
+
+            // Simulate restart with empty manifest (encryption cleared because 0 entries were committed)
+            Manifest reloadedEmpty = Manifest.GenerateNewManifest(false);
+            Assert.False(reloadedEmpty.Encrypted);
+
+            var pending = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(Array.Empty<SteamGuardAccount>(), passKey: null, manifest: reloadedEmpty);
+            Assert.Single(pending);
+            Assert.True(pending[0].RequiresPasskey);
+
+            // Unlock staged recovery independently with user-entered passkey and commit encrypted
+            StagedTransferRecoveryRecord unlocked = PendingTransferMarker.TryLoadStagedRecoveryWithPasskey(pending[0].FilePath, chosenPassKey);
+            Assert.NotNull(unlocked?.Account);
+            Assert.Equal("R77777", unlocked.Account.RevocationCode);
+
+            StorageResult commitResult = reloadedEmpty.SaveAccount(
+                unlocked.Account,
+                encrypt: true,
+                passKey: chosenPassKey,
+                transferAttemptId: unlocked.TransferAttemptId,
+                rejectSupersededTransferAttempt: true);
+            Assert.True(commitResult.Succeeded);
+
+            Manifest afterRestart = Manifest.GetManifest(true);
+            Assert.True(afterRestart.Encrypted);
+            SteamGuardAccount committed = Assert.Single(afterRestart.GetAllAccounts(chosenPassKey));
+            Assert.Equal("R77777", committed.RevocationCode);
+        }
+
+        [Fact]
+        public void OlderStagedRecovery_IsSupersededAfterNewerTransferCommits_AndCannotOverwriteNewerAuthenticator()
+        {
+            ulong steamId = 76561198000000076UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+
+            SteamGuardAccount oldStaged = new SteamGuardAccount
+            {
+                AccountName = "supersede_user",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(1, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(21, 20).Select(i => (byte)i).ToArray()),
+                RevocationCode = "R11111",
+                TokenGID = "gid-old",
+                SerialNumber = "1001",
+                DeviceID = "android:old",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = steamId, AccessToken = "old-at", RefreshToken = "old-rt" }
+            };
+
+            SteamGuardAccount newerCommitted = new SteamGuardAccount
+            {
+                AccountName = "supersede_user",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(51, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(71, 20).Select(i => (byte)i).ToArray()),
+                RevocationCode = "R22222",
+                TokenGID = "gid-new",
+                SerialNumber = "2002",
+                DeviceID = "android:new",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = steamId, AccessToken = "new-at", RefreshToken = "new-rt" }
+            };
+
+            string olderAttemptId = "attempt-1";
+            string newerAttemptId = "attempt-2";
+            string olderStagedPath = PendingTransferMarker.TryStageProtectedReplacement(oldStaged, manifestEncrypted: false, passKey: null, out bool stagingFailed, transferAttemptId: olderAttemptId);
+            Assert.False(stagingFailed);
+            Assert.True(File.Exists(olderStagedPath));
+
+            // Newer transfer commits cleanly with newerAttemptId
+            Assert.True(manifest.SaveAccount(newerCommitted, encrypt: false, transferAttemptId: newerAttemptId).Succeeded);
+
+            // Reconcile must see olderAttemptId != newerAttemptId, delete the obsolete staged copy, and offer NOTHING!
+            var pending = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(new[] { newerCommitted }, passKey: null, manifest: manifest);
+            Assert.Empty(pending);
+            Assert.False(File.Exists(olderStagedPath));
+
+            // Even a direct save attempt with rejectSupersededTransferAttempt must be rejected!
+            StorageResult overwriteAttempt = manifest.SaveAccount(
+                oldStaged,
+                encrypt: false,
+                transferAttemptId: olderAttemptId,
+                rejectSupersededTransferAttempt: true);
+            Assert.False(overwriteAttempt.Succeeded);
+
+            SteamGuardAccount persisted = Assert.Single(Manifest.GetManifest(true).GetAllAccounts());
+            Assert.Equal("R22222", persisted.RevocationCode);
+        }
+
+        [Fact]
+        public void UnresolvedTransferMarker_BlocksAccountOperationsUntilDismissed()
+        {
+            ulong steamId = 76561198000000077UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = new SteamGuardAccount
+            {
+                AccountName = "blocked_user",
+                SharedSecret = Convert.ToBase64String(new byte[20]),
+                IdentitySecret = Convert.ToBase64String(new byte[20]),
+                DeviceID = "android:blocked",
+                FullyEnrolled = true,
+                Session = new SessionData
+                {
+                    SteamID = steamId,
+                    AccessToken = CreateJwtToken(DateTimeOffset.UtcNow.AddHours(2).ToUnixTimeSeconds()),
+                    RefreshToken = CreateJwtToken(DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds())
+                }
+            };
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+            Assert.True(PendingTransferMarker.TryWriteMarker(steamId, "blocked_user", "android:blocked", "attempt-unresolved"));
+
+            using (MainForm form = new MainForm(manifest, new UpdatePreferenceRevisionTracker(), null, _ => { }))
+            {
+                form.RefreshUnresolvedTransferMarkers();
+                var isAvailMethod = typeof(MainForm).GetMethod("IsSessionAvailableForAccountOperations", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.NotNull(isAvailMethod);
+
+                // Blocked while unresolved marker exists
+                Assert.False((bool)isAvailMethod.Invoke(form, new object[] { account }));
+
+                // Unblocked after marker is explicitly dismissed and refreshed
+                PendingTransferMarker.DeleteMarkerBestEffort(steamId);
+                form.RefreshUnresolvedTransferMarkers();
+                Assert.True((bool)isAvailMethod.Invoke(form, new object[] { account }));
+            }
+        }
+
+        [Fact]
         public async Task GenerationFence_DrainsInFlightOperation_AndLoginApprovalServicePassesCapturedStorageRevision()
         {
             ulong steamId = 76561198000000088UL;
@@ -485,7 +631,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             public bool HasUnresolvedPendingTransfer(ulong steamId) => HasMarker;
 
-            public bool WritePreDispatchMarker(ulong steamId, string accountName, string deviceId)
+            public bool WritePreDispatchMarker(ulong steamId, string accountName, string deviceId, string transferAttemptId)
             {
                 HasMarker = true;
                 events.Add("marker_write");
@@ -503,7 +649,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 return smsCodes.Count > 0 ? smsCodes.Dequeue() : null;
             }
 
-            public string TryStageProtectedReplacement(SteamGuardAccount replacement, out bool stagingFailed)
+            public string TryStageProtectedReplacement(SteamGuardAccount replacement, string transferAttemptId, out bool stagingFailed)
             {
                 stagingFailed = false;
                 events.Add("stage");
@@ -515,14 +661,14 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 events.Add("cleanup_stage");
             }
 
-            public bool PersistReplacementAccount(SteamGuardAccount replacement, out string failureMessage)
+            public bool PersistReplacementAccount(SteamGuardAccount replacement, string transferAttemptId, out string failureMessage)
             {
                 events.Add("persist");
                 failureMessage = persistSucceeds ? null : "Disk full";
                 return persistSucceeds;
             }
 
-            public void PersistEnrichedDeviceId(SteamGuardAccount replacement)
+            public void PersistEnrichedDeviceId(SteamGuardAccount replacement, string transferAttemptId)
             {
                 events.Add("enrich");
             }

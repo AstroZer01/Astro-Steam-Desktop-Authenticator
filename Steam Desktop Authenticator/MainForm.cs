@@ -67,6 +67,7 @@ namespace Steam_Desktop_Authenticator
         private readonly SilentReloginService silentReloginService = new SilentReloginService();
         private readonly ConcurrentDictionary<ulong, Task> activeSilentReloginTasks = new ConcurrentDictionary<ulong, Task>();
         private readonly ConcurrentDictionary<ulong, byte> transferFencedSteamIds = new ConcurrentDictionary<ulong, byte>();
+        private readonly ConcurrentDictionary<ulong, byte> unresolvedTransferMarkerSteamIds = new ConcurrentDictionary<ulong, byte>();
         private readonly object loginRateLimitLock = new object();
         private DateTime loginRateLimitedUntilUtc = DateTime.MinValue;
         private readonly Dictionary<ulong, LoginMonitorSchedule> loginMonitorSchedules = new Dictionary<ulong, LoginMonitorSchedule>();
@@ -192,7 +193,9 @@ namespace Steam_Desktop_Authenticator
         private bool IsAccountBusyWithRecoveryOrTransfer(ulong steamId)
         {
             return steamId != 0 &&
-                (silentReloginService.IsRecoveryInProgress(steamId) || transferFencedSteamIds.ContainsKey(steamId));
+                (silentReloginService.IsRecoveryInProgress(steamId) ||
+                 transferFencedSteamIds.ContainsKey(steamId) ||
+                 unresolvedTransferMarkerSteamIds.ContainsKey(steamId));
         }
 
         private async Task<(bool Acquired, T Result)> TryRunAvailableSteamAccountOperationNowAsync<T>(
@@ -254,7 +257,7 @@ namespace Steam_Desktop_Authenticator
             ulong steamId = account?.Session?.SteamID ?? 0;
             if (manifest == null || steamId == 0 || String.IsNullOrEmpty(passKey))
                 return;
-            if (transferFencedSteamIds.ContainsKey(steamId))
+            if (transferFencedSteamIds.ContainsKey(steamId) || unresolvedTransferMarkerSteamIds.ContainsKey(steamId))
                 return;
             if (!manifest.Encrypted || !manifest.AllowSavedSteamPasswords)
                 return;
@@ -1263,6 +1266,11 @@ namespace Steam_Desktop_Authenticator
             transferFencedSteamIds[steamId] = 0;
             try
             {
+                if (activeSilentReloginTasks.TryGetValue(steamId, out Task activeReloginTask) && activeReloginTask != null)
+                {
+                    await activeReloginTask.WaitAsync(cancellationToken);
+                }
+
                 IDisposable exclusiveLock = await steamAccountOperationCoordinator.AcquireExclusiveLockAsync(steamId, cancellationToken);
                 return new TransferFenceHandle(transferFencedSteamIds, steamId, exclusiveLock);
             }
@@ -1270,6 +1278,16 @@ namespace Steam_Desktop_Authenticator
             {
                 transferFencedSteamIds.TryRemove(steamId, out _);
                 throw;
+            }
+        }
+
+        internal void RefreshUnresolvedTransferMarkers()
+        {
+            unresolvedTransferMarkerSteamIds.Clear();
+            foreach (PendingTransferMarkerRecord marker in PendingTransferMarker.EnumerateMarkers())
+            {
+                if (marker != null && marker.SteamId != 0)
+                    unresolvedTransferMarkerSteamIds[marker.SteamId] = 0;
             }
         }
 
@@ -1329,6 +1347,7 @@ namespace Steam_Desktop_Authenticator
             {
                 loginForm.ShowDialog(this);
             }
+            RefreshUnresolvedTransferMarkers();
             this.loadAccountsList();
         }
 
@@ -1337,43 +1356,95 @@ namespace Steam_Desktop_Authenticator
             if (manifest == null)
                 return;
 
-            List<StagedTransferRecoveryRecord> stagedRecoveries = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(allAccounts, passKey);
+            List<StagedTransferRecoveryRecord> stagedRecoveries = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(allAccounts, passKey, manifest);
             foreach (StagedTransferRecoveryRecord staged in stagedRecoveries)
             {
-                if (staged.RequiresPasskey)
+                StagedTransferRecoveryRecord resolvedStaged = staged;
+                string recoveryPassKey = passKey;
+
+                if (resolvedStaged.RequiresPasskey)
                 {
-                    AstroMessageBox.Show(
-                        "A passkey-protected staged authenticator transfer recovery file was found for SteamID " +
-                        staged.SteamId.ToString(CultureInfo.InvariantCulture) +
-                        ", but no manifest passkey is currently unlocked. Unlock your encrypted manifest or keep the recovery file safe.",
-                        "Staged Transfer Recovery",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
-                    continue;
+                    while (true)
+                    {
+                        using (InputForm passForm = new InputForm(
+                            "A passkey-protected staged authenticator transfer recovery was found for SteamID " +
+                            resolvedStaged.SteamId.ToString(CultureInfo.InvariantCulture) +
+                            ". Enter the passkey used during that transfer to unlock and recover it:",
+                            true))
+                        {
+                            passForm.ShowInputDialog(this);
+                            if (passForm.Canceled)
+                            {
+                                resolvedStaged = null;
+                                break;
+                            }
+
+                            string candidatePassKey = passForm.txtBox.Text;
+                            StagedTransferRecoveryRecord decrypted = PendingTransferMarker.TryLoadStagedRecoveryWithPasskey(resolvedStaged.FilePath, candidatePassKey);
+                            if (decrypted?.Account != null)
+                            {
+                                resolvedStaged = decrypted;
+                                recoveryPassKey = candidatePassKey;
+                                break;
+                            }
+
+                            AstroMessageBox.Show(
+                                "That passkey could not unlock the staged transfer recovery file. Try again or cancel to keep it staged.",
+                                "Staged Transfer Recovery",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Error);
+                        }
+                    }
+
+                    if (resolvedStaged?.Account == null)
+                        continue;
+
+                    SteamGuardAccount existingCommitted = FindLoadedAccountBySteamId(allAccounts, resolvedStaged.SteamId);
+                    if (existingCommitted != null && PendingTransferMarker.IsSameAuthenticatorReplacement(existingCommitted, resolvedStaged.Account))
+                    {
+                        PendingTransferMarker.DeleteStagedRecoveryBestEffort(resolvedStaged.FilePath);
+                        PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId);
+                        continue;
+                    }
                 }
 
-                if (staged.Account == null)
+                if (resolvedStaged.Account == null)
                     continue;
 
+                bool saveEncrypted = manifest.Encrypted || (manifest.Entries.Count == 0 && !String.IsNullOrEmpty(recoveryPassKey));
+                string effectivePassKey = saveEncrypted ? (manifest.Encrypted ? passKey : recoveryPassKey) : null;
+                long expectedRevisionAtRecovery = manifest.GetAccountStorageRevision(resolvedStaged.SteamId);
+
                 using (TransferSaveRecoveryForm recoveryForm = new TransferSaveRecoveryForm(
-                    staged.Account,
-                    "A transferred authenticator for " + (staged.Account.AccountName ?? staged.SteamId.ToString(CultureInfo.InvariantCulture)) +
+                    resolvedStaged.Account,
+                    "A transferred authenticator for " + (resolvedStaged.Account.AccountName ?? resolvedStaged.SteamId.ToString(CultureInfo.InvariantCulture)) +
                     " was staged before a previous save completed or the app closed.",
-                    staged.FilePath,
+                    resolvedStaged.FilePath,
                     stagingFailed: false,
-                    manifestPassKey: passKey,
+                    manifestPassKey: effectivePassKey ?? recoveryPassKey,
                     retryLocalSave: candidate =>
                     {
-                        StorageResult retryResult = manifest.SaveAccount(candidate, manifest.Encrypted, passKey);
+                        StorageResult retryResult = manifest.SaveAccount(
+                            candidate,
+                            saveEncrypted,
+                            effectivePassKey,
+                            expectedStorageRevision: manifest.Entries.Any(entry => entry.SteamID == resolvedStaged.SteamId)
+                                ? expectedRevisionAtRecovery
+                                : (long?)null,
+                            transferAttemptId: resolvedStaged.TransferAttemptId,
+                            rejectSupersededTransferAttempt: true);
                         if (retryResult.Succeeded)
-                            OnTransferredAccountCommitted(candidate, passKey);
+                        {
+                            PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(resolvedStaged.SteamId);
+                            OnTransferredAccountCommitted(candidate, effectivePassKey);
+                        }
                         return retryResult;
                     }))
                 {
                     recoveryForm.ShowDialog(this);
                     if (recoveryForm.LocalSaveSucceeded)
                     {
-                        loadAccountsList(staged.SteamId);
+                        loadAccountsList(resolvedStaged.SteamId);
                     }
                 }
             }
@@ -1390,7 +1461,7 @@ namespace Steam_Desktop_Authenticator
 
                 DialogResult decision = AstroMessageBox.ShowWithCustomButtons(
                     "An authenticator transfer for " + accountDisplay + " was interrupted after sending the SMS code (" + whenText + ").\n\n" +
-                    "Steam may have already replaced your previous authenticator. Do NOT automatically resend an SMS code. Verify your Steam Mobile App or Steam Support recovery status first.\n\n" +
+                    "Steam may have already replaced your previous authenticator. Automation and account operations remain paused for this account until resolved. Verify your Steam Mobile App or Steam Support recovery status first.\n\n" +
                     "Dismiss this warning only after you have verified the account.",
                     "Unresolved Authenticator Transfer",
                     MessageBoxButtons.YesNo,
@@ -1403,6 +1474,8 @@ namespace Steam_Desktop_Authenticator
                     PendingTransferMarker.DeleteMarkerBestEffort(marker.SteamId);
                 }
             }
+
+            RefreshUnresolvedTransferMarkers();
         }
 
         private void SetQrScanWaitingState(bool isWaiting, int remainingSeconds = 0)
@@ -2307,6 +2380,10 @@ namespace Steam_Desktop_Authenticator
                     {
                         throw;
                     }
+                    catch (Exception autoEx) when (IsRateLimitedResponse(autoEx))
+                    {
+                        throw ApplyTradeRateLimit(autoEx);
+                    }
                     catch (SessionUnavailableException)
                     {
                         throw;
@@ -2743,7 +2820,14 @@ namespace Steam_Desktop_Authenticator
 
         private bool IsSessionAvailableForAccountOperations(SteamGuardAccount account)
         {
-            return account?.Session != null && !IsSessionRenewalRequired(account);
+            if (account?.Session == null)
+                return false;
+
+            ulong steamId = account.Session.SteamID;
+            if (steamId != 0 && unresolvedTransferMarkerSteamIds.ContainsKey(steamId))
+                return false;
+
+            return !IsSessionRenewalRequired(account);
         }
 
         private static bool IsCurrentAccountGeneration(SteamGuardAccount account, SteamGuardAccount[] loadedAccounts)
@@ -3774,15 +3858,14 @@ namespace Steam_Desktop_Authenticator
                 ? tradeConfirmationScheduler.GetHealthSnapshot(steamId)
                 : null;
             SavedCredentialStatus credStatus = SavedCredentialStatus.None;
-            if (steamId != 0 && credentialStatuses != null && credentialStatuses.TryGetValue(steamId, out SavedCredentialStatus found))
-                credStatus = found;
+            if (steamId != 0 && credentialStatuses != null)
+            {
+                if (credentialStatuses.TryGetValue(steamId, out SavedCredentialStatus found))
+                    credStatus = found;
+            }
             else if (steamId != 0 && manifest != null && manifest.Encrypted && manifest.AllowSavedSteamPasswords && !String.IsNullOrEmpty(passKey))
             {
-                SavedCredentialRecord record = manifest.GetSavedCredentialRecord(steamId, passKey);
-                if (record != null)
-                {
-                    credStatus = new SavedCredentialStatus(true, record.PasswordRejected, record.PasswordRejectedUtc, record.CredentialGenerationId, record.UpdatedUtc);
-                }
+                credStatus = manifest.GetSavedCredentialStatus(steamId, passKey);
             }
 
             bool passwordRejected = credStatus.PasswordRejected ||
@@ -3814,11 +3897,11 @@ namespace Steam_Desktop_Authenticator
 
             AccountConfirmationSettings confSettings = manifest.GetAccountConfirmationSettings(steamId);
             AccountScanHealthSnapshot health = tradeConfirmationScheduler.GetHealthSnapshot(steamId);
-            SavedCredentialRecord credRecord = manifest.Encrypted && manifest.AllowSavedSteamPasswords && !String.IsNullOrEmpty(passKey)
-                ? manifest.GetSavedCredentialRecord(steamId, passKey)
-                : null;
-            bool passwordRejected = (credRecord?.PasswordRejected ?? false) ||
-                silentReloginService.IsGenerationRejectedInMemory(steamId, credRecord?.CredentialGenerationId);
+            SavedCredentialStatus credStatus = manifest.Encrypted && manifest.AllowSavedSteamPasswords && !String.IsNullOrEmpty(passKey)
+                ? manifest.GetSavedCredentialStatus(steamId, passKey)
+                : SavedCredentialStatus.None;
+            bool passwordRejected = credStatus.PasswordRejected ||
+                silentReloginService.IsGenerationRejectedInMemory(steamId, credStatus.CredentialGenerationId);
 
             var metadata = new
             {
@@ -3829,7 +3912,7 @@ namespace Steam_Desktop_Authenticator
                 tradeConfirmationCheckInterval = confSettings.TradeConfirmationCheckInterval,
                 healthState = health.State.ToString().ToLowerInvariant(),
                 lastScanError = health.LastErrorSummary,
-                hasSavedPassword = credRecord != null && !String.IsNullOrEmpty(credRecord.Password),
+                hasSavedPassword = credStatus.HasSavedPassword,
                 passwordRejected = passwordRejected,
                 recoveryInProgress = silentReloginService.IsRecoveryInProgress(steamId) || activeSilentReloginTasks.ContainsKey(steamId),
                 canSavePasswords = manifest.Encrypted && manifest.AllowSavedSteamPasswords
@@ -4790,6 +4873,7 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
+                bool allowSavedPasswordsChanged = effectiveAllowSavedPasswords != manifest.AllowSavedSteamPasswords;
                 StorageResult saveResult = await ExecuteSettingsSaveWithUpdaterPreferenceAsync(
                     updatePreferenceRevision,
                     manifest,
@@ -4865,6 +4949,7 @@ namespace Steam_Desktop_Authenticator
                     staged.ProxyPort = proxyConfiguration.Port;
                     staged.ProxyUsername = proxyConfiguration.Username;
                     staged.ProxyPassword = proxyConfiguration.Password;
+                    staged.AllowSavedSteamPasswords = effectiveAllowSavedPasswords;
                 });
                 if (!saveResult.Succeeded)
                 {
@@ -4873,16 +4958,9 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                if (effectiveAllowSavedPasswords != manifest.AllowSavedSteamPasswords)
+                if (allowSavedPasswordsChanged)
                 {
-                    StorageResult savedPasswordToggleResult = manifest.SetAllowSavedSteamPasswords(effectiveAllowSavedPasswords);
-                    if (!savedPasswordToggleResult.Succeeded)
-                    {
-                        DiagnosticErrorLogger.Log("Credential storage", savedPasswordToggleResult.Exception, "The saved-password preference could not be updated.");
-                        await PublishSettingsSaveFailureAsync(savedPasswordToggleResult.UserMessage ?? "The saved-password setting could not be updated.");
-                        return;
-                    }
-                    if (!effectiveAllowSavedPasswords && savedPasswordToggleResult.ObsoleteCleanupPending)
+                    if (!effectiveAllowSavedPasswords && saveResult.ObsoleteCleanupPending)
                     {
                         AstroMessageBox.Show(
                             "Saved Steam passwords were disabled. The previous encrypted credential file could not be deleted immediately and will be removed automatically on the next save or restart.",
@@ -5807,6 +5885,13 @@ namespace Steam_Desktop_Authenticator
                     confirmationsSemaphore.Release();
                 }
             }
+            catch (Exception ex) when (IsRateLimitedResponse(ex))
+            {
+                TradeRateLimitedException rateLimitException = ApplyTradeRateLimit(ex);
+                DiagnosticErrorLogger.Log("Trade confirmation action", rateLimitException, accept ? "Accept request rate limited." : "Deny request rate limited.");
+                if (!lifetimeCancellationSource.IsCancellationRequested)
+                    AstroMessageBox.Show(rateLimitException.Message, "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Trade confirmation action", ex, accept ? "Accept request failed." : "Deny request failed.");
@@ -5952,6 +6037,10 @@ namespace Steam_Desktop_Authenticator
                     }
                     try
                     {
+                        TimeSpan spacingWait = tradeConfirmationScheduler.GetRemainingGlobalDispatchSpacing();
+                        if (spacingWait > TimeSpan.Zero)
+                            await Task.Delay(spacingWait, cancellationToken);
+
                         tradeConfirmationScheduler.RecordGlobalDispatch();
                         Confirmation[] accountConfirmations = await FetchTradeConfirmationsForPageAsync(account, cancellationToken, nonBlocking: true);
                         if (accountConfirmations == null)
@@ -5959,10 +6048,9 @@ namespace Steam_Desktop_Authenticator
                             unavailableAccounts.Add(account.AccountName + " is busy or renewing its session.");
                             continue;
                         }
-                        // Manual refresh always displays every pending confirmation currently on Steam.
+                        // Manual refresh displays all pending confirmations without postponing the automatic confirmation schedule.
                         CacheTradeConfirmations(account, accountConfirmations);
-                        ResolvedAccountConfirmationPolicy policy = ResolveAccountConfirmationPolicyForMonitor(account.Session.SteamID);
-                        tradeConfirmationScheduler.RecordSuccess(account.Session.SteamID, policy.Interval);
+                        tradeConfirmationScheduler.RecordManualRefreshHealth(account.Session.SteamID);
                         PublishAccountHealthMetadata(account.Session.SteamID);
                     }
                     catch (TradeRateLimitedException ex)

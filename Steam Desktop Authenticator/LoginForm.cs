@@ -1066,9 +1066,17 @@ namespace Steam_Desktop_Authenticator
                             resolvedPassKey,
                             candidate =>
                             {
-                                StorageResult retryResult = manifest.SaveAccount(candidate, encrypt, resolvedPassKey);
+                                StorageResult retryResult = manifest.SaveAccount(
+                                    candidate,
+                                    encrypt,
+                                    resolvedPassKey,
+                                    transferAttemptId: outcome.TransferAttemptId,
+                                    rejectSupersededTransferAttempt: true);
                                 if (retryResult.Succeeded)
+                                {
+                                    PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(candidate.Session.SteamID);
                                     onAccountCommitted?.Invoke(candidate, resolvedPassKey);
+                                }
                                 return retryResult;
                             }))
                         {
@@ -1180,8 +1188,8 @@ namespace Steam_Desktop_Authenticator
 
             public bool HasUnresolvedPendingTransfer(ulong steamId) => PendingTransferMarker.HasMarker(steamId);
 
-            public bool WritePreDispatchMarker(ulong steamId, string accountName, string deviceId) =>
-                PendingTransferMarker.TryWriteMarker(steamId, accountName, deviceId);
+            public bool WritePreDispatchMarker(ulong steamId, string accountName, string deviceId, string transferAttemptId) =>
+                PendingTransferMarker.TryWriteMarker(steamId, accountName, deviceId, transferAttemptId);
 
             public void ClearPreDispatchMarker(ulong steamId) => PendingTransferMarker.DeleteMarkerBestEffort(steamId);
 
@@ -1204,9 +1212,9 @@ namespace Steam_Desktop_Authenticator
                 return owner.InvokeRequired ? (string)owner.Invoke(showDialog) : showDialog();
             }
 
-            public string TryStageProtectedReplacement(SteamGuardAccount replacement, out bool stagingFailed)
+            public string TryStageProtectedReplacement(SteamGuardAccount replacement, string transferAttemptId, out bool stagingFailed)
             {
-                return PendingTransferMarker.TryStageProtectedReplacement(replacement, encrypt, passKey, out stagingFailed);
+                return PendingTransferMarker.TryStageProtectedReplacement(replacement, encrypt, passKey, out stagingFailed, transferAttemptId);
             }
 
             public void CleanupStagedReplacement(string stagedRecoveryPath)
@@ -1214,12 +1222,17 @@ namespace Steam_Desktop_Authenticator
                 PendingTransferMarker.DeleteStagedRecoveryBestEffort(stagedRecoveryPath);
             }
 
-            public bool PersistReplacementAccount(SteamGuardAccount replacement, out string failureMessage)
+            public bool PersistReplacementAccount(SteamGuardAccount replacement, string transferAttemptId, out string failureMessage)
             {
-                StorageResult result = manifest.SaveAccount(replacement, encrypt, passKey);
+                StorageResult result = manifest.SaveAccount(
+                    replacement,
+                    encrypt,
+                    passKey,
+                    transferAttemptId: transferAttemptId);
                 if (result.Succeeded)
                 {
                     failureMessage = null;
+                    PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(replacement.Session.SteamID);
                     // Synchronously retire the old account generation BEFORE RecoveryCodeForm!
                     onCommitted?.Invoke(replacement);
                     return true;
@@ -1230,9 +1243,13 @@ namespace Steam_Desktop_Authenticator
                 return false;
             }
 
-            public void PersistEnrichedDeviceId(SteamGuardAccount replacement)
+            public void PersistEnrichedDeviceId(SteamGuardAccount replacement, string transferAttemptId)
             {
-                StorageResult result = manifest.SaveAccount(replacement, encrypt, passKey);
+                StorageResult result = manifest.SaveAccount(
+                    replacement,
+                    encrypt,
+                    passKey,
+                    transferAttemptId: transferAttemptId);
                 if (result.Succeeded)
                     onCommitted?.Invoke(replacement);
             }

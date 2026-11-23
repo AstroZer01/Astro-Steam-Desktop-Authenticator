@@ -160,6 +160,35 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        public TimeSpan GetRemainingGlobalDispatchSpacing()
+        {
+            lock (syncLock)
+            {
+                if (lastGlobalDispatchUtc == DateTime.MinValue)
+                    return TimeSpan.Zero;
+
+                DateTime allowedAt = lastGlobalDispatchUtc.Add(MinimumGlobalDispatchSpacing);
+                DateTime now = utcNowProvider();
+                return allowedAt > now ? allowedAt - now : TimeSpan.Zero;
+            }
+        }
+
+        public void RecordManualRefreshHealth(ulong steamId)
+        {
+            if (steamId == 0)
+                return;
+
+            lock (syncLock)
+            {
+                DateTime now = utcNowProvider();
+                AccountScheduleState state = GetOrCreateStateLocked(steamId, now);
+                state.ConsecutiveFailures = 0;
+                state.HealthState = AccountScanHealthState.Ok;
+                state.LastSuccessUtc = now;
+                state.LastErrorSummary = null;
+            }
+        }
+
         public bool CanDispatchGloballyNow()
         {
             lock (syncLock)

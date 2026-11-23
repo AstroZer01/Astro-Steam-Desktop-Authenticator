@@ -136,7 +136,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public void ValidateExportDestination_BlocksLiveMaFilesDirectory()
+        public void ValidateExportDestination_BlocksLiveMaFilesDirectory_AndWindowsExtendedPathAliases()
         {
             string liveMaDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
             Directory.CreateDirectory(liveMaDir);
@@ -147,6 +147,10 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 AccountExportService.ValidateExportDestination(Path.Combine(liveMaDir, "sub", "backup.zip")));
             Assert.Throws<InvalidDataException>(() =>
                 AccountExportService.ValidateExportDestination(liveMaDir));
+            Assert.Throws<InvalidDataException>(() =>
+                AccountExportService.ValidateExportDestination(@"\\?\" + Path.Combine(liveMaDir, "alias.maFile")));
+            Assert.Throws<InvalidDataException>(() =>
+                AccountExportService.ValidateExportDestination(@"\\.\" + Path.Combine(liveMaDir, "device.maFile")));
         }
 
         [Theory]

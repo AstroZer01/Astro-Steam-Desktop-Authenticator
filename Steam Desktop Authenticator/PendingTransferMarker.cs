@@ -25,6 +25,9 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("dispatched_at_utc")]
         public DateTime DispatchedAtUtc { get; set; }
 
+        [JsonProperty("transfer_attempt_id", NullValueHandling = NullValueHandling.Ignore)]
+        public string TransferAttemptId { get; set; }
+
         [JsonIgnore]
         public string FilePath { get; set; }
     }
@@ -34,6 +37,7 @@ namespace Steam_Desktop_Authenticator
         public string FilePath { get; set; }
         public ulong SteamId { get; set; }
         public DateTime StagedAtUtc { get; set; }
+        public string TransferAttemptId { get; set; }
         public SteamGuardAccount Account { get; set; }
         public bool RequiresPasskey { get; set; }
     }
@@ -75,6 +79,9 @@ namespace Steam_Desktop_Authenticator
             [JsonProperty("staged_at_utc")]
             public DateTime StagedAtUtc { get; set; }
 
+            [JsonProperty("transfer_attempt_id", NullValueHandling = NullValueHandling.Ignore)]
+            public string TransferAttemptId { get; set; }
+
             [JsonProperty("salt", NullValueHandling = NullValueHandling.Ignore)]
             public string Salt { get; set; }
 
@@ -95,6 +102,9 @@ namespace Steam_Desktop_Authenticator
 
             [JsonProperty("steam_id")]
             public ulong SteamId { get; set; }
+
+            [JsonProperty("transfer_attempt_id", NullValueHandling = NullValueHandling.Ignore)]
+            public string TransferAttemptId { get; set; }
 
             [JsonProperty("account")]
             public SteamGuardAccount Account { get; set; }
@@ -134,7 +144,7 @@ namespace Steam_Desktop_Authenticator
             return File.Exists(GetMarkerPath(steamId));
         }
 
-        public static bool TryWriteMarker(ulong steamId, string accountName, string deviceId)
+        public static bool TryWriteMarker(ulong steamId, string accountName, string deviceId, string transferAttemptId = null)
         {
             if (steamId == 0)
                 return false;
@@ -149,7 +159,8 @@ namespace Steam_Desktop_Authenticator
                     SteamId = steamId,
                     AccountName = accountName ?? String.Empty,
                     DeviceId = deviceId ?? String.Empty,
-                    DispatchedAtUtc = DateTime.UtcNow
+                    DispatchedAtUtc = DateTime.UtcNow,
+                    TransferAttemptId = String.IsNullOrWhiteSpace(transferAttemptId) ? Guid.NewGuid().ToString("N") : transferAttemptId
                 };
 
                 string json = JsonConvert.SerializeObject(record, MarkerJsonSettings);
@@ -220,7 +231,8 @@ namespace Steam_Desktop_Authenticator
             SteamGuardAccount account,
             bool manifestEncrypted,
             string passKey,
-            out bool stagingFailed)
+            out bool stagingFailed,
+            string transferAttemptId = null)
         {
             stagingFailed = false;
             if (account?.Session == null || account.Session.SteamID == 0)
@@ -235,6 +247,7 @@ namespace Steam_Desktop_Authenticator
                 string recoveryDir = GetRecoveryDirectoryForCurrentDataDirectory();
                 Directory.CreateDirectory(recoveryDir);
 
+                string effectiveAttemptId = String.IsNullOrWhiteSpace(transferAttemptId) ? Guid.NewGuid().ToString("N") : transferAttemptId;
                 string fileName = RecoveryFilePrefix +
                     account.Session.SteamID.ToString(CultureInfo.InvariantCulture) + "-" +
                     Guid.NewGuid().ToString("N") +
@@ -245,6 +258,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     CanonicalDataDirectory = canonicalDataDir,
                     SteamId = account.Session.SteamID,
+                    TransferAttemptId = effectiveAttemptId,
                     Account = account
                 };
                 byte[] plaintextBytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(innerPayload, MarkerJsonSettings));
@@ -278,6 +292,7 @@ namespace Steam_Desktop_Authenticator
                             CanonicalDataDirectory = canonicalDataDir,
                             SteamId = account.Session.SteamID,
                             StagedAtUtc = DateTime.UtcNow,
+                            TransferAttemptId = effectiveAttemptId,
                             Salt = saltB64,
                             Nonce = Convert.ToBase64String(nonce),
                             Tag = Convert.ToBase64String(tag),
@@ -295,6 +310,7 @@ namespace Steam_Desktop_Authenticator
                             CanonicalDataDirectory = canonicalDataDir,
                             SteamId = account.Session.SteamID,
                             StagedAtUtc = DateTime.UtcNow,
+                            TransferAttemptId = effectiveAttemptId,
                             Payload = Convert.ToBase64String(dpapiBytes)
                         };
                     }
@@ -326,9 +342,40 @@ namespace Steam_Desktop_Authenticator
             DeleteFileBestEffort(stagedFilePath);
         }
 
+        public static void DeleteAllStagedRecoveriesForSteamIdBestEffort(ulong steamId)
+        {
+            if (steamId == 0)
+                return;
+
+            string recoveryDir = GetRecoveryDirectoryForCurrentDataDirectory();
+            if (!Directory.Exists(recoveryDir))
+                return;
+
+            string prefix = RecoveryFilePrefix + steamId.ToString(CultureInfo.InvariantCulture) + "-";
+            try
+            {
+                foreach (string filePath in Directory.EnumerateFiles(recoveryDir, prefix + "*" + RecoveryFileSuffix, SearchOption.TopDirectoryOnly))
+                {
+                    DeleteFileBestEffort(filePath);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        public static StagedTransferRecoveryRecord TryLoadStagedRecoveryWithPasskey(string filePath, string passKey)
+        {
+            if (String.IsNullOrWhiteSpace(filePath) || String.IsNullOrEmpty(passKey))
+                return null;
+
+            return TryReadStagedRecoveryFile(filePath, GetCanonicalDataDirectory(), passKey);
+        }
+
         public static List<StagedTransferRecoveryRecord> ReconcileAndLoadStagedRecoveries(
             IReadOnlyList<SteamGuardAccount> committedAccounts,
-            string passKey)
+            string passKey,
+            Manifest manifest = null)
         {
             List<StagedTransferRecoveryRecord> pendingRecoveries = new List<StagedTransferRecoveryRecord>();
             string canonicalDataDir = GetCanonicalDataDirectory();
@@ -346,6 +393,16 @@ namespace Steam_Desktop_Authenticator
                 }
             }
 
+            Dictionary<ulong, string> committedAttemptIds = new Dictionary<ulong, string>();
+            if (manifest?.Entries != null)
+            {
+                foreach (Manifest.ManifestEntry entry in manifest.Entries)
+                {
+                    if (entry != null && entry.SteamID != 0 && !String.IsNullOrWhiteSpace(entry.LastTransferAttemptId))
+                        committedAttemptIds[entry.SteamID] = entry.LastTransferAttemptId;
+                }
+            }
+
             try
             {
                 foreach (string filePath in Directory.EnumerateFiles(recoveryDir, RecoveryFilePrefix + "*" + RecoveryFileSuffix, SearchOption.TopDirectoryOnly))
@@ -353,6 +410,25 @@ namespace Steam_Desktop_Authenticator
                     StagedTransferRecoveryRecord loaded = TryReadStagedRecoveryFile(filePath, canonicalDataDir, passKey);
                     if (loaded == null)
                         continue;
+
+                    // If a newer transfer attempt has already been committed for this SteamID,
+                    // this older staged copy is superseded and MUST NOT overwrite the newer authenticator.
+                    if (committedAttemptIds.TryGetValue(loaded.SteamId, out string committedAttemptId) &&
+                        !String.IsNullOrWhiteSpace(committedAttemptId) &&
+                        !String.Equals(committedAttemptId, loaded.TransferAttemptId, StringComparison.Ordinal))
+                    {
+                        DeleteFileBestEffort(filePath);
+                        continue;
+                    }
+
+                    if (!String.IsNullOrWhiteSpace(loaded.TransferAttemptId) &&
+                        committedAttemptIds.TryGetValue(loaded.SteamId, out string exactCommittedAttempt) &&
+                        String.Equals(exactCommittedAttempt, loaded.TransferAttemptId, StringComparison.Ordinal))
+                    {
+                        DeleteFileBestEffort(filePath);
+                        DeleteMarkerBestEffort(loaded.SteamId);
+                        continue;
+                    }
 
                     if (loaded.Account != null &&
                         committedBySteamId.TryGetValue(loaded.SteamId, out SteamGuardAccount committed) &&
@@ -433,6 +509,7 @@ namespace Steam_Desktop_Authenticator
                                 FilePath = filePath,
                                 SteamId = envelope.SteamId,
                                 StagedAtUtc = envelope.StagedAtUtc,
+                                TransferAttemptId = envelope.TransferAttemptId,
                                 RequiresPasskey = true
                             };
                         }
@@ -467,7 +544,9 @@ namespace Steam_Desktop_Authenticator
                     ProtectedRecoveryPayload innerPayload = JsonConvert.DeserializeObject<ProtectedRecoveryPayload>(innerJson, MarkerJsonSettings);
                     if (innerPayload?.Account == null ||
                         !String.Equals(innerPayload.CanonicalDataDirectory, expectedCanonicalDataDir, StringComparison.OrdinalIgnoreCase) ||
-                        innerPayload.SteamId != envelope.SteamId)
+                        innerPayload.SteamId != envelope.SteamId ||
+                        (!String.IsNullOrEmpty(envelope.TransferAttemptId) &&
+                         !String.Equals(innerPayload.TransferAttemptId, envelope.TransferAttemptId, StringComparison.Ordinal)))
                     {
                         return null;
                     }
@@ -477,6 +556,7 @@ namespace Steam_Desktop_Authenticator
                         FilePath = filePath,
                         SteamId = envelope.SteamId,
                         StagedAtUtc = envelope.StagedAtUtc,
+                        TransferAttemptId = innerPayload.TransferAttemptId ?? envelope.TransferAttemptId,
                         Account = innerPayload.Account,
                         RequiresPasskey = false
                     };

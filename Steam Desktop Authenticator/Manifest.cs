@@ -106,6 +106,10 @@ namespace Steam_Desktop_Authenticator
         private static Manifest _manifest { get; set; }
         private static readonly object storageLock = new object();
         private long storageRevision;
+        // Generation-scoped metadata-only cache (never caches plaintext passwords)
+        // so 1-second UI/monitor eligibility checks do not re-run 600k PBKDF2.
+        private string cachedCredentialMetadataFilename;
+        private Dictionary<ulong, SavedCredentialStatus> cachedCredentialMetadata;
         // Refresh persistence only needs to reject changes to the account it
         // captured. A manifest-wide revision would make an unrelated account
         // update abort an otherwise safe refresh.
@@ -1093,7 +1097,9 @@ namespace Steam_Desktop_Authenticator
             bool allowCreate = true,
             bool requireAllowSavedPasswords = false,
             string expectedCredentialGenerationId = null,
-            string credentialPassKey = null)
+            string credentialPassKey = null,
+            string transferAttemptId = null,
+            bool rejectSupersededTransferAttempt = false)
         {
             lock (storageLock)
             {
@@ -1150,6 +1156,13 @@ namespace Steam_Desktop_Authenticator
                 ManifestEntry previousEntry = stagedManifest.Entries.FirstOrDefault(entry => entry.SteamID == account.Session.SteamID);
                 if (previousEntry == null && !allowCreate)
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account is no longer managed by this authenticator.");
+                if (rejectSupersededTransferAttempt &&
+                    previousEntry != null &&
+                    !String.IsNullOrWhiteSpace(previousEntry.LastTransferAttemptId) &&
+                    !String.Equals(previousEntry.LastTransferAttemptId, transferAttemptId, StringComparison.Ordinal))
+                {
+                    return StorageResult.Failure(StorageFailureKind.Validation, "A newer authenticator transfer has already been saved for this account.");
+                }
                 string filename = account.Session.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
                 ManifestEntry newEntry = new ManifestEntry()
                 {
@@ -1161,7 +1174,10 @@ namespace Steam_Desktop_Authenticator
                     AutoConfirmOverrideEnabled = previousEntry?.AutoConfirmOverrideEnabled ?? false,
                     AutoConfirmTrades = previousEntry?.AutoConfirmTrades ?? false,
                     AutoConfirmMarketTransactions = previousEntry?.AutoConfirmMarketTransactions ?? false,
-                    TradeConfirmationCheckInterval = previousEntry?.TradeConfirmationCheckInterval
+                    TradeConfirmationCheckInterval = previousEntry?.TradeConfirmationCheckInterval,
+                    LastTransferAttemptId = !String.IsNullOrWhiteSpace(transferAttemptId)
+                        ? transferAttemptId
+                        : previousEntry?.LastTransferAttemptId
                 };
                 if (previousEntry == null)
                 {
@@ -1277,6 +1293,34 @@ namespace Steam_Desktop_Authenticator
                         ex);
                 }
 
+                bool savedPasswordsChanged = staged.AllowSavedSteamPasswords != this.AllowSavedSteamPasswords;
+                if (savedPasswordsChanged)
+                {
+                    if (staged.AllowSavedSteamPasswords && !this.Encrypted)
+                        return StorageResult.Failure(StorageFailureKind.Validation, "Enable manifest encryption before saving Steam passwords.");
+                    if (staged.AllowSavedSteamPasswords && !EncryptedCredentialStore.IsSupported)
+                        return StorageResult.Failure(StorageFailureKind.Encryption, "AES-GCM encryption is not supported on this system.");
+
+                    List<string> obsoleteFiles = new List<string>();
+                    if (!staged.AllowSavedSteamPasswords && !String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                    {
+                        obsoleteFiles.Add(this.CredentialsStoreFilename);
+                        staged.CredentialsStoreFilename = null;
+                    }
+
+                    StorageResult txResult = CommitStorageTransaction(
+                        staged,
+                        new Dictionary<string, string>(),
+                        obsoleteFiles,
+                        preserveStagedSettings: true);
+                    if (txResult.Succeeded)
+                    {
+                        staged.CopySettingsInto(this);
+                        CopyStorageStateFrom(staged);
+                    }
+                    return txResult;
+                }
+
                 StorageResult result = staged.SaveWithResult();
                 if (result.Succeeded)
                     staged.CopySettingsInto(this);
@@ -1313,9 +1357,18 @@ namespace Steam_Desktop_Authenticator
             Entries = source.Entries;
             Encrypted = source.Encrypted;
             AllowSavedSteamPasswords = source.AllowSavedSteamPasswords;
+            if (!String.Equals(CredentialsStoreFilename, source.CredentialsStoreFilename, StringComparison.Ordinal))
+            {
+                cachedCredentialMetadataFilename = null;
+                cachedCredentialMetadata = null;
+            }
             CredentialsStoreFilename = source.CredentialsStoreFilename;
             if (String.IsNullOrWhiteSpace(CredentialsStoreFilename))
+            {
                 CredentialsStoreMissingWarning = false;
+                cachedCredentialMetadataFilename = null;
+                cachedCredentialMetadata = null;
+            }
             storageRevision++;
         }
 
@@ -1374,7 +1427,8 @@ namespace Steam_Desktop_Authenticator
         private StorageResult CommitStorageTransaction(
             Manifest stagedManifest,
             IReadOnlyDictionary<string, string> stagedFiles,
-            IEnumerable<string> obsoleteFiles)
+            IEnumerable<string> obsoleteFiles,
+            bool preserveStagedSettings = false)
         {
             lock (storageLock)
             {
@@ -1413,7 +1467,8 @@ namespace Steam_Desktop_Authenticator
                         obsoleteFilenames.RemoveAll(filename => trackedRetainedSet.Contains(filename));
                     }
 
-                    CopySettingsInto(stagedManifest);
+                    if (!preserveStagedSettings)
+                        CopySettingsInto(stagedManifest);
                     if (!stagedManifest.Encrypted)
                     {
                         stagedManifest.AllowSavedSteamPasswords = false;
@@ -2316,6 +2371,17 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        public SavedCredentialStatus GetSavedCredentialStatus(ulong steamId, string passKey)
+        {
+            if (steamId == 0 || String.IsNullOrEmpty(passKey))
+                return SavedCredentialStatus.None;
+
+            Dictionary<ulong, SavedCredentialStatus> statuses = GetSavedCredentialStatuses(passKey);
+            return statuses.TryGetValue(steamId, out SavedCredentialStatus status)
+                ? status
+                : SavedCredentialStatus.None;
+        }
+
         public Dictionary<ulong, SavedCredentialStatus> GetSavedCredentialStatuses(string passKey)
         {
             Dictionary<ulong, SavedCredentialStatus> statuses = new Dictionary<ulong, SavedCredentialStatus>();
@@ -2325,7 +2391,17 @@ namespace Steam_Desktop_Authenticator
             lock (storageLock)
             {
                 if (!this.Encrypted || !this.AllowSavedSteamPasswords || String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                {
+                    cachedCredentialMetadataFilename = null;
+                    cachedCredentialMetadata = null;
                     return statuses;
+                }
+
+                if (cachedCredentialMetadata != null &&
+                    String.Equals(cachedCredentialMetadataFilename, this.CredentialsStoreFilename, StringComparison.Ordinal))
+                {
+                    return new Dictionary<ulong, SavedCredentialStatus>(cachedCredentialMetadata);
+                }
 
                 try
                 {
@@ -2333,15 +2409,20 @@ namespace Steam_Desktop_Authenticator
                     if (records == null)
                         return statuses;
 
+                    Dictionary<ulong, SavedCredentialStatus> loaded = new Dictionary<ulong, SavedCredentialStatus>();
                     foreach (KeyValuePair<ulong, SavedCredentialRecord> kvp in records)
                     {
-                        statuses[kvp.Key] = new SavedCredentialStatus(
+                        loaded[kvp.Key] = new SavedCredentialStatus(
                             hasSavedPassword: !String.IsNullOrEmpty(kvp.Value.Password),
                             passwordRejected: kvp.Value.PasswordRejected,
                             passwordRejectedUtc: kvp.Value.PasswordRejectedUtc,
                             credentialGenerationId: kvp.Value.CredentialGenerationId,
                             updatedUtc: kvp.Value.UpdatedUtc);
                     }
+
+                    cachedCredentialMetadataFilename = this.CredentialsStoreFilename;
+                    cachedCredentialMetadata = loaded;
+                    return new Dictionary<ulong, SavedCredentialStatus>(loaded);
                 }
                 catch (Exception ex)
                 {
@@ -2683,6 +2764,9 @@ namespace Steam_Desktop_Authenticator
 
             [JsonProperty("trade_confirmation_check_interval", DefaultValueHandling = DefaultValueHandling.Ignore)]
             public int? TradeConfirmationCheckInterval { get; set; }
+
+            [JsonProperty("last_transfer_attempt_id", NullValueHandling = NullValueHandling.Ignore)]
+            public string LastTransferAttemptId { get; set; }
         }
     }
 }

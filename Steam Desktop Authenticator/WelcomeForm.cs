@@ -296,20 +296,16 @@ namespace Steam_Desktop_Authenticator
             }
 
             // Strip any foreign saved-password flags or credential-store references from
-            // imported manifests so imported folders never reference missing or external stores.
-            bool strippedCredentialState = false;
-            if (manifestJson["allow_saved_steam_passwords"] != null)
+            // imported manifests case-insensitively so mixed-case or duplicate variants never survive.
+            List<JProperty> credentialProperties = manifestJson.Properties()
+                .Where(property =>
+                    String.Equals(property.Name, "allow_saved_steam_passwords", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(property.Name, "credentials_store_filename", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (credentialProperties.Count > 0)
             {
-                manifestJson["allow_saved_steam_passwords"] = false;
-                strippedCredentialState = true;
-            }
-            if (manifestJson["credentials_store_filename"] != null)
-            {
-                manifestJson.Remove("credentials_store_filename");
-                strippedCredentialState = true;
-            }
-            if (strippedCredentialState)
-            {
+                foreach (JProperty property in credentialProperties)
+                    property.Remove();
                 File.WriteAllText(manifestPath, manifestJson.ToString(Formatting.None), new UTF8Encoding(false));
             }
         }
