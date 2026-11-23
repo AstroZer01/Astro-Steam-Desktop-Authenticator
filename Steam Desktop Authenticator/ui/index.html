@@ -331,6 +331,16 @@
                             </div>
                         </div>
                     </div>
+                    <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6 space-y-3">
+                        <div>
+                            <h2 class="text-base font-semibold text-on-surface">Backup &amp; Export</h2>
+                            <p class="text-sm text-on-surface-variant mt-1">Export all managed accounts as an SDA-compatible archive. Saved Steam passwords are never included in exports.</p>
+                        </div>
+                        <div class="flex flex-col sm:flex-row gap-2">
+                            <button id="btn-export-all-encrypted" type="button" class="flex-1 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-sm font-medium text-primary hover:bg-primary/20 transition-colors">Export All Accounts (Encrypted .zip)</button>
+                            <button id="btn-export-all-plain" type="button" class="flex-1 rounded-lg border border-white/15 bg-surface-variant px-3 py-2 text-sm font-medium text-on-surface hover:bg-surface-bright transition-colors">Export All Accounts (Plain .zip)</button>
+                        </div>
+                    </div>
                     <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6">
                         <div class="flex items-start gap-3">
                             <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="diagnostic-error-logging-enabled" type="checkbox"/>
@@ -969,6 +979,55 @@
         section.appendChild(btnRow);
     }
 
+    function updateAccountOptionsExportSection(account) {
+        const section = document.getElementById('account-options-export-section');
+        if (!section || !account || !account.steamId) return;
+        section.innerHTML = '';
+        section.classList.remove('hidden');
+
+        const heading = document.createElement('h3');
+        heading.className = 'text-xs font-semibold uppercase tracking-wider text-on-surface-variant';
+        heading.textContent = 'Backup & Secret Export';
+        section.appendChild(heading);
+
+        const note = document.createElement('p');
+        note.className = 'text-xs text-on-surface-variant';
+        note.textContent = 'Export this account for backup or scan its login secret into KeePassXC or Bitwarden. Saved Steam passwords are never exported.';
+        section.appendChild(note);
+
+        const btnRow = document.createElement('div');
+        btnRow.className = 'flex flex-wrap gap-2 pt-1';
+
+        const exportMaBtn = document.createElement('button');
+        exportMaBtn.type = 'button';
+        exportMaBtn.className = 'rounded-lg border border-white/15 bg-surface-variant px-3 py-1.5 text-xs font-medium text-on-surface hover:bg-surface-bright transition-colors';
+        exportMaBtn.textContent = 'Export .maFile';
+        exportMaBtn.onclick = () => {
+            window.chrome.webview.postMessage({ action: 'export_account_file', steamId: account.steamId, format: 'plain_mafile' });
+        };
+        btnRow.appendChild(exportMaBtn);
+
+        const exportZipBtn = document.createElement('button');
+        exportZipBtn.type = 'button';
+        exportZipBtn.className = 'rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 transition-colors';
+        exportZipBtn.textContent = 'Export Encrypted .zip';
+        exportZipBtn.onclick = () => {
+            window.chrome.webview.postMessage({ action: 'export_account_file', steamId: account.steamId, format: 'encrypted_zip' });
+        };
+        btnRow.appendChild(exportZipBtn);
+
+        const qrBtn = document.createElement('button');
+        qrBtn.type = 'button';
+        qrBtn.className = 'rounded-lg border border-secondary/40 bg-secondary-container/20 px-3 py-1.5 text-xs font-medium text-secondary hover:bg-secondary-container/35 transition-colors';
+        qrBtn.textContent = 'Show Secret QR Code';
+        qrBtn.onclick = () => {
+            window.chrome.webview.postMessage({ action: 'open_export_qr', steamId: account.steamId });
+        };
+        btnRow.appendChild(qrBtn);
+
+        section.appendChild(btnRow);
+    }
+
     function openAccountOptionsModal(account) {
         if (!account || !account.steamId) return;
         accountOptionsPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -990,6 +1049,7 @@
         syncAccountOptionsOverrideUI();
         updateAccountOptionsHealthBanner(account);
         updateAccountOptionsPasswordSection(account);
+        updateAccountOptionsExportSection(account);
 
         const modal = document.getElementById('account-options-modal');
         modal.classList.remove('hidden');
@@ -1973,6 +2033,14 @@
     document.getElementById('btn-check-for-updates').addEventListener('click', () => {
         updateCheckState(true, 'Checking for updates…', 'info');
         window.chrome.webview.postMessage({ action: 'check_for_updates' });
+    });
+
+    document.getElementById('btn-export-all-encrypted').addEventListener('click', () => {
+        window.chrome.webview.postMessage({ action: 'export_all_accounts', format: 'encrypted_zip' });
+    });
+
+    document.getElementById('btn-export-all-plain').addEventListener('click', () => {
+        window.chrome.webview.postMessage({ action: 'export_all_accounts', format: 'plain_zip' });
     });
 
     const proxyPassword = document.getElementById('proxy-pass');

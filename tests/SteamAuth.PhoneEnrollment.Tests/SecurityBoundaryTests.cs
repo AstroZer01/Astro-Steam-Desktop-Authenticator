@@ -6,6 +6,7 @@ using Xunit;
 
 namespace SteamAuth.PhoneEnrollment.Tests
 {
+    [Collection("Manifest storage")]
     public sealed class SecurityBoundaryTests
     {
         [Fact]
@@ -77,6 +78,53 @@ namespace SteamAuth.PhoneEnrollment.Tests
             {
                 if (Directory.Exists(stagingDirectory))
                     Directory.Delete(stagingDirectory, true);
+            }
+        }
+
+        [Fact]
+        public void AccountExport_NeverIncludesSavedCredentialStoreEntriesOrPasswords()
+        {
+            string tempData = Path.Combine(Path.GetTempPath(), "asda-sec-export-" + Guid.NewGuid().ToString("N"));
+            string tempOut = Path.Combine(Path.GetTempPath(), "asda-sec-out-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempData);
+            Directory.CreateDirectory(tempOut);
+            string prev = Environment.GetEnvironmentVariable(ApplicationPaths.DataDirectoryEnvironmentVariable);
+            Environment.SetEnvironmentVariable(ApplicationPaths.DataDirectoryEnvironmentVariable, tempData);
+
+            try
+            {
+                var account = new SteamAuth.SteamGuardAccount
+                {
+                    AccountName = "sec_user",
+                    SharedSecret = Convert.ToBase64String(new byte[20]),
+                    IdentitySecret = Convert.ToBase64String(new byte[20]),
+                    RevocationCode = "R11111",
+                    DeviceID = "android:sec",
+                    FullyEnrolled = true,
+                    Session = new SteamAuth.SessionData { SteamID = 76561198000002222UL }
+                };
+
+                string zipPath = Path.Combine(tempOut, "export.zip");
+                AccountExportService.ExportPlainZip(new[] { account }, zipPath, includeSession: false);
+
+                using (var archive = System.IO.Compression.ZipFile.OpenRead(zipPath))
+                {
+                    Assert.DoesNotContain(archive.Entries, entry => entry.FullName.Contains(".asda-cred", StringComparison.OrdinalIgnoreCase));
+                    var manifestEntry = archive.GetEntry("manifest.json");
+                    Assert.NotNull(manifestEntry);
+                    using (var reader = new StreamReader(manifestEntry.Open()))
+                    {
+                        string manifestText = reader.ReadToEnd();
+                        Assert.DoesNotContain("credentials_store_filename", manifestText, StringComparison.OrdinalIgnoreCase);
+                        Assert.DoesNotContain("allow_saved_steam_passwords", manifestText, StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(ApplicationPaths.DataDirectoryEnvironmentVariable, prev);
+                try { if (Directory.Exists(tempData)) Directory.Delete(tempData, true); } catch { }
+                try { if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true); } catch { }
             }
         }
     }

@@ -465,10 +465,10 @@ namespace Steam_Desktop_Authenticator
 
         private bool ShouldAutoConfirmTrade(Confirmation confirmation)
         {
-            return ShouldAutoConfirmTrade(confirmation, (ulong?)null);
+            return ShouldAutoConfirmTradeForAccount(confirmation, null);
         }
 
-        private bool ShouldAutoConfirmTrade(Confirmation confirmation, ulong? steamId)
+        private bool ShouldAutoConfirmTradeForAccount(Confirmation confirmation, ulong? steamId)
         {
             if (confirmation == null || manifest == null)
                 return false;
@@ -498,7 +498,7 @@ namespace Steam_Desktop_Authenticator
 
             for (int i = 0; i < confirmations.Count; i++)
             {
-                if (!ShouldAutoConfirmTrade(confirmations[i], steamId))
+                if (!ShouldAutoConfirmTradeForAccount(confirmations[i], steamId))
                     return false;
             }
 
@@ -2273,7 +2273,7 @@ namespace Steam_Desktop_Authenticator
                 var autoAcceptConfirmations = new List<Confirmation>();
                 foreach (Confirmation confirmation in confirmations)
                 {
-                    if (ShouldAutoConfirmTrade(confirmation, steamId))
+                    if (ShouldAutoConfirmTradeForAccount(confirmation, steamId))
                     {
                         autoAcceptConfirmations.Add(confirmation);
                     }
@@ -5203,6 +5203,267 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private bool VerifyManifestPasskeyForSensitiveAction(string actionDescription)
+        {
+            if (manifest == null || !manifest.Encrypted)
+                return true;
+
+            using (InputForm passForm = new InputForm("Enter your manifest passkey to " + actionDescription + ":", true))
+            {
+                passForm.ShowInputDialog(this);
+                if (passForm.Canceled)
+                    return false;
+
+                if (!manifest.VerifyPasskey(passForm.txtBox.Text))
+                {
+                    AstroMessageBox.Show("Incorrect manifest passkey.", "Verification Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool TryPromptIncludeSession(out bool includeSession)
+        {
+            includeSession = false;
+            DialogResult choice = AstroMessageBox.ShowWithCustomButtons(
+                "Do you want to include active Steam session tokens in this export?\n\n" +
+                "Strip Tokens (Recommended): Keeps SteamID and authenticator secrets only. Importing will ask you to log in to Steam.\n" +
+                "Include Session: Also copies current login tokens for immediate restore.",
+                "Export Session Tokens",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question,
+                "Strip Tokens",
+                "Include Session",
+                "Cancel");
+
+            if (choice == DialogResult.Cancel)
+                return false;
+
+            includeSession = choice == DialogResult.No;
+            return true;
+        }
+
+        private bool TryPromptZipExportPasskey(out string exportPassKey)
+        {
+            exportPassKey = null;
+            if (manifest != null && manifest.Encrypted && !String.IsNullOrEmpty(passKey))
+            {
+                DialogResult useCurrent = AstroMessageBox.ShowWithCustomButtons(
+                    "Encrypt this backup ZIP using your current manifest passkey or choose a different passkey?",
+                    "Encrypted Backup Passkey",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question,
+                    "Use Current Passkey",
+                    "Custom Passkey",
+                    "Cancel");
+
+                if (useCurrent == DialogResult.Cancel)
+                    return false;
+                if (useCurrent == DialogResult.Yes)
+                {
+                    exportPassKey = passKey;
+                    return true;
+                }
+            }
+
+            string first;
+            using (InputForm passForm = new InputForm("Enter a passkey to encrypt this backup ZIP:", true))
+            {
+                passForm.ShowInputDialog(this);
+                if (passForm.Canceled)
+                    return false;
+                first = passForm.txtBox.Text;
+            }
+            if (String.IsNullOrEmpty(first))
+            {
+                AstroMessageBox.Show("A non-empty passkey is required for an encrypted ZIP backup.", "Export Backup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            using (InputForm confirmForm = new InputForm("Confirm the passkey for this backup ZIP:", true))
+            {
+                confirmForm.ShowInputDialog(this);
+                if (confirmForm.Canceled)
+                    return false;
+                if (!String.Equals(first, confirmForm.txtBox.Text, StringComparison.Ordinal))
+                {
+                    AstroMessageBox.Show("The passkeys did not match.", "Export Backup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return false;
+                }
+            }
+
+            exportPassKey = first;
+            return true;
+        }
+
+        private void ExportSingleAccountFile(ulong steamId, string format)
+        {
+            SteamGuardAccount target = FindLoadedAccountBySteamId(allAccounts, steamId);
+            if (target == null)
+            {
+                AstroMessageBox.Show("That account is no longer managed by this app.", "Export Account", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!VerifyManifestPasskeyForSensitiveAction("export account secrets for " + target.AccountName))
+                return;
+
+            if (format == "plain_mafile")
+            {
+                DialogResult warn = AstroMessageBox.Show(
+                    "Exporting a plain .maFile writes your unencrypted authenticator secrets (shared_secret, identity_secret, and revocation_code) to disk.\n\nSaved Steam passwords are never included. Continue?",
+                    "Plaintext Export Warning",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+                if (warn != DialogResult.Yes)
+                    return;
+
+                if (!TryPromptIncludeSession(out bool includeSession))
+                    return;
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Filter = "Steam Authenticator File (*.maFile)|*.maFile";
+                    sfd.FileName = AccountExportService.SanitizeExportFilename(target.AccountName, steamId, extension: ".maFile");
+                    if (sfd.ShowDialog(this) != DialogResult.OK)
+                        return;
+
+                    try
+                    {
+                        AccountExportService.ExportPlainMaFile(target, sfd.FileName, includeSession);
+                        AstroMessageBox.Show("Account exported to:\n" + sfd.FileName, "Export Account", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Account export", ex, "Could not export account .maFile.");
+                        AstroMessageBox.Show(ex.Message, "Export Account", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                return;
+            }
+
+            if (format == "encrypted_zip")
+            {
+                if (!TryPromptIncludeSession(out bool includeSession))
+                    return;
+                if (!TryPromptZipExportPasskey(out string exportPassKey))
+                    return;
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Filter = "Encrypted Backup ZIP (*.zip)|*.zip";
+                    sfd.FileName = AccountExportService.SanitizeExportFilename(target.AccountName + "_backup", steamId, extension: ".zip");
+                    if (sfd.ShowDialog(this) != DialogResult.OK)
+                        return;
+
+                    try
+                    {
+                        AccountExportService.ExportEncryptedZip(new[] { target }, sfd.FileName, exportPassKey, includeSession);
+                        AstroMessageBox.Show("Encrypted SDA backup saved to:\n" + sfd.FileName, "Export Account", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Account export", ex, "Could not export encrypted account backup ZIP.");
+                        AstroMessageBox.Show(ex.Message, "Export Account", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+        }
+
+        private void ExportAllAccountsArchive(string format)
+        {
+            SteamGuardAccount[] snapshot = allAccounts ?? Array.Empty<SteamGuardAccount>();
+            if (snapshot.Length == 0)
+            {
+                AstroMessageBox.Show("There are no managed accounts to export.", "Export All Accounts", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (!VerifyManifestPasskeyForSensitiveAction("export all managed accounts"))
+                return;
+
+            if (format == "plain_zip")
+            {
+                DialogResult warn = AstroMessageBox.Show(
+                    "Exporting an unencrypted ZIP writes plaintext authenticator secrets (shared_secret, identity_secret, and revocation_code) for all " + snapshot.Length + " account(s).\n\nSaved Steam passwords are never included. Continue?",
+                    "Plaintext Bulk Export Warning",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+                if (warn != DialogResult.Yes)
+                    return;
+
+                if (!TryPromptIncludeSession(out bool includeSession))
+                    return;
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Filter = "Backup Archive (*.zip)|*.zip";
+                    sfd.FileName = "AstroSDA_accounts_plain_" + DateTime.Now.ToString("yyyyMMdd_HHmm", CultureInfo.InvariantCulture) + ".zip";
+                    if (sfd.ShowDialog(this) != DialogResult.OK)
+                        return;
+
+                    try
+                    {
+                        AccountExportService.ExportPlainZip(snapshot, sfd.FileName, includeSession);
+                        AstroMessageBox.Show("Exported " + snapshot.Length + " account(s) to:\n" + sfd.FileName, "Export All Accounts", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Bulk account export", ex, "Could not export plain account archive.");
+                        AstroMessageBox.Show(ex.Message, "Export All Accounts", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                return;
+            }
+
+            if (format == "encrypted_zip")
+            {
+                if (!TryPromptIncludeSession(out bool includeSession))
+                    return;
+                if (!TryPromptZipExportPasskey(out string exportPassKey))
+                    return;
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Filter = "Encrypted Backup ZIP (*.zip)|*.zip";
+                    sfd.FileName = "AstroSDA_accounts_encrypted_" + DateTime.Now.ToString("yyyyMMdd_HHmm", CultureInfo.InvariantCulture) + ".zip";
+                    if (sfd.ShowDialog(this) != DialogResult.OK)
+                        return;
+
+                    try
+                    {
+                        AccountExportService.ExportEncryptedZip(snapshot, sfd.FileName, exportPassKey, includeSession);
+                        AstroMessageBox.Show("Encrypted backup of " + snapshot.Length + " account(s) saved to:\n" + sfd.FileName, "Export All Accounts", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Bulk account export", ex, "Could not export encrypted account archive.");
+                        AstroMessageBox.Show(ex.Message, "Export All Accounts", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+        }
+
+        private void OpenSecretQrDialog(ulong steamId)
+        {
+            SteamGuardAccount target = FindLoadedAccountBySteamId(allAccounts, steamId);
+            if (target == null)
+            {
+                AstroMessageBox.Show("That account is no longer managed by this app.", "Export Secret QR", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!VerifyManifestPasskeyForSensitiveAction("view the secret QR code for " + target.AccountName))
+                return;
+
+            using (ExportQrForm qrForm = new ExportQrForm(target))
+            {
+                qrForm.ShowDialog(this);
+            }
+        }
+
         private async void CoreWebView2_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             string message = e.WebMessageAsJson;
@@ -5341,6 +5602,34 @@ namespace Steam_Desktop_Authenticator
                     steamId != 0)
                 {
                     TryBeginInvoke(() => RemoveAccountSavedPassword(steamId));
+                }
+            }
+            else if (action == "export_account_file")
+            {
+                if (TryGetWebMessageString(payload, "steamId", 32, out string steamIdText, required: true) &&
+                    ulong.TryParse(steamIdText, NumberStyles.None, CultureInfo.InvariantCulture, out ulong steamId) &&
+                    steamId != 0 &&
+                    TryGetWebMessageString(payload, "format", 32, out string format, required: true) &&
+                    (format == "plain_mafile" || format == "encrypted_zip"))
+                {
+                    TryBeginInvoke(() => ExportSingleAccountFile(steamId, format));
+                }
+            }
+            else if (action == "export_all_accounts")
+            {
+                if (TryGetWebMessageString(payload, "format", 32, out string format, required: true) &&
+                    (format == "encrypted_zip" || format == "plain_zip"))
+                {
+                    TryBeginInvoke(() => ExportAllAccountsArchive(format));
+                }
+            }
+            else if (action == "open_export_qr")
+            {
+                if (TryGetWebMessageString(payload, "steamId", 32, out string steamIdText, required: true) &&
+                    ulong.TryParse(steamIdText, NumberStyles.None, CultureInfo.InvariantCulture, out ulong steamId) &&
+                    steamId != 0)
+                {
+                    TryBeginInvoke(() => OpenSecretQrDialog(steamId));
                 }
             }
             else if (action == "test_proxy")

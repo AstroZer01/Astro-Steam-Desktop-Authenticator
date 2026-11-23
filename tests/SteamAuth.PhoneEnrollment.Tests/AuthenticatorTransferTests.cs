@@ -14,7 +14,7 @@ using Xunit;
 
 namespace SteamAuth.PhoneEnrollment.Tests
 {
-    [Collection("ManifestStorage")]
+    [Collection("Manifest storage")]
     public sealed class AuthenticatorTransferTests : IDisposable
     {
         private readonly string tempDir;
