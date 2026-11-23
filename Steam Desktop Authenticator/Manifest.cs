@@ -1758,12 +1758,22 @@ namespace Steam_Desktop_Authenticator
                     using (StringReader stringReader = new StringReader(journalText))
                     using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = storageJsonSettings.MaxDepth, DateParseHandling = DateParseHandling.None })
                     {
-                        journalJson = JObject.Load(jsonReader);
+                        journalJson = JObject.Load(jsonReader, new JsonLoadSettings
+                        {
+                            DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error
+                        });
+                        if (jsonReader.Read())
+                            throw new InvalidDataException("The pending storage journal contains unexpected trailing content.");
                     }
 
-                    JProperty versionProperty = journalJson.Property("journal_version", StringComparison.OrdinalIgnoreCase);
-                    if (versionProperty != null && versionProperty.Value.Type != JTokenType.Integer)
+                    List<JProperty> versionProperties = journalJson.Properties()
+                        .Where(property => String.Equals(property.Name, "journal_version", StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                    if (versionProperties.Count > 1 ||
+                        (versionProperties.Count == 1 && versionProperties[0].Value.Type != JTokenType.Integer))
+                    {
                         throw new InvalidDataException("The pending storage journal version is invalid.");
+                    }
 
                     StorageTransactionJournal journal = journalJson.ToObject<StorageTransactionJournal>(JsonSerializer.Create(storageJsonSettings));
                     if (journal == null || String.IsNullOrWhiteSpace(journal.ManifestHash))
@@ -2154,8 +2164,12 @@ namespace Steam_Desktop_Authenticator
         private static string ToNativeWindowsPath(string path)
         {
             string fullPath = Path.GetFullPath(path);
-            if (fullPath.Length < 248 || fullPath.StartsWith(@"\\?\", StringComparison.Ordinal))
+            if (fullPath.Length < 248 ||
+                fullPath.StartsWith(@"\\?\", StringComparison.Ordinal) ||
+                fullPath.StartsWith(@"\\.\", StringComparison.Ordinal))
+            {
                 return fullPath;
+            }
             if (fullPath.StartsWith(@"\\", StringComparison.Ordinal))
                 return @"\\?\UNC\" + fullPath.Substring(2);
             return @"\\?\" + fullPath;
@@ -2230,7 +2244,8 @@ namespace Steam_Desktop_Authenticator
                 {
                     if (File.Exists(backupPath))
                     {
-                        if (File.Exists(targetPath))
+                        bool replaceExistingTarget = File.Exists(targetPath);
+                        if (replaceExistingTarget)
                         {
                             string targetHash = GetFileBytesHash(targetPath);
                             if (String.Equals(targetHash, record.OriginalHash, StringComparison.Ordinal))
@@ -2251,7 +2266,7 @@ namespace Steam_Desktop_Authenticator
                             throw new InvalidDataException("The target authenticator path is not a regular file.");
                         }
 
-                        RestoreFileBytesAtomically(backupPath, targetPath, record.OriginalHash);
+                        RestoreFileBytesAtomically(backupPath, targetPath, record.OriginalHash, replaceExistingTarget);
                     }
                     else
                     {
@@ -2511,7 +2526,7 @@ namespace Steam_Desktop_Authenticator
             return exception.HResult == ErrorInvalidFunction || exception.HResult == ErrorNotSupported;
         }
 
-        private static void RestoreFileBytesAtomically(string sourcePath, string destinationPath, string expectedSourceHash)
+        private static void RestoreFileBytesAtomically(string sourcePath, string destinationPath, string expectedSourceHash, bool replaceExisting)
         {
             FileInfo sourceInfo = new FileInfo(sourcePath);
             if (!sourceInfo.Exists)
@@ -2519,14 +2534,16 @@ namespace Steam_Desktop_Authenticator
             if ((sourceInfo.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidDataException("A storage backup file uses an unsupported link.");
 
-            if (File.Exists(destinationPath))
+            if (replaceExisting)
             {
+                if (!File.Exists(destinationPath))
+                    throw new FileNotFoundException("The destination authenticator file no longer exists for replacement.", destinationPath);
                 if ((File.GetAttributes(destinationPath) & FileAttributes.ReparsePoint) != 0)
                     throw new InvalidDataException("A storage file uses an unsupported link.");
             }
             else if (Path.Exists(destinationPath))
             {
-                throw new InvalidDataException("The destination authenticator path is not a regular file.");
+                throw new IOException("The destination authenticator path is already occupied.");
             }
 
             string temporaryFilename = destinationPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -2552,7 +2569,7 @@ namespace Steam_Desktop_Authenticator
                 if (!String.Equals(copiedHash, expectedSourceHash, StringComparison.Ordinal))
                     throw new InvalidDataException("A replaced authenticator backup did not match the expected original file hash.");
 
-                if (File.Exists(destinationPath))
+                if (replaceExisting)
                     ReplaceFileAtomically(temporaryFilename, destinationPath, null);
                 else
                     File.Move(temporaryFilename, destinationPath);
