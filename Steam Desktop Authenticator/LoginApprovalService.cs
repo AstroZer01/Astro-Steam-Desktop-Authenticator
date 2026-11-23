@@ -44,6 +44,7 @@ namespace Steam_Desktop_Authenticator
         public string DeviceName { get; set; }
         public string RequestedPersistence { get; set; }
         public string SecurityHistory { get; set; }
+        public bool IsNewLogin { get; set; }
         public bool LocationMismatch { get; set; }
         public bool HighUsageLogin { get; set; }
     }
@@ -275,6 +276,7 @@ namespace Steam_Desktop_Authenticator
                 DeviceName = ValidateResponseText(details.DeviceFriendlyName, MaximumLoginTextLength, "device name"),
                 RequestedPersistence = PersistenceName((int)details.RequestedPersistence),
                 SecurityHistory = SecurityHistoryName((int)details.LoginHistory),
+                IsNewLogin = details.LoginHistory == EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory,
                 LocationMismatch = details.RequestorLocationMismatch,
                 HighUsageLogin = details.HighUsageLogin
             };
