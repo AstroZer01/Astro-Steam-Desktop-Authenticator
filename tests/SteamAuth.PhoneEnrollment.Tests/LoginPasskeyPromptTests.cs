@@ -1465,6 +1465,211 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Contains("Complete Steam activation to use QR login", html);
             Assert.Contains("const canCopy = hasAccounts && !currentAccPending;", html);
             Assert.Contains("const canUnlinkSteamGuard = Boolean(account.steamId) && !Boolean(account.pendingActivation);", html);
+            Assert.Contains("document.getElementById('account-title').innerText = \"Account: ...\";", html);
+            Assert.Contains("updateToken(\"\");", html);
+        }
+
+        private sealed class FakeStatusTransport : IAuthenticatorProtocolTransport
+        {
+            private readonly Func<string, string, object, SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>> handler;
+
+            public FakeStatusTransport(Func<string, string, object, SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>> handler)
+            {
+                this.handler = handler;
+            }
+
+            public Task<SteamProtocolResponse<TResponse>> SendAsync<TRequest, TResponse>(
+                string service,
+                string method,
+                TRequest request,
+                string accessToken,
+                Google.Protobuf.MessageParser<TResponse> responseParser,
+                SteamProtocolRequestMethod requestMethod = SteamProtocolRequestMethod.Post,
+                CancellationToken cancellationToken = default)
+                where TRequest : class, Google.Protobuf.IMessage<TRequest>
+                where TResponse : class, Google.Protobuf.IMessage<TResponse>
+            {
+                SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response> response = handler(service, method, request);
+                return Task.FromResult(new SteamProtocolResponse<TResponse>
+                {
+                    Result = response.Result,
+                    Body = (TResponse)(object)response.Body,
+                    ErrorMessage = response.ErrorMessage
+                });
+            }
+        }
+
+        [Fact]
+        public async Task VerifyAuthenticatorActivationAsync_ValidatesSteamStateAndIdentityMatch()
+        {
+            SteamGuardAccount account = CreateAccount(76561198000001012UL, "verify-activation-user");
+            account.TokenGID = "gid-local-123";
+            account.DeviceID = "android:11111111-1111-1111-1111-111111111111";
+            account.FullyEnrolled = false;
+
+            // Matching active Steam authenticator confirms this record.
+            var matchingTransport = new FakeStatusTransport((_, _, _) =>
+                new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+                {
+                    Result = 1,
+                    Body = new SteamAuth.Protocol.CTwoFactor_Status_Response
+                    {
+                        State = 1,
+                        TokenGid = "gid-local-123",
+                        DeviceIdentifier = "android:11111111-1111-1111-1111-111111111111"
+                    }
+                });
+            Assert.Equal(
+                AuthenticatorActivationStatus.ActiveForThisRecord,
+                await account.VerifyAuthenticatorActivationAsync(matchingTransport));
+
+            // Inactive Steam state keeps record genuinely pending.
+            var inactiveTransport = new FakeStatusTransport((_, _, _) =>
+                new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+                {
+                    Result = 1,
+                    Body = new SteamAuth.Protocol.CTwoFactor_Status_Response { State = 0 }
+                });
+            Assert.Equal(
+                AuthenticatorActivationStatus.NotActive,
+                await account.VerifyAuthenticatorActivationAsync(inactiveTransport));
+
+            // Mismatched token_gid prevents falsely promoting an unfinalized local record.
+            var mismatchedGidTransport = new FakeStatusTransport((_, _, _) =>
+                new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+                {
+                    Result = 1,
+                    Body = new SteamAuth.Protocol.CTwoFactor_Status_Response
+                    {
+                        State = 1,
+                        TokenGid = "gid-other-999",
+                        DeviceIdentifier = "android:11111111-1111-1111-1111-111111111111"
+                    }
+                });
+            Assert.Equal(
+                AuthenticatorActivationStatus.ActiveForDifferentAuthenticator,
+                await account.VerifyAuthenticatorActivationAsync(mismatchedGidTransport));
+
+            // Active Steam response with no corroborating token_gid or device_identifier fails closed as Unverified.
+            var uncorroboratedTransport = new FakeStatusTransport((_, _, _) =>
+                new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+                {
+                    Result = 1,
+                    Body = new SteamAuth.Protocol.CTwoFactor_Status_Response { State = 1 }
+                });
+            Assert.Equal(
+                AuthenticatorActivationStatus.Unverified,
+                await account.VerifyAuthenticatorActivationAsync(uncorroboratedTransport));
+
+            // Missing access token reports SessionInvalid.
+            account.Session.AccessToken = string.Empty;
+            Assert.Equal(
+                AuthenticatorActivationStatus.SessionInvalid,
+                await account.VerifyAuthenticatorActivationAsync(matchingTransport));
+        }
+
+        [Fact]
+        public async Task TryRecoverPendingAccountActivationAsync_PromotesOnlyWhenVerifiedAndDurablySaved()
+        {
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001013UL, "startup-pending-user");
+            pendingAccount.FullyEnrolled = false;
+
+            // Not active on Steam -> stays pending and does not persist.
+            bool persisted = false;
+            bool recoveredWhenNotActive = await MainForm.TryRecoverPendingAccountActivationAsync(
+                pendingAccount,
+                _ => Task.FromResult(AuthenticatorActivationStatus.NotActive),
+                _ => { persisted = true; return true; },
+                CancellationToken.None);
+            Assert.False(recoveredWhenNotActive);
+            Assert.False(persisted);
+            Assert.False(pendingAccount.FullyEnrolled);
+
+            // Verified active on Steam, but durable save fails -> reverts FullyEnrolled back to false.
+            bool recoveredWhenSaveFails = await MainForm.TryRecoverPendingAccountActivationAsync(
+                pendingAccount,
+                _ => Task.FromResult(AuthenticatorActivationStatus.ActiveForThisRecord),
+                _ => false,
+                CancellationToken.None);
+            Assert.False(recoveredWhenSaveFails);
+            Assert.False(pendingAccount.FullyEnrolled);
+
+            // Verified active on Steam and durable save succeeds -> promoted to FullyEnrolled.
+            bool recoveredWhenSaveSucceeds = await MainForm.TryRecoverPendingAccountActivationAsync(
+                pendingAccount,
+                _ => Task.FromResult(AuthenticatorActivationStatus.ActiveForThisRecord),
+                account => account.FullyEnrolled,
+                CancellationToken.None);
+            Assert.True(recoveredWhenSaveSucceeds);
+            Assert.True(pendingAccount.FullyEnrolled);
+        }
+
+        [Fact]
+        public async Task TryRecoverExistingPendingAuthenticatorAsync_RecoversVerifiedPendingRecordAndPersistsEnrolledState()
+        {
+            const string passKey = "recovery-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001014UL, "pending-recovery-user");
+            pendingAccount.TokenGID = "gid-recover-1";
+            pendingAccount.FullyEnrolled = false;
+            Assert.True(manifest.SaveAccount(pendingAccount, encrypt: true, passKey: passKey).Succeeded);
+
+            SessionData freshSession = new SessionData
+            {
+                SteamID = 76561198000001014UL,
+                AccessToken = "fresh-access-token",
+                RefreshToken = "fresh-refresh-token"
+            };
+
+            // When Steam reports a different authenticator, the pending record remains unpromoted.
+            LoginForm.PendingAuthenticatorRecoveryResult unconfirmed = await LoginForm.TryRecoverExistingPendingAuthenticatorAsync(
+                manifest,
+                freshSession,
+                passKey,
+                (_, _) => Task.FromResult(AuthenticatorActivationStatus.ActiveForDifferentAuthenticator),
+                CancellationToken.None);
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.NotConfirmed, unconfirmed.Status);
+            SteamGuardAccount stillPending = Assert.Single(manifest.GetAllAccounts(passKey));
+            Assert.False(stillPending.FullyEnrolled);
+            Assert.Equal("test-access-token", stillPending.Session.AccessToken);
+
+            // When Steam confirms this record is active, it is durably saved with FullyEnrolled = true and the fresh session.
+            LoginForm.PendingAuthenticatorRecoveryResult recovered = await LoginForm.TryRecoverExistingPendingAuthenticatorAsync(
+                manifest,
+                freshSession,
+                passKey,
+                (candidate, _) =>
+                {
+                    Assert.Same(freshSession, candidate.Session);
+                    return Task.FromResult(AuthenticatorActivationStatus.ActiveForThisRecord);
+                },
+                CancellationToken.None);
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.Recovered, recovered.Status);
+
+            SteamGuardAccount reloaded = Assert.Single(manifest.GetAllAccounts(passKey));
+            Assert.True(reloaded.FullyEnrolled);
+            Assert.Equal("fresh-access-token", reloaded.Session.AccessToken);
+            Assert.Equal(5, MainForm.GetDisplayLoginToken(reloaded, 1700000000L).Length);
+        }
+
+        [Fact]
+        public void PendingAccountWithExpiredRefreshToken_DoesNotRequireSessionRenewalOrPersistRenewalFlag()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001015UL, "expired-pending-user");
+            pendingAccount.FullyEnrolled = false;
+            pendingAccount.Session.RefreshToken = "not-a-valid-jwt";
+            Assert.True(pendingAccount.Session.IsRefreshTokenExpired());
+            Assert.True(manifest.SaveAccount(pendingAccount, encrypt: false, passKey: null).Succeeded);
+
+            using (MainForm form = new MainForm(manifest, null, null, null))
+            {
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, new[] { pendingAccount });
+
+                Assert.False(form.IsSessionRenewalRequired(pendingAccount));
+                InvokePrivateMethod(form, "PersistExpiredRefreshTokenStates");
+                Assert.False(manifest.IsSessionMarkedForRenewal(pendingAccount.Session.SteamID));
+            }
         }
 
         [Fact]

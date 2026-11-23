@@ -714,13 +714,67 @@ namespace Steam_Desktop_Authenticator
             startupAccountMaintenanceFinished = true;
         }
 
+        internal static async Task<bool> TryRecoverPendingAccountActivationAsync(
+            SteamGuardAccount pendingAccount,
+            Func<CancellationToken, Task<AuthenticatorActivationStatus>> verifyActivationAsync,
+            Func<SteamGuardAccount, bool> persistActivatedAccount,
+            CancellationToken cancellationToken)
+        {
+            if (pendingAccount == null || pendingAccount.FullyEnrolled ||
+                verifyActivationAsync == null || persistActivatedAccount == null)
+                return false;
+
+            AuthenticatorActivationStatus status = await verifyActivationAsync(cancellationToken);
+            if (status != AuthenticatorActivationStatus.ActiveForThisRecord)
+                return false;
+
+            pendingAccount.FullyEnrolled = true;
+            if (!persistActivatedAccount(pendingAccount))
+            {
+                pendingAccount.FullyEnrolled = false;
+                return false;
+            }
+
+            return true;
+        }
+
         private async Task ValidateStartupSessionsAsync()
         {
             SteamGuardAccount[] accounts = allAccounts ?? Array.Empty<SteamGuardAccount>();
             foreach (SteamGuardAccount account in accounts)
             {
-                if (account?.Session == null || IsPendingEnrollment(account))
+                if (account?.Session == null)
                     continue;
+
+                if (IsPendingEnrollment(account))
+                {
+                    if (account.Session.IsRefreshTokenExpired())
+                        continue;
+
+                    try
+                    {
+                        await RunSteamAccountOperationAsync(account, async () =>
+                        {
+                            if (account.Session.IsAccessTokenExpired())
+                                await RefreshAndPersistAccessTokenAsync(account, lifetimeCancellationSource.Token);
+
+                            return await TryRecoverPendingAccountActivationAsync(
+                                account,
+                                ct => account.VerifyAuthenticatorActivationAsync(ct),
+                                activated => manifest.SaveAccount(activated, manifest.Encrypted, passKey).Succeeded,
+                                lifetimeCancellationSource.Token);
+                        }, lifetimeCancellationSource.Token);
+                    }
+                    catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Authenticator startup recovery", ex, "A pending authenticator activation check could not be completed during startup.");
+                    }
+                    continue;
+                }
 
                 SessionData sessionAtValidationStart = account.Session;
                 if (sessionAtValidationStart.IsRefreshTokenExpired())
@@ -765,7 +819,7 @@ namespace Steam_Desktop_Authenticator
             SteamGuardAccount[] accounts = allAccounts ?? Array.Empty<SteamGuardAccount>();
             foreach (SteamGuardAccount startupAccount in accounts)
             {
-                if (startupAccount?.Session == null)
+                if (startupAccount?.Session == null || IsPendingEnrollment(startupAccount))
                     continue;
 
                 ulong steamId = startupAccount.Session.SteamID;
@@ -1282,6 +1336,11 @@ namespace Steam_Desktop_Authenticator
         private async void menuDeactivateAuthenticator_Click(object sender, EventArgs e)
         {
             SteamGuardAccount accountAtStart = currentAccount;
+            if (IsPendingEnrollment(accountAtStart))
+            {
+                AstroMessageBox.Show("This authenticator is still pending Steam activation and cannot be unlinked from Steam yet.", "Deactivate Authenticator", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             if (!IsSessionAvailableForAccountOperations(accountAtStart))
             {
                 AstroMessageBox.Show("Renew this account's session before removing Steam Guard.", "Deactivate Authenticator", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1453,6 +1512,12 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
+            bool isPendingAccount = IsPendingEnrollment(account);
+            if (removeSteamGuard && isPendingAccount)
+            {
+                AstroMessageBox.Show("This authenticator is still pending Steam activation and cannot be unlinked from Steam yet. You can still remove only its local data.", "Remove Steam Guard", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             if (removeSteamGuard && account.Session == null)
             {
                 AstroMessageBox.Show("Steam Guard cannot be removed because this local account does not have a saved Steam session. You can still remove it from this app.", "Remove Steam Guard", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -1465,7 +1530,9 @@ namespace Steam_Desktop_Authenticator
             }
             string confirmationText = removeSteamGuard
                 ? "This will permanently remove Steam Guard from " + account.AccountName + ", then delete this account's local maFile and manifest entry. This decision is final. Continue?"
-                : "This will permanently delete only " + account.AccountName + "'s local maFile and manifest entry. Steam Guard will remain enabled on the Steam account. This decision is final. Continue?";
+                : isPendingAccount
+                    ? "This will permanently delete " + account.AccountName + "'s pending local maFile, saved recovery code record, and manifest entry. Make sure you have backed up your recovery code before continuing. Continue?"
+                    : "This will permanently delete only " + account.AccountName + "'s local maFile and manifest entry. Steam Guard will remain enabled on the Steam account. This decision is final. Continue?";
             DialogResult confirmation = AstroMessageBox.Show(
                 confirmationText,
                 removeSteamGuard ? "Remove Steam Guard" : "Remove Account from App",
@@ -1588,6 +1655,8 @@ namespace Steam_Desktop_Authenticator
                     ? "Steam Guard was removed and this account's local data was deleted."
                     : steamGuardRemovalStatusUnknown
                     ? "This account's local data was deleted. The app could not verify whether Steam Guard was removed; check the account on Steam."
+                    : isPendingAccount
+                    ? "This pending account's local data was deleted."
                     : "This account's local data was deleted. Steam Guard remains enabled on Steam.",
                 steamGuardWasRemoved ? "Steam Guard Removed" : "Account Removed",
                 MessageBoxButtons.OK,
@@ -2211,8 +2280,10 @@ namespace Steam_Desktop_Authenticator
             return saveResult.Succeeded;
         }
 
-        private bool IsSessionRenewalRequired(SteamGuardAccount account)
+        internal bool IsSessionRenewalRequired(SteamGuardAccount account)
         {
+            if (IsPendingEnrollment(account))
+                return false;
             if (account?.Session == null || account.Session.SteamID == 0)
                 return true;
 
@@ -2310,7 +2381,7 @@ namespace Steam_Desktop_Authenticator
 
         private void MarkSessionRenewalRequired(SteamGuardAccount account, string reason, SessionData expectedSession = null)
         {
-            if (account == null)
+            if (account == null || IsPendingEnrollment(account))
                 return;
 
             // A failed operation may complete after the account list has been
@@ -2377,6 +2448,8 @@ namespace Steam_Desktop_Authenticator
         {
             foreach (SteamGuardAccount account in allAccounts ?? Array.Empty<SteamGuardAccount>())
             {
+                if (IsPendingEnrollment(account))
+                    continue;
                 SessionData session = account?.Session;
                 if (session != null && session.IsRefreshTokenExpired())
                     MarkSessionRenewalRequired(account, "The refresh token is expired or malformed.", session);
@@ -3299,7 +3372,7 @@ namespace Steam_Desktop_Authenticator
             }
             bool hasAccounts = allAccounts.Length > 0;
             bool canCopyCurrentAccount = hasAccounts && !IsPendingEnrollment(currentAccount);
-            menuDeactivateAuthenticator.Enabled = btnTradeConfirmations.Enabled = hasAccounts;
+            btnTradeConfirmations.Enabled = hasAccounts;
             btnCopy.Enabled = canCopyCurrentAccount;
             menuDeactivateAuthenticator.Enabled = hasAccounts && IsSessionAvailableForAccountOperations(currentAccount);
             btnLoginViaQr.Enabled = hasAccounts && IsSessionAvailableForAccountOperations(currentAccount);

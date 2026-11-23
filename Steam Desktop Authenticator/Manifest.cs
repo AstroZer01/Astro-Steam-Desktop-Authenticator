@@ -1111,7 +1111,7 @@ namespace Steam_Desktop_Authenticator
                     IV = iV,
                     Salt = salt,
                     Filename = filename,
-                    SessionNeedsRenewal = account.Session.IsRefreshTokenExpired()
+                    SessionNeedsRenewal = account.FullyEnrolled && account.Session.IsRefreshTokenExpired()
                 };
                 if (previousEntry == null)
                 {

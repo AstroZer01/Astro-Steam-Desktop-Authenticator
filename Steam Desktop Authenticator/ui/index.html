@@ -634,6 +634,8 @@
             currentAccSteamId = "";
             currentAccExpired = false;
             currentAccPending = false;
+            document.getElementById('account-title').innerText = "Account: ...";
+            updateToken("");
         }
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         

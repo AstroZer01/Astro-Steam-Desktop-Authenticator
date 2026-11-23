@@ -13,6 +13,15 @@ using System.Threading.Tasks;
 
 namespace SteamAuth
 {
+    public enum AuthenticatorActivationStatus
+    {
+        ActiveForThisRecord,
+        NotActive,
+        ActiveForDifferentAuthenticator,
+        SessionInvalid,
+        Unverified
+    }
+
     public class SteamGuardAccount
     {
         [JsonProperty("shared_secret")]
@@ -161,6 +170,87 @@ namespace SteamAuth
                 SteamAuthDiagnostics.Log(ex, "Steam Guard removal request failed.");
                 LastAuthenticatorOperationError = "Steam Guard removal could not be completed. Check your connection and try again.";
                 return false;
+            }
+        }
+
+        public Task<AuthenticatorActivationStatus> VerifyAuthenticatorActivationAsync(CancellationToken cancellationToken = default)
+        {
+            return VerifyAuthenticatorActivationAsync(new SteamProtobufAuthenticatorTransport(), cancellationToken);
+        }
+
+        internal async Task<AuthenticatorActivationStatus> VerifyAuthenticatorActivationAsync(
+            IAuthenticatorProtocolTransport transport,
+            CancellationToken cancellationToken = default)
+        {
+            if (transport == null)
+                throw new ArgumentNullException(nameof(transport));
+            if (Session == null || Session.SteamID == 0 || String.IsNullOrWhiteSpace(Session.AccessToken))
+                return AuthenticatorActivationStatus.SessionInvalid;
+
+            try
+            {
+                SteamProtocolResponse<CTwoFactor_Status_Response> response = await transport.SendAsync(
+                    "ITwoFactorService",
+                    "QueryStatus",
+                    new CTwoFactor_Status_Request { Steamid = Session.SteamID },
+                    Session.AccessToken,
+                    CTwoFactor_Status_Response.Parser,
+                    cancellationToken: cancellationToken);
+
+                if (response == null)
+                    return AuthenticatorActivationStatus.Unverified;
+
+                if (response.Result != 1)
+                {
+                    SteamSessionFailureKind failureKind = SteamSessionFailureClassifier.ClassifyResult(
+                        response.Result,
+                        expiredResultInvalidatesSession: true);
+                    return failureKind == SteamSessionFailureKind.InvalidSession
+                        ? AuthenticatorActivationStatus.SessionInvalid
+                        : AuthenticatorActivationStatus.Unverified;
+                }
+
+                if (response.Body == null)
+                    return AuthenticatorActivationStatus.Unverified;
+
+                if (response.Body.State == 0)
+                    return AuthenticatorActivationStatus.NotActive;
+
+                bool hasLocalTokenGid = !String.IsNullOrWhiteSpace(TokenGID);
+                bool hasRemoteTokenGid = !String.IsNullOrWhiteSpace(response.Body.TokenGid);
+                if (hasLocalTokenGid && hasRemoteTokenGid &&
+                    !String.Equals(TokenGID.Trim(), response.Body.TokenGid.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return AuthenticatorActivationStatus.ActiveForDifferentAuthenticator;
+                }
+
+                bool hasLocalDeviceId = !String.IsNullOrWhiteSpace(DeviceID);
+                bool hasRemoteDeviceId = !String.IsNullOrWhiteSpace(response.Body.DeviceIdentifier);
+                if (hasLocalDeviceId && hasRemoteDeviceId &&
+                    !String.Equals(DeviceID.Trim(), response.Body.DeviceIdentifier.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return AuthenticatorActivationStatus.ActiveForDifferentAuthenticator;
+                }
+
+                bool corroboratedByTokenGid = hasLocalTokenGid && hasRemoteTokenGid;
+                bool corroboratedByDeviceId = hasLocalDeviceId && hasRemoteDeviceId;
+                if (!corroboratedByTokenGid && !corroboratedByDeviceId)
+                    return AuthenticatorActivationStatus.Unverified;
+
+                return AuthenticatorActivationStatus.ActiveForThisRecord;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (SteamWebRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                return AuthenticatorActivationStatus.SessionInvalid;
+            }
+            catch (Exception ex)
+            {
+                SteamAuthDiagnostics.Log(ex, "Steam authenticator activation status check failed.");
+                return AuthenticatorActivationStatus.Unverified;
             }
         }
 
