@@ -1966,7 +1966,7 @@ namespace Steam_Desktop_Authenticator
                             bool allowAdditionalIp = !String.IsNullOrWhiteSpace(manifest.LoginActionAutoAllowIp) &&
                                 AreSameIpv4Address(request.IPAddress, manifest.LoginActionAutoAllowIp);
                             bool allowCurrentDeviceIp = false;
-                            if (manifest.LoginActionAutoAllowCurrentDeviceIp)
+                            if (!allowAdditionalIp && manifest.LoginActionAutoAllowCurrentDeviceIp && IsValidIpv4Address(request.IPAddress))
                             {
                                 if (!currentDeviceIpChecked)
                                 {
@@ -2675,26 +2675,80 @@ namespace Steam_Desktop_Authenticator
                 IPAddress.Parse(first).Equals(IPAddress.Parse(second));
         }
 
-        private static async Task<string> GetCurrentPublicIpv4Async(CancellationToken cancellationToken = default)
+        private const int MaximumPublicIpResponseBytes = 256;
+        private static readonly TimeSpan PublicIpLookupTimeout = TimeSpan.FromSeconds(5);
+
+        internal static async Task<string> GetCurrentPublicIpv4Async(CancellationToken cancellationToken = default)
         {
             try
             {
-                using (var client = ProxyService.CreateActiveHttpClient())
+                using (ProxyService.ActiveHttpClientLease clientLease = ProxyService.AcquireActiveHttpClient())
                 {
-                    client.Timeout = TimeSpan.FromSeconds(5);
-                    string candidate = (await client.GetStringAsync("https://api.ipify.org", cancellationToken)).Trim();
-                    return IsValidIpv4Address(candidate) ? candidate : null;
+                    return await GetCurrentPublicIpv4Async(clientLease.Client, PublicIpLookupTimeout, cancellationToken);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }
+
+        internal static async Task<string> GetCurrentPublicIpv4Async(
+            HttpClient client,
+            TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            if (client == null)
+                throw new ArgumentNullException(nameof(client));
+            if (timeout <= TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
+                throw new ArgumentOutOfRangeException(nameof(timeout));
+
+            try
+            {
+                using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, "https://api.ipify.org"))
+                {
+                    timeoutSource.CancelAfter(timeout);
+                    using (HttpResponseMessage response = await client.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        timeoutSource.Token))
+                    {
+                        if (!response.IsSuccessStatusCode || response.Content == null)
+                            return null;
+                        if (response.Content.Headers.ContentLength > MaximumPublicIpResponseBytes)
+                            return null;
+
+                        string candidate = (await ReadBoundedResponseBodyAsync(
+                            response.Content,
+                            MaximumPublicIpResponseBytes,
+                            "The public IP lookup returned an oversized response.",
+                            timeoutSource.Token)).Trim();
+                        return IsValidIpv4Address(candidate) ? candidate : null;
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
             catch (HttpRequestException)
             {
                 return null;
             }
-            catch (TaskCanceledException)
+            catch (IOException)
+            {
+                return null;
+            }
+            catch (InvalidDataException)
+            {
+                return null;
+            }
+            catch (DecoderFallbackException)
             {
                 return null;
             }
@@ -4296,21 +4350,40 @@ namespace Steam_Desktop_Authenticator
                     StringComparison.OrdinalIgnoreCase);
         }
 
-        private static async Task<string> ReadResponseBodyWithLimitAsync(HttpContent content, CancellationToken cancellationToken)
+        private static Task<string> ReadResponseBodyWithLimitAsync(HttpContent content, CancellationToken cancellationToken)
+        {
+            return ReadBoundedResponseBodyAsync(
+                content,
+                MaximumUpdateResponseBytes,
+                "The update service returned an oversized response.",
+                cancellationToken);
+        }
+
+        private static async Task<string> ReadBoundedResponseBodyAsync(
+            HttpContent content,
+            int maximumBytes,
+            string oversizedMessage,
+            CancellationToken cancellationToken)
         {
             if (content == null)
-                throw new InvalidDataException("The update service returned an empty response.");
+                throw new InvalidDataException("The service returned an empty response.");
+            if (content.Headers.ContentLength > maximumBytes)
+                throw new InvalidDataException(oversizedMessage);
 
-            using (Stream responseStream = await content.ReadAsStreamAsync())
+            using (Stream responseStream = await content.ReadAsStreamAsync(cancellationToken))
             using (MemoryStream responseBody = new MemoryStream())
             {
-                byte[] buffer = new byte[81920];
+                byte[] buffer = new byte[Math.Min(81920, Math.Max(256, maximumBytes + 1))];
                 int bytesRead;
                 int totalBytes = 0;
-                while ((bytesRead = await responseStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                while (true)
                 {
-                    if (bytesRead > MaximumUpdateResponseBytes - totalBytes)
-                        throw new InvalidDataException("The update service returned an oversized response.");
+                    int maxBytesToRead = Math.Min(buffer.Length, (maximumBytes - totalBytes) + 1);
+                    bytesRead = await responseStream.ReadAsync(buffer, 0, maxBytesToRead, cancellationToken);
+                    if (bytesRead <= 0)
+                        break;
+                    if (bytesRead > maximumBytes - totalBytes)
+                        throw new InvalidDataException(oversizedMessage);
                     responseBody.Write(buffer, 0, bytesRead);
                     totalBytes += bytesRead;
                 }
