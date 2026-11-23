@@ -1407,6 +1407,114 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.DoesNotContain("WARNING: You chose to not encrypt", message);
         }
 
+        [Fact]
+        public void ApplyRefreshedSession_DoesNotPromotePendingAuthenticatorToFullyEnrolled()
+        {
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001010UL, "pending-refresh-user");
+            pendingAccount.FullyEnrolled = false;
+            SessionData originalSession = pendingAccount.Session;
+            SessionData refreshedSession = new SessionData
+            {
+                SteamID = 76561198000001010UL,
+                AccessToken = "renewed-access-token",
+                RefreshToken = "renewed-refresh-token"
+            };
+
+            // A failed save restores the original session and keeps FullyEnrolled false.
+            bool failedSave = LoginForm.ApplyRefreshedSession(pendingAccount, refreshedSession, () => false);
+            Assert.False(failedSave);
+            Assert.Same(originalSession, pendingAccount.Session);
+            Assert.False(pendingAccount.FullyEnrolled);
+
+            // A successful session refresh updates the session without promoting FullyEnrolled to true.
+            bool succeededSave = LoginForm.ApplyRefreshedSession(pendingAccount, refreshedSession, () => true);
+            Assert.True(succeededSave);
+            Assert.Same(refreshedSession, pendingAccount.Session);
+            Assert.False(pendingAccount.FullyEnrolled);
+        }
+
+        [Fact]
+        public void PendingEnrollmentAccount_SuppressesLoginTokenAndShowsPendingLabel()
+        {
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001011UL, "pending-account");
+            pendingAccount.FullyEnrolled = false;
+
+            Assert.True(MainForm.IsPendingEnrollment(pendingAccount));
+            Assert.Equal(string.Empty, MainForm.GetDisplayLoginToken(pendingAccount, 1700000000L, "PREV1"));
+            Assert.Equal("Account: pending-account (pending activation)", MainForm.GetAccountDisplayTitle(pendingAccount));
+
+            pendingAccount.FullyEnrolled = true;
+            Assert.False(MainForm.IsPendingEnrollment(pendingAccount));
+            string activeCode = MainForm.GetDisplayLoginToken(pendingAccount, 1700000000L);
+            Assert.Equal(5, activeCode.Length);
+            Assert.Equal("Account: pending-account", MainForm.GetAccountDisplayTitle(pendingAccount));
+        }
+
+        [Fact]
+        public void IndexHtml_MarksPendingActivationAccountsAndDisablesActiveOperations()
+        {
+            string indexHtmlPath = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory,
+                "..", "..", "..", "..", "..",
+                "Steam Desktop Authenticator", "ui", "index.html"));
+            string html = File.ReadAllText(indexHtmlPath);
+
+            Assert.Contains("pendingActivation = false", html);
+            Assert.Contains("(pending activation)", html);
+            Assert.Contains("!account.pendingActivation", html);
+            Assert.Contains("Complete Steam activation to use QR login", html);
+            Assert.Contains("const canCopy = hasAccounts && !currentAccPending;", html);
+            Assert.Contains("const canUnlinkSteamGuard = Boolean(account.steamId) && !Boolean(account.pendingActivation);", html);
+        }
+
+        [Fact]
+        public void GetConfirmationCodeRetryPromptMessage_DistinguishesAllDismissalReasons()
+        {
+            string loadFailedMessage = LoginForm.GetConfirmationCodeRetryPromptMessage(
+                new Manifest.PassKeyPromptResult(canceled: true, value: string.Empty, uiReady: false, loadFailed: true, accepted: false));
+            Assert.Contains("could not be displayed", loadFailedMessage);
+
+            string notReadyMessage = LoginForm.GetConfirmationCodeRetryPromptMessage(
+                new Manifest.PassKeyPromptResult(canceled: true, value: string.Empty, uiReady: false, loadFailed: false, accepted: false));
+            Assert.Contains("closed before it finished loading", notReadyMessage);
+
+            string blankAcceptedMessage = LoginForm.GetConfirmationCodeRetryPromptMessage(
+                new Manifest.PassKeyPromptResult(canceled: true, value: string.Empty, uiReady: true, loadFailed: false, accepted: true));
+            Assert.Contains("No confirmation code was entered", blankAcceptedMessage);
+
+            string nativeCloseMessage = LoginForm.GetConfirmationCodeRetryPromptMessage(
+                new Manifest.PassKeyPromptResult(canceled: true, value: string.Empty, uiReady: true, loadFailed: false, accepted: false, explicitCancel: false));
+            Assert.Contains("closed without canceling setup", nativeCloseMessage);
+        }
+
+        [Fact]
+        public void RecomputeExistingEntries_PreservesEncryptedEntriesWhenFileLookupIsNotConfirmedMissing()
+        {
+            const string passKey = "lookup-error-passkey";
+            Manifest manifest = CreateEncryptedManifestWithAccount(passKey);
+            Manifest.ManifestEntry originalEntry = Assert.Single(manifest.Entries);
+            string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+            string existingFilePath = Path.Combine(maDir, originalEntry.Filename);
+            string missingFilePath = Path.Combine(maDir, "definitely-missing.maFile");
+
+            Assert.False(Manifest.IsManifestFileConfirmedMissing(existingFilePath));
+            Assert.True(Manifest.IsManifestFileConfirmedMissing(missingFilePath));
+            Assert.True(Manifest.IsManifestFileConfirmedMissing(maDir));
+
+            // When a file lookup error prevents confirming absence, preserve the entry, salt, IV, and encryption flag.
+            manifest.RecomputeExistingEntries(_ => false);
+            Manifest.ManifestEntry preservedEntry = Assert.Single(manifest.Entries);
+            Assert.Equal(originalEntry.Filename, preservedEntry.Filename);
+            Assert.Equal(originalEntry.Salt, preservedEntry.Salt);
+            Assert.Equal(originalEntry.IV, preservedEntry.IV);
+            Assert.True(manifest.Encrypted);
+
+            // When absence is confirmed, prune the missing entry and clear encryption on an empty vault.
+            manifest.RecomputeExistingEntries(_ => true);
+            Assert.Empty(manifest.Entries);
+            Assert.False(manifest.Encrypted);
+        }
+
         private static Manifest CreateEncryptedManifestWithAccount(string passKey)
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);

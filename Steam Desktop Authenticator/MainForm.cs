@@ -719,7 +719,7 @@ namespace Steam_Desktop_Authenticator
             SteamGuardAccount[] accounts = allAccounts ?? Array.Empty<SteamGuardAccount>();
             foreach (SteamGuardAccount account in accounts)
             {
-                if (account?.Session == null)
+                if (account?.Session == null || IsPendingEnrollment(account))
                     continue;
 
                 SessionData sessionAtValidationStart = account.Session;
@@ -1716,6 +1716,8 @@ namespace Steam_Desktop_Authenticator
                     trayAccountList.Text = account.AccountName;
                     currentAccount = account;
                     btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(account);
+                    menuDeactivateAuthenticator.Enabled = IsSessionAvailableForAccountOperations(account);
+                    btnCopy.Enabled = !IsPendingEnrollment(account);
                     loadAccountInfo();
                     break;
                 }
@@ -2224,9 +2226,32 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        internal static bool IsPendingEnrollment(SteamGuardAccount account)
+        {
+            return account != null && !account.FullyEnrolled;
+        }
+
+        internal static string GetDisplayLoginToken(SteamGuardAccount account, long currentSteamTime, string existingToken = null)
+        {
+            if (account == null || IsPendingEnrollment(account))
+                return String.Empty;
+
+            return currentSteamTime == 0
+                ? (existingToken ?? String.Empty)
+                : account.GenerateSteamGuardCodeForTime(currentSteamTime);
+        }
+
+        internal static string GetAccountDisplayTitle(SteamGuardAccount account)
+        {
+            string accountName = account?.AccountName ?? String.Empty;
+            return IsPendingEnrollment(account)
+                ? "Account: " + accountName + " (pending activation)"
+                : "Account: " + accountName;
+        }
+
         private bool IsSessionAvailableForAccountOperations(SteamGuardAccount account)
         {
-            return account?.Session != null && !IsSessionRenewalRequired(account);
+            return account?.Session != null && account.FullyEnrolled && !IsSessionRenewalRequired(account);
         }
 
         private static bool IsCurrentAccountGeneration(SteamGuardAccount account, SteamGuardAccount[] loadedAccounts)
@@ -3048,6 +3073,8 @@ namespace Steam_Desktop_Authenticator
 
         private void CopyLoginToken()
         {
+            if (IsPendingEnrollment(currentAccount))
+                return;
             string text = txtLoginToken.Text;
             if (String.IsNullOrEmpty(text))
                 return;
@@ -3063,6 +3090,11 @@ namespace Steam_Desktop_Authenticator
             if (account == null)
             {
                 AstroMessageBox.Show("Please select an account first.", "Login Again", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+            if (IsPendingEnrollment(account))
+            {
+                AstroMessageBox.Show("This authenticator is still pending Steam activation. Complete authenticator setup before renewing its session.", "Login Again", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return false;
             }
 
@@ -3115,17 +3147,19 @@ namespace Steam_Desktop_Authenticator
         {
             if (currentAccount != null)
             {
-                string token = steamTime == 0 ? txtLoginToken.Text : currentAccount.GenerateSteamGuardCodeForTime(steamTime);
-                if (steamTime != 0)
-                    txtLoginToken.Text = token;
-                groupAccount.Text = "Account: " + currentAccount.AccountName;
+                bool pendingActivation = IsPendingEnrollment(currentAccount);
+                string token = GetDisplayLoginToken(currentAccount, steamTime, txtLoginToken.Text);
+                txtLoginToken.Text = token;
+                groupAccount.Text = GetAccountDisplayTitle(currentAccount);
+                btnCopy.Enabled = !pendingActivation;
 
                 string jsToken = JsonConvert.SerializeObject(token ?? String.Empty);
                 string jsAccountName = JsonConvert.SerializeObject(currentAccount.AccountName ?? String.Empty);
                 string jsSteamId = JsonConvert.SerializeObject(currentAccount.Session?.SteamID.ToString(CultureInfo.InvariantCulture) ?? String.Empty);
                 string jsExpired = IsSessionRenewalRequired(currentAccount).ToString().ToLowerInvariant();
+                string jsPendingActivation = pendingActivation.ToString().ToLowerInvariant();
                 _ = ExecuteScriptSafelyAsync($"updateToken({jsToken})", "Authenticator token UI");
-                _ = ExecuteScriptSafelyAsync($"updateCurrentAccount({jsAccountName}, {jsExpired}, {jsSteamId})", "Current account UI");
+                _ = ExecuteScriptSafelyAsync($"updateCurrentAccount({jsAccountName}, {jsExpired}, {jsSteamId}, {jsPendingActivation})", "Current account UI");
             }
         }
 
@@ -3188,19 +3222,28 @@ namespace Steam_Desktop_Authenticator
                 trayAccountList.SelectedIndex = Math.Min(selectedIndex, trayAccountList.Items.Count - 1);
             }
             bool hasAccounts = allAccounts.Length > 0;
-            menuDeactivateAuthenticator.Enabled = btnTradeConfirmations.Enabled = btnCopy.Enabled = hasAccounts;
+            bool canCopyCurrentAccount = hasAccounts && !IsPendingEnrollment(currentAccount);
+            menuDeactivateAuthenticator.Enabled = btnTradeConfirmations.Enabled = hasAccounts;
+            btnCopy.Enabled = canCopyCurrentAccount;
             menuDeactivateAuthenticator.Enabled = hasAccounts && IsSessionAvailableForAccountOperations(currentAccount);
             btnLoginViaQr.Enabled = hasAccounts && IsSessionAvailableForAccountOperations(currentAccount);
 
-            if (hasAccounts)
+            if (canCopyCurrentAccount)
             {
-                AstroTheme.StyleSurfaceButton(btnLoginViaQr);
                 AstroTheme.StyleSurfaceButton(btnCopy);
             }
             else
             {
-                AstroTheme.StyleDisabledGlassButton(btnLoginViaQr);
                 AstroTheme.StyleDisabledGlassButton(btnCopy);
+            }
+
+            if (btnLoginViaQr.Enabled)
+            {
+                AstroTheme.StyleSurfaceButton(btnLoginViaQr);
+            }
+            else
+            {
+                AstroTheme.StyleDisabledGlassButton(btnLoginViaQr);
             }
 
             if (GetCoreWebView2IfAvailable() != null)
@@ -3210,7 +3253,8 @@ namespace Steam_Desktop_Authenticator
                     name = a.AccountName,
                     steamId = a.Session == null ? null : a.Session.SteamID.ToString(CultureInfo.InvariantCulture),
                     sessionExpired = IsSessionRenewalRequired(a),
-                    needsRenewal = IsSessionRenewalRequired(a)
+                    needsRenewal = IsSessionRenewalRequired(a),
+                    pendingActivation = IsPendingEnrollment(a)
                 }).ToArray();
                 string jsonAccounts = JsonConvert.SerializeObject(accounts);
                 _ = ExecuteScriptSafelyAsync($"updateAccountList({jsonAccounts})", "Account list UI");
@@ -4334,6 +4378,8 @@ namespace Steam_Desktop_Authenticator
                 if (selectedAccount != null)
                 {
                     currentAccount = selectedAccount;
+                    btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(selectedAccount);
+                    menuDeactivateAuthenticator.Enabled = IsSessionAvailableForAccountOperations(selectedAccount);
                     loadAccountInfo();
                 }
             }

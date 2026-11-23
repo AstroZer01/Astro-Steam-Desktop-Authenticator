@@ -461,17 +461,8 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 Manifest man = Manifest.GetManifest();
-                SessionData previousSession = account.Session;
-                bool previousFullyEnrolled = account.FullyEnrolled;
-                account.FullyEnrolled = true;
-                account.Session = sessionData;
-                if (!SaveRefreshedSession(man, suppliedPassKey))
+                if (!ApplyRefreshedSession(account, sessionData, () => SaveRefreshedSession(man, suppliedPassKey)))
                 {
-                    // SaveAccount serializes and commits the candidate before the
-                    // in-memory account becomes authoritative. Restore the old
-                    // object whenever that persistence step does not succeed.
-                    account.Session = previousSession;
-                    account.FullyEnrolled = previousFullyEnrolled;
                     ResetLoginButton(cancellationToken);
                     return;
                 }
@@ -1007,6 +998,34 @@ namespace Steam_Desktop_Authenticator
                 return new ConfirmationCodePromptDecision(ConfirmationCodePromptAction.CancelAndRemovePending);
 
             return new ConfirmationCodePromptDecision(ConfirmationCodePromptAction.SubmitCode, promptResult.Value);
+        }
+
+        internal static bool ApplyRefreshedSession(
+            SteamGuardAccount targetAccount,
+            SessionData refreshedSession,
+            Func<bool> saveSession)
+        {
+            if (targetAccount == null)
+                throw new ArgumentNullException(nameof(targetAccount));
+            if (refreshedSession == null)
+                throw new ArgumentNullException(nameof(refreshedSession));
+            if (saveSession == null)
+                throw new ArgumentNullException(nameof(saveSession));
+
+            SessionData previousSession = targetAccount.Session;
+            // Preserve FullyEnrolled; only Steam authenticator finalization may promote
+            // a pending authenticator record to enrolled.
+            targetAccount.Session = refreshedSession;
+            if (!saveSession())
+            {
+                // SaveAccount serializes and commits the candidate before the
+                // in-memory account becomes authoritative. Restore the old
+                // session whenever that persistence step does not succeed.
+                targetAccount.Session = previousSession;
+                return false;
+            }
+
+            return true;
         }
 
         private bool SaveRefreshedSession(Manifest man, string suppliedPassKey = null)

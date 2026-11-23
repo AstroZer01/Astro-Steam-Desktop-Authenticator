@@ -1889,15 +1889,47 @@ namespace Steam_Desktop_Authenticator
             public string BackupFilename { get; set; }
         }
 
+        internal static bool IsManifestFileConfirmedMissing(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+                return false;
+
+            try
+            {
+                return (File.GetAttributes(path) & FileAttributes.Directory) != 0;
+            }
+            catch (FileNotFoundException)
+            {
+                return true;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return true;
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException || ex is PathTooLongException || ex is NotSupportedException)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "An authenticator file could not be verified on disk; keeping its manifest entry.");
+                return false;
+            }
+        }
+
         private void RecomputeExistingEntries()
         {
+            RecomputeExistingEntries(IsManifestFileConfirmedMissing);
+        }
+
+        internal void RecomputeExistingEntries(Func<string, bool> isFileConfirmedMissing)
+        {
+            if (isFileConfirmedMissing == null)
+                throw new ArgumentNullException(nameof(isFileConfirmedMissing));
+
             List<ManifestEntry> newEntries = new List<ManifestEntry>();
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
 
             foreach (var entry in this.Entries)
             {
                 string filename = GetManifestFilePath(maDir, entry);
-                if (File.Exists(filename))
+                if (!isFileConfirmedMissing(filename))
                 {
                     newEntries.Add(entry);
                 }
