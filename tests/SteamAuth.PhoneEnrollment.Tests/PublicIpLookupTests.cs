@@ -69,6 +69,14 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     Assert.NotSame(originalClient, replacementLease.Client);
                 }
 
+                // While heldLease is still active, the retired client must remain undisposed.
+                using (CancellationTokenSource canceled = new CancellationTokenSource())
+                {
+                    canceled.Cancel();
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                        originalClient.GetAsync("https://example.invalid/", canceled.Token));
+                }
+
                 // Releasing the lease a second time must be idempotent and only dispose once.
                 heldLease.Dispose();
                 heldLease.Dispose();
@@ -145,13 +153,35 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [Fact]
         public async Task GetCurrentPublicIpv4Async_AbortsStreamingResponseExceedingLimit()
         {
-            InfiniteChunkStream stream = new InfiniteChunkStream((byte)'1', chunkSize: 100);
+            InfiniteChunkStream stream = new InfiniteChunkStream((byte)'1', chunkSize: 256);
             using (HttpClient client = new HttpClient(new StubHandler(_ =>
                 new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) })))
             {
                 string ip = await MainForm.GetCurrentPublicIpv4Async(client, TimeSpan.FromSeconds(5), CancellationToken.None);
                 Assert.Null(ip);
-                Assert.True(stream.TotalBytesReturned <= 512, "Lookup must stop reading shortly after the 256-byte limit.");
+                Assert.Equal(257, stream.TotalBytesReturned);
+            }
+        }
+
+        [Fact]
+        public async Task GetCurrentPublicIpv4Async_ReturnsNullOnBodyStreamIOException()
+        {
+            using (HttpClient ioErrorClient = new HttpClient(new StubHandler(_ =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(new ThrowingReadStream(new IOException("Connection reset by peer.")))
+                })))
+            {
+                Assert.Null(await MainForm.GetCurrentPublicIpv4Async(ioErrorClient, TimeSpan.FromSeconds(5), CancellationToken.None));
+            }
+
+            using (HttpClient httpIoErrorClient = new HttpClient(new StubHandler(_ =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(new ThrowingReadStream(new HttpIOException(HttpRequestError.ResponseEnded, "Premature EOF.")))
+                })))
+            {
+                Assert.Null(await MainForm.GetCurrentPublicIpv4Async(httpIoErrorClient, TimeSpan.FromSeconds(5), CancellationToken.None));
             }
         }
 
@@ -285,6 +315,34 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 return ValueTask.FromResult(toWrite);
             }
 
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+
+        private sealed class ThrowingReadStream : Stream
+        {
+            private readonly Exception exception;
+
+            public ThrowingReadStream(Exception exception)
+            {
+                this.exception = exception;
+            }
+
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw exception;
+            public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => Task.FromException<int>(exception);
+            public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => ValueTask.FromException<int>(exception);
             public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
             public override void SetLength(long value) => throw new NotSupportedException();
             public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();

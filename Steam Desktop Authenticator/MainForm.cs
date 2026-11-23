@@ -2740,6 +2740,10 @@ namespace Steam_Desktop_Authenticator
             {
                 return null;
             }
+            catch (IOException)
+            {
+                return null;
+            }
             catch (InvalidDataException)
             {
                 return null;
@@ -4372,8 +4376,12 @@ namespace Steam_Desktop_Authenticator
                 byte[] buffer = new byte[Math.Min(81920, Math.Max(256, maximumBytes + 1))];
                 int bytesRead;
                 int totalBytes = 0;
-                while ((bytesRead = await responseStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                while (true)
                 {
+                    int maxBytesToRead = Math.Min(buffer.Length, (maximumBytes - totalBytes) + 1);
+                    bytesRead = await responseStream.ReadAsync(buffer, 0, maxBytesToRead, cancellationToken);
+                    if (bytesRead <= 0)
+                        break;
                     if (bytesRead > maximumBytes - totalBytes)
                         throw new InvalidDataException(oversizedMessage);
                     responseBody.Write(buffer, 0, bytesRead);
