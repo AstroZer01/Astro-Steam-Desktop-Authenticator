@@ -102,10 +102,26 @@ namespace Steam_Desktop_Authenticator
 
         private WebView2 webView;
         private readonly CancellationTokenSource uiCancellationSource = new CancellationTokenSource();
+        private bool uiCancellationSourceDisposed;
+
+        private bool IsUiCanceledOrDisposed()
+        {
+            return IsDisposed || Disposing || uiCancellationSourceDisposed || uiCancellationSource.IsCancellationRequested;
+        }
+
+        private void DisposeUiCancellationSource()
+        {
+            if (uiCancellationSourceDisposed)
+                return;
+
+            uiCancellationSourceDisposed = true;
+            uiCancellationSource.Dispose();
+        }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            uiCancellationSource.Cancel();
+            if (!uiCancellationSourceDisposed)
+                uiCancellationSource.Cancel();
             base.OnFormClosing(e);
         }
 
@@ -117,7 +133,7 @@ namespace Steam_Desktop_Authenticator
                 webView = null;
             }
 
-            uiCancellationSource.Dispose();
+            DisposeUiCancellationSource();
             base.OnFormClosed(e);
         }
 
@@ -237,7 +253,10 @@ namespace Steam_Desktop_Authenticator
                         c.Visible = false;
                 }
                 if (webView != null)
+                {
                     webView.Visible = true;
+                    webView.Focus();
+                }
             }
         }
 
@@ -300,6 +319,72 @@ namespace Steam_Desktop_Authenticator
                 explicitCancel: this.ExplicitCancel);
         }
 
+        internal static bool TryParseWebMessagePayload(string message, out JObject payload, out string action)
+        {
+            payload = null;
+            action = null;
+            if (String.IsNullOrEmpty(message) || message.Length > 64 * 1024)
+                return false;
+
+            try
+            {
+                using (StringReader stringReader = new StringReader(message))
+                using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
+                {
+                    payload = JObject.Load(jsonReader);
+                }
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+
+            JToken actionToken = payload["action"];
+            if (actionToken == null || actionToken.Type != JTokenType.String)
+                return false;
+
+            string parsedAction = (string)actionToken;
+            if (parsedAction == null || parsedAction.Length > 32)
+                return false;
+
+            action = parsedAction;
+            return true;
+        }
+
+        internal void HandleWebMessageJson(string message, bool isWebViewVisible)
+        {
+            if (!TryParseWebMessagePayload(message, out JObject payload, out string action))
+                return;
+
+            if (action == "accept")
+            {
+                if (!CanAcceptWebMessage(isWebViewVisible))
+                    return;
+                if (payload["value"]?.Type != JTokenType.String)
+                    return;
+                string value = (string)payload["value"];
+                if (value == null || value.Length > 4096) return;
+
+                this.txtBox.Text = value;
+                btnAccept_Click(this, EventArgs.Empty);
+            }
+            else if (action == "cancel")
+            {
+                if (!CanAcceptWebMessage(isWebViewVisible))
+                    return;
+                btnCancel_Click(this, EventArgs.Empty);
+            }
+            else if (action == "resize")
+            {
+                if (payload["height"]?.Type != JTokenType.Integer ||
+                    !long.TryParse(payload["height"].ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out long requestedHeight))
+                    return;
+
+                int height = (int)Math.Clamp(requestedHeight, 100L, 1000L);
+                this.ClientSize = new Size(this.ClientSize.Width, height);
+            }
+        }
+
         private async void SetupModernUI(string label, bool isPassword)
         {
             DisableNativeFallbackControls();
@@ -329,16 +414,21 @@ namespace Steam_Desktop_Authenticator
 
             try
             {
-                await webView.EnsureCoreWebView2Async(await WebViewEnvironmentProvider.GetAsync());
+                CoreWebView2Environment environment = await WebViewEnvironmentProvider.GetAsync();
+                if (IsUiCanceledOrDisposed() || webView == null)
+                    return;
+                await webView.EnsureCoreWebView2Async(environment);
             }
             catch (Exception ex)
             {
+                if (IsUiCanceledOrDisposed())
+                    return;
                 DiagnosticErrorLogger.Log("Input UI", ex, "The WebView2 input dialog could not be initialized.");
                 MarkModernUiLoadFailed(loadingPanel, lblLoading);
                 return;
             }
 
-            if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested)
+            if (IsUiCanceledOrDisposed())
                 return;
             if (webView?.CoreWebView2 == null)
             {
@@ -353,7 +443,7 @@ namespace Steam_Desktop_Authenticator
 
             webView.CoreWebView2.ProcessFailed += (sender, args) =>
             {
-                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested)
+                if (IsUiCanceledOrDisposed())
                     return;
 
                 HandleModernUiProcessFailed(args.ProcessFailedKind, loadingPanel, lblLoading);
@@ -376,61 +466,16 @@ namespace Steam_Desktop_Authenticator
 
             webView.CoreWebView2.WebMessageReceived += (sender, e) =>
             {
-                string message = e.WebMessageAsJson;
-                if (IsDisposed || uiCancellationSource.IsCancellationRequested ||
-                    !WebViewSecurityPolicy.IsTrustedLocalDocument(e.Source, htmlPath) ||
-                    String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
-
-                JObject payload;
-                try
-                {
-                    using (StringReader stringReader = new StringReader(message))
-                    using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
-                    {
-                        payload = JObject.Load(jsonReader);
-                    }
-                }
-                catch (JsonException)
-                {
-                    return;
-                }
-
-                string action = payload.Value<string>("action");
-                if (payload["action"]?.Type != JTokenType.String || action == null || action.Length > 32)
+                if (IsUiCanceledOrDisposed() ||
+                    !WebViewSecurityPolicy.IsTrustedLocalDocument(e.Source, htmlPath))
                     return;
 
-                if (action == "accept")
-                {
-                    if (!CanAcceptWebMessage(webView != null && webView.Visible))
-                        return;
-                    if (payload["value"]?.Type != JTokenType.String)
-                        return;
-                    string value = (string)payload["value"];
-                    if (value == null || value.Length > 4096) return;
-
-                    this.txtBox.Text = value;
-                    btnAccept_Click(this, EventArgs.Empty);
-                }
-                else if (action == "cancel")
-                {
-                    if (!CanAcceptWebMessage(webView != null && webView.Visible))
-                        return;
-                    btnCancel_Click(this, EventArgs.Empty);
-                }
-                else if (action == "resize")
-                {
-                    if (payload["height"]?.Type != JTokenType.Integer ||
-                        !long.TryParse(payload["height"].ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out long requestedHeight))
-                        return;
-
-                    int height = (int)Math.Clamp(requestedHeight, 100L, 1000L);
-                    this.ClientSize = new Size(this.ClientSize.Width, height);
-                }
+                HandleWebMessageJson(e.WebMessageAsJson, webView != null && webView.Visible);
             };
 
             webView.NavigationCompleted += async (sender, args) =>
             {
-                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView?.CoreWebView2 == null)
+                if (IsUiCanceledOrDisposed() || webView?.CoreWebView2 == null)
                     return;
                 if (!ShouldHandleNavigationCompleted(args.NavigationId, out int expectedGeneration))
                     return;
@@ -452,13 +497,13 @@ namespace Steam_Desktop_Authenticator
                 string jsLabel = JsonConvert.SerializeObject(label);
                 string isPassStr = isPassword ? "true" : "false";
                 bool setupSucceeded = await ExecuteScriptSafelyAsync($"setupInput({jsLabel}, {isPassStr})", "Input dialog UI", requireTrueResult: true);
-                if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null)
+                if (IsUiCanceledOrDisposed() || webView == null)
                     return;
 
                 TryHandleNavigationCompletedResult(args.NavigationId, expectedGeneration, setupSucceeded, loadingPanel, lblLoading);
             };
 
-            if (IsDisposed || Disposing || uiCancellationSource.IsCancellationRequested || webView == null)
+            if (IsUiCanceledOrDisposed() || webView == null)
                 return;
             try
             {
@@ -467,6 +512,8 @@ namespace Steam_Desktop_Authenticator
             }
             catch (Exception ex)
             {
+                if (IsUiCanceledOrDisposed())
+                    return;
                 DiagnosticErrorLogger.Log("Input UI", ex, "The WebView2 input dialog could not navigate to its packaged UI.");
                 MarkModernUiLoadFailed(loadingPanel, lblLoading);
             }

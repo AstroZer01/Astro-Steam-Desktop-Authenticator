@@ -1071,6 +1071,298 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False(rejectedSave.Succeeded);
         }
 
+        [Fact]
+        public void EvaluateConfirmationCodePrompt_RetriesAndPreservesPendingWhenConfirmationUiProcessFails()
+        {
+            using (InputForm form = new InputForm("Enter confirmation code", password: false, initializeModernUi: false))
+            {
+                form.BeginModernUiNavigation(1UL);
+                Assert.True(form.ShouldHandleNavigationCompleted(1UL, out int generation));
+                Assert.True(form.TryHandleNavigationCompletedResult(1UL, generation, succeeded: true));
+                Assert.True(form.HandleModernUiProcessFailed(CoreWebView2ProcessFailedKind.RenderProcessExited));
+                form.SimulateWindowClose();
+
+                Assert.True(form.Canceled);
+                Assert.True(form.LoadFailed);
+                Assert.False(form.UiReady);
+
+                int retryPrompts = 0;
+                LoginForm.ConfirmationCodePromptDecision decision = LoginForm.EvaluateConfirmationCodePrompt(
+                    form.ToPassKeyPromptResult(),
+                    () =>
+                    {
+                        retryPrompts++;
+                        return true;
+                    });
+
+                Assert.Equal(1, retryPrompts);
+                Assert.Equal(LoginForm.ConfirmationCodePromptAction.RetryPrompt, decision.Action);
+            }
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void EvaluateConfirmationCodePrompt_KeepsPendingAndStopsWhenUserDeclinesRetryAfterUiFailure(bool markLoadFailed)
+        {
+            using (InputForm form = new InputForm("Enter confirmation code", password: false, initializeModernUi: false))
+            {
+                form.BeginModernUiNavigation(1UL);
+                if (markLoadFailed)
+                    form.MarkModernUiLoadFailed();
+                form.SimulateWindowClose();
+
+                int retryPrompts = 0;
+                LoginForm.ConfirmationCodePromptDecision decision = LoginForm.EvaluateConfirmationCodePrompt(
+                    form.ToPassKeyPromptResult(),
+                    () =>
+                    {
+                        retryPrompts++;
+                        return false;
+                    });
+
+                Assert.Equal(1, retryPrompts);
+                Assert.Equal(LoginForm.ConfirmationCodePromptAction.KeepPendingAndStop, decision.Action);
+            }
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void EvaluateConfirmationCodePrompt_CancelsAndRemovesPendingOnlyWhenReadyUiIsDismissed(bool explicitCancel)
+        {
+            using (InputForm form = new InputForm("Enter confirmation code", password: false, initializeModernUi: false))
+            {
+                if (explicitCancel)
+                    form.CancelInput();
+                else
+                    form.SimulateWindowClose();
+
+                int retryPrompts = 0;
+                LoginForm.ConfirmationCodePromptDecision decision = LoginForm.EvaluateConfirmationCodePrompt(
+                    form.ToPassKeyPromptResult(),
+                    () =>
+                    {
+                        retryPrompts++;
+                        return true;
+                    });
+
+                Assert.Equal(0, retryPrompts);
+                Assert.Equal(LoginForm.ConfirmationCodePromptAction.CancelAndRemovePending, decision.Action);
+            }
+        }
+
+        [Fact]
+        public void EvaluateConfirmationCodePrompt_SubmitsCodeWhenReadyUiAcceptsInput()
+        {
+            using (InputForm form = new InputForm("Enter confirmation code", password: false, initializeModernUi: false))
+            {
+                form.SubmitInput("ABCDE");
+
+                LoginForm.ConfirmationCodePromptDecision decision = LoginForm.EvaluateConfirmationCodePrompt(
+                    form.ToPassKeyPromptResult(),
+                    () => throw new InvalidOperationException("Retry prompt should not run when input was accepted."));
+
+                Assert.Equal(LoginForm.ConfirmationCodePromptAction.SubmitCode, decision.Action);
+                Assert.Equal("ABCDE", decision.ConfirmationCode);
+            }
+        }
+
+        [Fact]
+        public void ShouldPromptStartupPassKey_SkipsEmptyEncryptedVaultAndReachesFirstAccountRecovery()
+        {
+            // In-memory empty encrypted manifest must not prompt for an unverifiable startup key.
+            Manifest emptyEncryptedManifest = Manifest.GenerateNewManifest(false);
+            Assert.True(emptyEncryptedManifest.ChangeEncryptionKey(null, "orphan-passkey").Succeeded);
+            Assert.True(emptyEncryptedManifest.Encrypted);
+            Assert.Empty(emptyEncryptedManifest.Entries);
+            Assert.False(MainForm.ShouldPromptStartupPassKey(emptyEncryptedManifest, null));
+
+            // Persisted empty encrypted manifest loaded on startup normalizes and reaches first-account setup.
+            string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+            Directory.CreateDirectory(maDir);
+            File.WriteAllText(
+                Path.Combine(maDir, "manifest.json"),
+                "{\"encrypted\":true,\"first_run\":false,\"entries\":[]}");
+
+            Manifest loadedEmptyManifest = Manifest.GetManifest(forceLoad: true);
+            Assert.False(loadedEmptyManifest.Encrypted);
+            Assert.Empty(loadedEmptyManifest.Entries);
+            Assert.False(MainForm.ShouldPromptStartupPassKey(loadedEmptyManifest, null));
+
+            bool resolved = LoginForm.TryResolveManifestPassKey(
+                loadedEmptyManifest,
+                suppliedPassKey: null,
+                promptSetupPassKey: _ => (Manifest.SetupPassKeyStatus.Set, "fresh-passkey"),
+                promptCurrentPassKey: (_, _) => throw new InvalidOperationException("Current passkey prompt should not run for empty manifest."),
+                showInvalidPassKeyMessage: message => throw new InvalidOperationException("Unexpected error: " + message),
+                out string resolvedPassKey);
+
+            Assert.True(resolved);
+            Assert.Equal("fresh-passkey", resolvedPassKey);
+
+            SteamGuardAccount firstAccount = CreateAccount(76561198000001007UL, "startup-recovered-user");
+            StorageResult saveResult = loadedEmptyManifest.SaveAccount(firstAccount, encrypt: true, passKey: resolvedPassKey);
+            Assert.True(saveResult.Succeeded, saveResult.UserMessage);
+            Assert.True(loadedEmptyManifest.Encrypted);
+            Assert.True(MainForm.ShouldPromptStartupPassKey(loadedEmptyManifest, null));
+            Assert.False(MainForm.ShouldPromptStartupPassKey(loadedEmptyManifest, resolvedPassKey));
+
+            // Persisted encrypted manifest whose only entry's maFile was deleted also recovers cleanly on load.
+            string savedMaFilePath = Path.Combine(maDir, Assert.Single(loadedEmptyManifest.Entries).Filename);
+            File.Delete(savedMaFilePath);
+
+            Manifest loadedMissingFileManifest = Manifest.GetManifest(forceLoad: true);
+            Assert.False(loadedMissingFileManifest.Encrypted);
+            Assert.Empty(loadedMissingFileManifest.Entries);
+            Assert.False(MainForm.ShouldPromptStartupPassKey(loadedMissingFileManifest, null));
+        }
+
+        [Theory]
+        [InlineData("{\"action\":{}}")]
+        [InlineData("{\"action\":[]}")]
+        [InlineData("{\"action\":123}")]
+        [InlineData("{\"action\":null}")]
+        [InlineData("{\"action\":\"012345678901234567890123456789012\"}")]
+        [InlineData("{not-json")]
+        [InlineData("")]
+        public void TryParseWebMessagePayload_RejectsInvalidOrNonStringActionTokensWithoutThrowing(string json)
+        {
+            bool parsed = InputForm.TryParseWebMessagePayload(json, out _, out string action);
+            Assert.False(parsed);
+            Assert.Null(action);
+        }
+
+        [Fact]
+        public void HandleWebMessageJson_GatesAcceptAndCancelOnReadinessAndVisibility()
+        {
+            using (InputForm form = new InputForm("Enter passkey", password: true, initializeModernUi: false))
+            {
+                form.BeginModernUiNavigation(10UL);
+
+                // Non-string action tokens never throw and never alter state.
+                form.HandleWebMessageJson("{\"action\":{\"nested\":true}}", isWebViewVisible: true);
+                form.HandleWebMessageJson("{\"action\":[\"accept\"]}", isWebViewVisible: true);
+                Assert.False(form.Accepted);
+                Assert.False(form.ExplicitCancel);
+
+                // Messages before UI readiness are ignored.
+                form.HandleWebMessageJson("{\"action\":\"accept\",\"value\":\"early-secret\"}", isWebViewVisible: true);
+                form.HandleWebMessageJson("{\"action\":\"cancel\"}", isWebViewVisible: true);
+                Assert.False(form.Accepted);
+                Assert.False(form.ExplicitCancel);
+                Assert.Equal(string.Empty, form.txtBox.Text);
+
+                // Ready UI still ignores messages while WebView is hidden.
+                Assert.True(form.ShouldHandleNavigationCompleted(10UL, out int generation));
+                Assert.True(form.TryHandleNavigationCompletedResult(10UL, generation, succeeded: true));
+                form.HandleWebMessageJson("{\"action\":\"accept\",\"value\":\"hidden-secret\"}", isWebViewVisible: false);
+                Assert.False(form.Accepted);
+
+                // After a terminal process failure, messages are ignored even if visible flag is passed.
+                Assert.True(form.HandleModernUiProcessFailed(CoreWebView2ProcessFailedKind.RenderProcessUnresponsive));
+                form.HandleWebMessageJson("{\"action\":\"cancel\"}", isWebViewVisible: true);
+                Assert.False(form.ExplicitCancel);
+
+                // Once reloaded and visible, accept succeeds through the production handler.
+                form.BeginModernUiNavigation(11UL);
+                Assert.True(form.ShouldHandleNavigationCompleted(11UL, out int reloadedGeneration));
+                Assert.True(form.TryHandleNavigationCompletedResult(11UL, reloadedGeneration, succeeded: true));
+                form.HandleWebMessageJson("{\"action\":\"accept\",\"value\":\"valid-secret\"}", isWebViewVisible: true);
+                Assert.True(form.Accepted);
+                Assert.False(form.Canceled);
+                Assert.Equal("valid-secret", form.txtBox.Text);
+            }
+        }
+
+        [Fact]
+        public async Task PrepareInitialEnrollmentAsync_DoesNotStartEnrollmentWhenCanceledDuringPassKeyPrompt()
+        {
+            using (CancellationTokenSource cts = new CancellationTokenSource())
+            {
+                bool enrollmentStarted = false;
+
+                await Assert.ThrowsAsync<OperationCanceledException>(() =>
+                    LoginForm.PrepareInitialEnrollmentAsync(
+                        () =>
+                        {
+                            cts.Cancel();
+                            return (true, "resolved-before-cancel");
+                        },
+                        _ =>
+                        {
+                            enrollmentStarted = true;
+                            return Task.FromResult(new AuthenticatorEnrollmentOutcome(AuthenticatorEnrollmentResult.AwaitingFinalization));
+                        },
+                        cts.Token));
+
+                Assert.False(enrollmentStarted);
+            }
+        }
+
+        [Fact]
+        public void TryPromptSetupPassKey_CommitsImmediatelyWhenRequested()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = CreateAccount(76561198000001009UL, "immediate-commit-user");
+            Assert.True(manifest.SaveAccount(account, encrypt: false, passKey: null).Succeeded);
+            Assert.False(manifest.Encrypted);
+
+            List<string> messages = new List<string>();
+            Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                LoginForm.SetupPassKeyPromptLabel,
+                commitImmediately: true,
+                (label, isPassword) =>
+                {
+                    using (InputForm form = new InputForm(label, isPassword, initializeModernUi: false))
+                    {
+                        form.SubmitInput("immediate-secret");
+                        return form.ToPassKeyPromptResult();
+                    }
+                },
+                message => messages.Add(message),
+                out string passKey);
+
+            Assert.Equal(Manifest.SetupPassKeyStatus.Set, status);
+            Assert.Equal("immediate-secret", passKey);
+            Assert.True(manifest.Encrypted);
+            Assert.True(manifest.VerifyPasskey("immediate-secret"));
+            Assert.Equal("Passkey successfully set.", Assert.Single(messages));
+        }
+
+        [Fact]
+        public void TryPromptSetupPassKey_ReturnsFailedWhenConfirmationWindowClosed()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            int promptIndex = 0;
+            List<string> messages = new List<string>();
+
+            Manifest.SetupPassKeyStatus status = manifest.TryPromptSetupPassKey(
+                LoginForm.SetupPassKeyPromptLabel,
+                commitImmediately: false,
+                (label, isPassword) =>
+                {
+                    promptIndex++;
+                    using (InputForm form = new InputForm(label, isPassword, initializeModernUi: false))
+                    {
+                        if (promptIndex == 1)
+                            form.SubmitInput("passkey-one");
+                        else
+                            form.SimulateWindowClose();
+
+                        return form.ToPassKeyPromptResult();
+                    }
+                },
+                message => messages.Add(message),
+                out string passKey);
+
+            Assert.Equal(Manifest.SetupPassKeyStatus.Failed, status);
+            Assert.Null(passKey);
+            Assert.False(manifest.Encrypted);
+            string message = Assert.Single(messages);
+            Assert.DoesNotContain("WARNING: You chose to not encrypt", message);
+        }
+
         private static Manifest CreateEncryptedManifestWithAccount(string passKey)
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);

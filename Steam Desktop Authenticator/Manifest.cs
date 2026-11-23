@@ -219,13 +219,19 @@ namespace Steam_Desktop_Authenticator
                     loadedManifest.Save();
                 }
 
+                bool clearedEmptyEncryption = false;
                 if (loadedManifest.Encrypted && loadedManifest.Entries.Count == 0)
                 {
                     loadedManifest.Encrypted = false;
-                    loadedManifest.Save();
+                    clearedEmptyEncryption = true;
                 }
 
+                bool wasEncryptedBeforeRecompute = loadedManifest.Encrypted;
                 loadedManifest.RecomputeExistingEntries();
+                if (clearedEmptyEncryption || (wasEncryptedBeforeRecompute && !loadedManifest.Encrypted))
+                {
+                    loadedManifest.Save();
+                }
 
                 // Migrate the GUID form used by previous releases while loading
                 // the manifest. Arbitrary legacy names are handled by the full
@@ -396,12 +402,7 @@ namespace Steam_Desktop_Authenticator
 
         public string PromptSetupPassKey(string initialPrompt = "Enter passkey, or hit cancel to remain unencrypted.")
         {
-            return PromptSetupPassKey(initialPrompt, commitImmediately: true);
-        }
-
-        internal string PromptSetupPassKey(string initialPrompt, bool commitImmediately)
-        {
-            TryPromptSetupPassKey(initialPrompt, commitImmediately, out string passKey);
+            TryPromptSetupPassKey(initialPrompt, commitImmediately: true, out string passKey);
             return passKey;
         }
 

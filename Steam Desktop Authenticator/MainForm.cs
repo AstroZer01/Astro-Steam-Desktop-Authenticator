@@ -568,6 +568,15 @@ namespace Steam_Desktop_Authenticator
                 MessageBoxIcon.Warning);
         }
 
+        internal static bool ShouldPromptStartupPassKey(Manifest currentManifest, string currentPassKey)
+        {
+            return currentManifest != null &&
+                currentManifest.Encrypted &&
+                currentManifest.Entries != null &&
+                currentManifest.Entries.Count > 0 &&
+                currentPassKey == null;
+        }
+
         public void SetEncryptionKey(string key)
         {
             passKey = key;
@@ -610,24 +619,19 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            if (manifest.Encrypted)
+            if (ShouldPromptStartupPassKey(manifest, passKey))
             {
+                passKey = manifest.PromptForPassKey();
                 if (passKey == null)
                 {
-                    passKey = manifest.PromptForPassKey();
-                    if (passKey == null)
-                    {
-                        Close();
-                        return;
-                    }
+                    Close();
+                    return;
                 }
+            }
 
-                btnManageEncryption.Text = "Remove Encryption";
-            }
-            else
-            {
-                btnManageEncryption.Text = "Setup Encryption";
-            }
+            btnManageEncryption.Text = (manifest.Encrypted && manifest.Entries.Count > 0)
+                ? "Remove Encryption"
+                : "Setup Encryption";
 
             StorageResult filenameNormalizationResult = manifest.NormalizeAccountFilenames();
             if (!filenameNormalizationResult.Succeeded)
@@ -1183,7 +1187,7 @@ namespace Steam_Desktop_Authenticator
                 using (InputForm currentPassKeyForm = new InputForm("Enter current passkey to remove encryption", true))
                 {
                     currentPassKeyForm.ShowInputDialog(this);
-                    if (currentPassKeyForm.Canceled)
+                    if (currentPassKeyForm.Canceled || !currentPassKeyForm.UiReady || currentPassKeyForm.LoadFailed)
                         return;
 
                     curPassKey = currentPassKeyForm.txtBox.Text;

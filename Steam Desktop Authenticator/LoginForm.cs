@@ -218,24 +218,7 @@ namespace Steam_Desktop_Authenticator
             string message = e.WebMessageAsJson;
             if (IsDisposed ||
                 !WebViewSecurityPolicy.IsTrustedLocalDocument(e.Source, trustedUiDocumentPath) ||
-                String.IsNullOrEmpty(message) || message.Length > 64 * 1024) return;
-
-            JObject payload;
-            try
-            {
-                using (StringReader stringReader = new StringReader(message))
-                using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
-                {
-                    payload = JObject.Load(jsonReader);
-                }
-            }
-            catch (Newtonsoft.Json.JsonException)
-            {
-                return;
-            }
-
-            string action = payload.Value<string>("action");
-            if (payload["action"]?.Type != JTokenType.String || action == null || action.Length > 32)
+                !InputForm.TryParseWebMessagePayload(message, out JObject payload, out string action))
                 return;
 
             if (action == "login")
@@ -482,7 +465,7 @@ namespace Steam_Desktop_Authenticator
                 bool previousFullyEnrolled = account.FullyEnrolled;
                 account.FullyEnrolled = true;
                 account.Session = sessionData;
-                if (!HandleManifest(man, true, suppliedPassKey))
+                if (!SaveRefreshedSession(man, suppliedPassKey))
                 {
                     // SaveAccount serializes and commits the candidate before the
                     // in-memory account becomes authoritative. Restore the old
@@ -589,13 +572,32 @@ namespace Steam_Desktop_Authenticator
                         ? "phone number associated with your Steam account"
                         : "confirmation method selected by Steam";
                 string confirmationCode;
-                    using (InputForm confirmationCodeForm = new InputForm(
+                using (InputForm confirmationCodeForm = new InputForm(
                     previousFinalizationCodeWasInvalid
                         ? "That confirmation code was not accepted. Please enter the correct code sent to your " + confirmationDestination + "."
                         : "Please input the confirmation code sent to your " + confirmationDestination + "."))
                 {
-                        confirmationCodeForm.ShowInputDialog(this);
-                    if (confirmationCodeForm.Canceled)
+                    confirmationCodeForm.ShowInputDialog(this);
+                    ConfirmationCodePromptDecision promptDecision = EvaluateConfirmationCodePrompt(
+                        confirmationCodeForm.ToPassKeyPromptResult(),
+                        () => AstroMessageBox.Show(
+                            confirmationCodeForm.LoadFailed
+                                ? "The confirmation code window could not be displayed. Your pending authenticator and recovery code have been kept safely.\n\nDo you want to reopen the confirmation code prompt?"
+                                : "The confirmation code window was closed before it finished loading. Your pending authenticator and recovery code have been kept safely.\n\nDo you want to reopen the confirmation code prompt?",
+                            "Steam Guard Setup",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Warning) == DialogResult.Yes);
+
+                    if (promptDecision.Action == ConfirmationCodePromptAction.RetryPrompt)
+                        continue;
+
+                    if (promptDecision.Action == ConfirmationCodePromptAction.KeepPendingAndStop)
+                    {
+                        this.Close();
+                        return;
+                    }
+
+                    if (promptDecision.Action == ConfirmationCodePromptAction.CancelAndRemovePending)
                     {
                         if (!manifest.RemoveAccount(linker.LinkedAccount))
                         {
@@ -611,7 +613,7 @@ namespace Steam_Desktop_Authenticator
                         return;
                     }
 
-                    confirmationCode = confirmationCodeForm.txtBox.Text;
+                    confirmationCode = promptDecision.ConfirmationCode;
                 }
                 try
                 {
@@ -956,7 +958,47 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private bool HandleManifest(Manifest man, bool IsRefreshing = false, string suppliedPassKey = null)
+        internal enum ConfirmationCodePromptAction
+        {
+            SubmitCode,
+            RetryPrompt,
+            KeepPendingAndStop,
+            CancelAndRemovePending
+        }
+
+        internal readonly struct ConfirmationCodePromptDecision
+        {
+            public ConfirmationCodePromptDecision(ConfirmationCodePromptAction action, string confirmationCode = null)
+            {
+                Action = action;
+                ConfirmationCode = confirmationCode;
+            }
+
+            public ConfirmationCodePromptAction Action { get; }
+            public string ConfirmationCode { get; }
+        }
+
+        internal static ConfirmationCodePromptDecision EvaluateConfirmationCodePrompt(
+            Manifest.PassKeyPromptResult promptResult,
+            Func<bool> promptRetryOnUiFailure)
+        {
+            if (promptRetryOnUiFailure == null)
+                throw new ArgumentNullException(nameof(promptRetryOnUiFailure));
+
+            if (promptResult.LoadFailed || !promptResult.UiReady)
+            {
+                return promptRetryOnUiFailure()
+                    ? new ConfirmationCodePromptDecision(ConfirmationCodePromptAction.RetryPrompt)
+                    : new ConfirmationCodePromptDecision(ConfirmationCodePromptAction.KeepPendingAndStop);
+            }
+
+            if (promptResult.Canceled)
+                return new ConfirmationCodePromptDecision(ConfirmationCodePromptAction.CancelAndRemovePending);
+
+            return new ConfirmationCodePromptDecision(ConfirmationCodePromptAction.SubmitCode, promptResult.Value);
+        }
+
+        private bool SaveRefreshedSession(Manifest man, string suppliedPassKey = null)
         {
             if (!TryResolveManifestPassKey(man, suppliedPassKey, out string passKey))
             {
@@ -967,23 +1009,12 @@ namespace Steam_Desktop_Authenticator
             StorageResult saveResult = man.SaveAccount(account, encrypt, passKey);
             if (!saveResult.Succeeded)
             {
-                DiagnosticErrorLogger.Log("Authenticator storage", saveResult.Exception, IsRefreshing
-                    ? "The refreshed Steam session could not be saved."
-                    : "The finalized authenticator record could not be saved.");
-                AstroMessageBox.Show(saveResult.UserMessage ?? (IsRefreshing
-                    ? "The refreshed session could not be saved."
-                    : "The finalized authenticator record could not be saved."), "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                DiagnosticErrorLogger.Log("Authenticator storage", saveResult.Exception, "The refreshed Steam session could not be saved.");
+                AstroMessageBox.Show(saveResult.UserMessage ?? "The refreshed session could not be saved.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return false;
             }
             ResolvedPassKey = encrypt ? passKey : null;
-            if (IsRefreshing)
-            {
-                AstroMessageBox.Show("Your session was refreshed.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            else
-            {
-                ShowRecoveryCode(account, "Mobile authenticator successfully linked. Keep this recovery code safe.");
-            }
+            AstroMessageBox.Show("Your session was refreshed.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return true;
         }
 
