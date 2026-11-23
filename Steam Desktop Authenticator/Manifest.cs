@@ -10,6 +10,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -94,8 +95,12 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("proxy_password")]
         public string ProxyPassword { get; set; } = String.Empty;
 
+        [JsonProperty("storage_transaction_id", NullValueHandling = NullValueHandling.Ignore)]
+        internal string StorageTransactionId { get; set; }
+
         private static Manifest _manifest { get; set; }
         private static readonly object storageLock = new object();
+        private static long storageTransactionCommitCount;
         private long storageRevision;
         // Refresh persistence only needs to reject changes to the account it
         // captured. A manifest-wide revision would make an unrelated account
@@ -104,6 +109,7 @@ namespace Steam_Desktop_Authenticator
         private const string StorageJournalFilename = ".asda-storage-transaction.json";
         private const string SettingsBackupFilename = ".manifest.settings.bak";
         private const string StorageBackupFilenamePrefix = ".manifest.";
+        private const string AccountBackupFilenamePrefix = ".mafile.";
         private const string StorageBackupFilenameSuffix = ".bak";
         private const long MaximumManifestFileSizeBytes = 4 * 1024 * 1024;
         private const long MaximumAccountFileSizeBytes = 4 * 1024 * 1024;
@@ -128,6 +134,8 @@ namespace Steam_Desktop_Authenticator
                     return storageRevision;
             }
         }
+
+        internal static long StorageTransactionCommitCount => Interlocked.Read(ref storageTransactionCommitCount);
 
         public long GetAccountStorageRevision(ulong steamId)
         {
@@ -698,7 +706,8 @@ namespace Steam_Desktop_Authenticator
                     ValidateManifestEntries(this, maDir);
                     HashSet<ulong> managedSteamIds = new HashSet<ulong>(Entries.Select(entry => entry.SteamID));
                     HashSet<string> sourceNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    List<SteamGuardAccount> validatedAccounts = new List<SteamGuardAccount>();
+                    List<(UnmanagedMaFileCandidate Candidate, SteamGuardAccount Account)> validatedCandidates =
+                        new List<(UnmanagedMaFileCandidate Candidate, SteamGuardAccount Account)>();
 
                     foreach (UnmanagedMaFileCandidate candidate in candidates)
                     {
@@ -718,13 +727,20 @@ namespace Steam_Desktop_Authenticator
                             return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files is no longer valid.");
                         if (!managedSteamIds.Add(account.Session.SteamID))
                             return StorageResult.Failure(StorageFailureKind.Validation, "Two selected authenticator files use the same Steam identity.");
-                        validatedAccounts.Add(account);
+                        validatedCandidates.Add((candidate, account));
                     }
 
                     Manifest stagedManifest = CloneForStorage();
-                    Dictionary<string, string> stagedFiles = new Dictionary<string, string>();
-                    List<string> obsoleteFiles = candidates.Select(candidate => candidate.FileName).ToList();
-                    foreach (SteamGuardAccount account in validatedAccounts)
+                    Dictionary<string, string> stagedFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    Dictionary<string, string> replacedFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    List<string> obsoleteFiles = new List<string>();
+                    HashSet<string> referencedFilenames = new HashSet<string>(
+                        Entries.Select(entry => entry.Filename), StringComparer.OrdinalIgnoreCase);
+                    HashSet<string> plannedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    List<ulong> updatedSteamIds = new List<ulong>(validatedCandidates.Count);
+                    bool usedFallbackGuidFilename = false;
+
+                    foreach ((UnmanagedMaFileCandidate candidate, SteamGuardAccount account) in validatedCandidates)
                     {
                         string salt = null;
                         string iv = null;
@@ -738,25 +754,46 @@ namespace Steam_Desktop_Authenticator
                                 return StorageResult.Failure(StorageFailureKind.Encryption, "An authenticator file could not be encrypted. No files were imported.");
                         }
 
-                        string filename = account.Session.SteamID.ToString(CultureInfo.InvariantCulture) + "." + Guid.NewGuid().ToString("N") + ".maFile";
-                        stagedFiles.Add(filename, contents);
+                        AccountFileTargetPlan plan = PlanAccountFileTarget(
+                            maDir,
+                            account.Session.SteamID,
+                            candidate.FileName,
+                            referencedFilenames,
+                            plannedTargets,
+                            sourceNames);
+                        if (plan.Mode == StagedAccountFileMode.ReplaceCanonical)
+                        {
+                            replacedFiles.Add(plan.TargetFilename, contents);
+                        }
+                        else
+                        {
+                            stagedFiles.Add(plan.TargetFilename, contents);
+                            obsoleteFiles.Add(candidate.FileName);
+                            if (plan.Mode == StagedAccountFileMode.CreateFallbackGuid)
+                                usedFallbackGuidFilename = true;
+                        }
+
                         stagedManifest.Entries.Add(new ManifestEntry
                         {
                             SteamID = account.Session.SteamID,
                             IV = iv,
                             Salt = salt,
-                            Filename = filename,
+                            Filename = plan.TargetFilename,
                             SessionNeedsRenewal = account.Session.IsRefreshTokenExpired()
                         });
+                        updatedSteamIds.Add(account.Session.SteamID);
                     }
 
-                    StorageResult result = CommitStorageTransaction(stagedManifest, stagedFiles, obsoleteFiles);
+                    StorageResult result = CommitStorageTransaction(stagedManifest, stagedFiles, obsoleteFiles, replacedFiles);
                     if (result.Succeeded)
                     {
-                        CopyStorageStateFrom(stagedManifest);
-                        StorageResult normalizationResult = NormalizeAccountFilenames();
-                        if (!normalizationResult.Succeeded)
-                            DiagnosticErrorLogger.Log("Authenticator startup import", normalizationResult.Exception, "Imported accounts were saved but their canonical filenames could not be completed.");
+                        CopyStorageStateFrom(stagedManifest, updatedSteamIds);
+                        if (usedFallbackGuidFilename)
+                        {
+                            StorageResult normalizationResult = NormalizeAccountFilenames(true);
+                            if (!normalizationResult.Succeeded)
+                                DiagnosticErrorLogger.Log("Authenticator startup import", normalizationResult.Exception, "Imported accounts were saved but their canonical filenames could not be completed.");
+                        }
                     }
                     return result;
                 }
@@ -792,8 +829,14 @@ namespace Steam_Desktop_Authenticator
                 try
                 {
                 Manifest stagedManifest = CloneForStorage();
-                Dictionary<string, string> stagedFiles = new Dictionary<string, string>();
+                Dictionary<string, string> stagedFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, string> replacedFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 List<string> obsoleteFiles = new List<string>();
+                HashSet<string> referencedFilenames = new HashSet<string>(
+                    this.Entries.Select(entry => entry.Filename), StringComparer.OrdinalIgnoreCase);
+                HashSet<string> plannedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                List<ulong> updatedSteamIds = new List<ulong>(this.Entries.Count);
+                bool usedFallbackGuidFilename = false;
                 string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
 
                 for (int i = 0; i < this.Entries.Count; i++)
@@ -834,22 +877,42 @@ namespace Steam_Desktop_Authenticator
                         }
                     }
 
-                    string newFilename = existingEntry.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
-                    stagedFiles.Add(newFilename, stagedContents);
-                    obsoleteFiles.Add(existingEntry.Filename);
-                    stagedManifest.Entries[i].Filename = newFilename;
+                    AccountFileTargetPlan plan = PlanAccountFileTarget(
+                        maDir,
+                        existingEntry.SteamID,
+                        existingEntry.Filename,
+                        referencedFilenames,
+                        plannedTargets,
+                        null);
+                    if (plan.Mode == StagedAccountFileMode.ReplaceCanonical)
+                    {
+                        replacedFiles.Add(plan.TargetFilename, stagedContents);
+                    }
+                    else
+                    {
+                        stagedFiles.Add(plan.TargetFilename, stagedContents);
+                        obsoleteFiles.Add(existingEntry.Filename);
+                        if (plan.Mode == StagedAccountFileMode.CreateFallbackGuid)
+                            usedFallbackGuidFilename = true;
+                    }
+
+                    stagedManifest.Entries[i].Filename = plan.TargetFilename;
                     stagedManifest.Entries[i].Salt = newSalt;
                     stagedManifest.Entries[i].IV = newIV;
+                    updatedSteamIds.Add(existingEntry.SteamID);
                 }
 
                 stagedManifest.Encrypted = toEncrypt;
-                StorageResult result = CommitStorageTransaction(stagedManifest, stagedFiles, obsoleteFiles);
+                StorageResult result = CommitStorageTransaction(stagedManifest, stagedFiles, obsoleteFiles, replacedFiles);
                 if (result.Succeeded)
                 {
-                    CopyStorageStateFrom(stagedManifest);
-                    StorageResult normalizationResult = NormalizeAccountFilenames();
-                    if (!normalizationResult.Succeeded)
-                        DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "Encryption changed successfully, but canonical authenticator filenames could not be completed.");
+                    CopyStorageStateFrom(stagedManifest, updatedSteamIds);
+                    if (usedFallbackGuidFilename)
+                    {
+                        StorageResult normalizationResult = NormalizeAccountFilenames(true);
+                        if (!normalizationResult.Succeeded)
+                            DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "Encryption changed successfully, but canonical authenticator filenames could not be completed.");
+                    }
                 }
                 return result;
                 }
@@ -1013,13 +1076,28 @@ namespace Steam_Desktop_Authenticator
                 ManifestEntry previousEntry = stagedManifest.Entries.FirstOrDefault(entry => entry.SteamID == account.Session.SteamID);
                 if (previousEntry == null && !allowCreate)
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account is no longer managed by this authenticator.");
-                string filename = account.Session.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
+
+                string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+                if (Directory.Exists(maDir))
+                    ValidateStorageDirectory(maDir);
+
+                HashSet<string> referencedFilenames = new HashSet<string>(
+                    stagedManifest.Entries.Select(entry => entry.Filename), StringComparer.OrdinalIgnoreCase);
+                HashSet<string> plannedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                AccountFileTargetPlan plan = PlanAccountFileTarget(
+                    maDir,
+                    account.Session.SteamID,
+                    previousEntry?.Filename,
+                    referencedFilenames,
+                    plannedTargets,
+                    null);
+
                 ManifestEntry newEntry = new ManifestEntry()
                 {
                     SteamID = account.Session.SteamID,
                     IV = iV,
                     Salt = salt,
-                    Filename = filename,
+                    Filename = plan.TargetFilename,
                     SessionNeedsRenewal = account.Session.IsRefreshTokenExpired()
                 };
                 if (previousEntry == null)
@@ -1032,17 +1110,35 @@ namespace Steam_Desktop_Authenticator
                     stagedManifest.Entries[index] = newEntry;
                 }
 
+                Dictionary<string, string> stagedFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, string> replacedFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                IEnumerable<string> obsoleteFiles;
+                if (plan.Mode == StagedAccountFileMode.ReplaceCanonical)
+                {
+                    replacedFiles.Add(plan.TargetFilename, jsonAccount);
+                    obsoleteFiles = Enumerable.Empty<string>();
+                }
+                else
+                {
+                    stagedFiles.Add(plan.TargetFilename, jsonAccount);
+                    obsoleteFiles = previousEntry == null ? Enumerable.Empty<string>() : new[] { previousEntry.Filename };
+                }
+
                 stagedManifest.Encrypted = encrypt || stagedManifest.Encrypted;
                 StorageResult result = CommitStorageTransaction(
                     stagedManifest,
-                    new Dictionary<string, string> { { filename, jsonAccount } },
-                    previousEntry == null ? Enumerable.Empty<string>() : new[] { previousEntry.Filename });
+                    stagedFiles,
+                    obsoleteFiles,
+                    replacedFiles);
                 if (result.Succeeded)
                 {
-                    CopyStorageStateFrom(stagedManifest);
-                    StorageResult normalizationResult = NormalizeAccountFilenames();
-                    if (!normalizationResult.Succeeded)
-                        DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "The account was saved, but its canonical filename could not be completed.");
+                    CopyStorageStateFrom(stagedManifest, new[] { account.Session.SteamID });
+                    if (plan.Mode == StagedAccountFileMode.CreateFallbackGuid)
+                    {
+                        StorageResult normalizationResult = NormalizeAccountFilenames(true);
+                        if (!normalizationResult.Succeeded)
+                            DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "The account was saved, but its canonical filename could not be completed.");
+                    }
                 }
                 return result;
                 }
@@ -1151,15 +1247,19 @@ namespace Steam_Desktop_Authenticator
             return clone;
         }
 
-        private void CopyStorageStateFrom(Manifest source)
+        private void CopyStorageStateFrom(Manifest source, IEnumerable<ulong> updatedSteamIds = null)
         {
             Dictionary<ulong, ManifestEntry> previousEntries = GetManifestEntriesBySteamId(Entries);
             Dictionary<ulong, ManifestEntry> nextEntries = GetManifestEntriesBySteamId(source?.Entries);
+            HashSet<ulong> explicitlyUpdatedSteamIds = updatedSteamIds == null
+                ? null
+                : new HashSet<ulong>(updatedSteamIds.Where(steamId => steamId != 0));
             foreach (ulong steamId in previousEntries.Keys.Concat(nextEntries.Keys).Distinct().ToArray())
             {
                 previousEntries.TryGetValue(steamId, out ManifestEntry previousEntry);
                 nextEntries.TryGetValue(steamId, out ManifestEntry nextEntry);
-                if (AreManifestEntriesEquivalent(previousEntry, nextEntry))
+                bool contentUpdated = explicitlyUpdatedSteamIds != null && explicitlyUpdatedSteamIds.Contains(steamId);
+                if (!contentUpdated && AreManifestEntriesEquivalent(previousEntry, nextEntry))
                     continue;
 
                 if (nextEntry == null)
@@ -1170,6 +1270,7 @@ namespace Steam_Desktop_Authenticator
 
             Entries = source.Entries;
             Encrypted = source.Encrypted;
+            StorageTransactionId = source.StorageTransactionId;
             storageRevision++;
         }
 
@@ -1225,18 +1326,83 @@ namespace Steam_Desktop_Authenticator
             destination.ProxyPassword = ProxyPassword;
         }
 
+        private enum StagedAccountFileMode
+        {
+            CreateCanonical,
+            ReplaceCanonical,
+            CreateFallbackGuid
+        }
+
+        private readonly struct AccountFileTargetPlan
+        {
+            public AccountFileTargetPlan(StagedAccountFileMode mode, string targetFilename)
+            {
+                Mode = mode;
+                TargetFilename = targetFilename;
+            }
+
+            public StagedAccountFileMode Mode { get; }
+            public string TargetFilename { get; }
+        }
+
+        private static AccountFileTargetPlan PlanAccountFileTarget(
+            string maDir,
+            ulong steamId,
+            string ownedFilename,
+            ISet<string> referencedManifestFilenames,
+            ISet<string> plannedTargetFilenames,
+            ISet<string> batchSourceFilenames)
+        {
+            string canonicalFilename = GetCanonicalMaFileFilename(steamId);
+            string canonicalPath = Path.Combine(maDir, canonicalFilename);
+
+            if (!String.IsNullOrWhiteSpace(ownedFilename) &&
+                String.Equals(ownedFilename, canonicalFilename, StringComparison.OrdinalIgnoreCase) &&
+                !plannedTargetFilenames.Contains(canonicalFilename) &&
+                File.Exists(canonicalPath))
+            {
+                if ((File.GetAttributes(canonicalPath) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException("A storage file uses an unsupported link.");
+
+                plannedTargetFilenames.Add(canonicalFilename);
+                return new AccountFileTargetPlan(StagedAccountFileMode.ReplaceCanonical, canonicalFilename);
+            }
+
+            if (!referencedManifestFilenames.Contains(canonicalFilename) &&
+                !plannedTargetFilenames.Contains(canonicalFilename) &&
+                (batchSourceFilenames == null || !batchSourceFilenames.Contains(canonicalFilename)) &&
+                !File.Exists(canonicalPath))
+            {
+                plannedTargetFilenames.Add(canonicalFilename);
+                return new AccountFileTargetPlan(StagedAccountFileMode.CreateCanonical, canonicalFilename);
+            }
+
+            string fallbackFilename = steamId.ToString(CultureInfo.InvariantCulture) + "." + Guid.NewGuid().ToString("N") + ".maFile";
+            plannedTargetFilenames.Add(fallbackFilename);
+            return new AccountFileTargetPlan(StagedAccountFileMode.CreateFallbackGuid, fallbackFilename);
+        }
+
         private StorageResult CommitStorageTransaction(
             Manifest stagedManifest,
             IReadOnlyDictionary<string, string> stagedFiles,
-            IEnumerable<string> obsoleteFiles)
+            IEnumerable<string> obsoleteFiles,
+            IReadOnlyDictionary<string, string> replacedFiles = null)
         {
             lock (storageLock)
             {
+                Interlocked.Increment(ref storageTransactionCommitCount);
                 string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
                 string manifestFilename = Path.Combine(maDir, "manifest.json");
                 string journalFilename = Path.Combine(maDir, StorageJournalFilename);
                 string backupFilename = CreateBackupFilename(maDir);
                 List<string> createdFilenames = stagedFiles.Keys.ToList();
+                List<StorageTransactionReplacedFile> replacedFileRecords = replacedFiles == null
+                    ? new List<StorageTransactionReplacedFile>()
+                    : replacedFiles.Keys.Select(filename => new StorageTransactionReplacedFile
+                    {
+                        Filename = filename,
+                        BackupFilename = CreateAccountBackupFilename()
+                    }).ToList();
                 List<string> obsoleteFilenames = obsoleteFiles
                     .Where(filename => !String.IsNullOrWhiteSpace(filename))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -1244,6 +1410,7 @@ namespace Steam_Desktop_Authenticator
                 bool manifestCommitted = false;
                 bool manifestCommitStarted = false;
                 bool journalWritten = false;
+                List<string> actuallyCreatedFilenames = new List<string>();
                 List<string> trackedRetainedObsoleteFilenames = new List<string>();
 
                 try
@@ -1256,9 +1423,16 @@ namespace Steam_Desktop_Authenticator
                         return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data transaction could not be recovered safely. No account data was changed.");
                     }
 
+                    HashSet<string> targetFilenameSet = new HashSet<string>(
+                        createdFilenames.Concat(replacedFileRecords.Select(record => record.Filename)),
+                        StringComparer.OrdinalIgnoreCase);
+                    if (retainedObsoleteFilenames.Any(filename => targetFilenameSet.Contains(filename)))
+                    {
+                        throw new IOException("A pending storage cleanup file conflicts with the new transaction target.");
+                    }
+
                     trackedRetainedObsoleteFilenames = retainedObsoleteFilenames
-                        .Where(filename => !String.IsNullOrWhiteSpace(filename) &&
-                            !createdFilenames.Contains(filename, StringComparer.OrdinalIgnoreCase))
+                        .Where(filename => !String.IsNullOrWhiteSpace(filename))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList();
                     if (trackedRetainedObsoleteFilenames.Count > 0)
@@ -1268,6 +1442,7 @@ namespace Steam_Desktop_Authenticator
                     }
 
                     CopySettingsInto(stagedManifest);
+                    stagedManifest.StorageTransactionId = Guid.NewGuid().ToString("N");
                     ValidateManifestEntries(stagedManifest, maDir);
                     string manifestContents = JsonConvert.SerializeObject(stagedManifest, storageJsonSettings);
                     if (Encoding.UTF8.GetByteCount(manifestContents) > MaximumManifestFileSizeBytes)
@@ -1275,19 +1450,63 @@ namespace Steam_Desktop_Authenticator
                     Directory.CreateDirectory(maDir);
                     ValidateStorageDirectory(maDir);
 
+                    HashSet<string> transactionFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (string filename in obsoleteFilenames)
+                    {
                         ValidateStorageFilename(filename);
+                        if (!transactionFilenames.Add(filename))
+                            throw new InvalidDataException("A storage transaction reused a filename across its file lists.");
+                    }
 
                     foreach (string filename in trackedRetainedObsoleteFilenames)
+                    {
                         ValidateStorageFilename(filename);
+                        if (!transactionFilenames.Add(filename))
+                            throw new InvalidDataException("A storage transaction reused a filename across its file lists.");
+                    }
 
                     foreach (string filename in createdFilenames)
+                    {
                         ValidateStorageFilename(filename);
+                        if (!transactionFilenames.Add(filename))
+                            throw new InvalidDataException("A storage transaction reused a filename across its file lists.");
+                        if (File.Exists(Path.Combine(maDir, filename)))
+                            throw new IOException("The target authenticator filename is already in use.");
+                    }
+
+                    foreach (StorageTransactionReplacedFile record in replacedFileRecords)
+                    {
+                        ValidateStorageFilename(record.Filename);
+                        GetValidatedAccountBackupPath(maDir, record.BackupFilename);
+                        if (!transactionFilenames.Add(record.Filename) || !transactionFilenames.Add(record.BackupFilename))
+                            throw new InvalidDataException("A storage transaction reused a filename across its file lists.");
+                        string targetPath = Path.Combine(maDir, record.Filename);
+                        if (!File.Exists(targetPath))
+                            throw new FileNotFoundException("The existing authenticator file could not be found for replacement.", targetPath);
+                        if ((File.GetAttributes(targetPath) & FileAttributes.ReparsePoint) != 0)
+                            throw new InvalidDataException("A storage file uses an unsupported link.");
+                    }
+
+                    foreach (KeyValuePair<string, string> stagedFile in stagedFiles)
+                    {
+                        if (stagedFile.Value == null || Encoding.UTF8.GetByteCount(stagedFile.Value) > MaximumAccountFileSizeBytes)
+                            throw new InvalidDataException("An account file is larger than the supported size limit.");
+                    }
+
+                    if (replacedFiles != null)
+                    {
+                        foreach (KeyValuePair<string, string> replacedFile in replacedFiles)
+                        {
+                            if (replacedFile.Value == null || Encoding.UTF8.GetByteCount(replacedFile.Value) > MaximumAccountFileSizeBytes)
+                                throw new InvalidDataException("An account file is larger than the supported size limit.");
+                        }
+                    }
 
                     StorageTransactionJournal journal = new StorageTransactionJournal()
                     {
                         ManifestHash = GetContentHash(manifestContents),
                         CreatedFilenames = createdFilenames,
+                        ReplacedFiles = replacedFileRecords.Count > 0 ? replacedFileRecords : null,
                         ObsoleteFilenames = obsoleteFilenames,
                         RetainedObsoleteFilenames = trackedRetainedObsoleteFilenames.Count > 0 ? trackedRetainedObsoleteFilenames : null,
                         BackupFilename = Path.GetFileName(backupFilename)
@@ -1297,9 +1516,21 @@ namespace Steam_Desktop_Authenticator
 
                     foreach (KeyValuePair<string, string> stagedFile in stagedFiles)
                     {
-                        if (stagedFile.Value == null || Encoding.UTF8.GetByteCount(stagedFile.Value) > MaximumAccountFileSizeBytes)
-                            throw new InvalidDataException("An account file is larger than the supported size limit.");
-                        WriteAllTextAtomically(Path.Combine(maDir, stagedFile.Key), stagedFile.Value);
+                        WriteAllTextAtomically(
+                            Path.Combine(maDir, stagedFile.Key),
+                            stagedFile.Value,
+                            null,
+                            AtomicWriteMode.CreateNewOnly);
+                        actuallyCreatedFilenames.Add(stagedFile.Key);
+                    }
+
+                    foreach (StorageTransactionReplacedFile record in replacedFileRecords)
+                    {
+                        WriteAllTextAtomically(
+                            Path.Combine(maDir, record.Filename),
+                            replacedFiles[record.Filename],
+                            Path.Combine(maDir, record.BackupFilename),
+                            AtomicWriteMode.ReplaceExistingOnly);
                     }
 
                     manifestCommitStarted = true;
@@ -1307,7 +1538,12 @@ namespace Steam_Desktop_Authenticator
                     manifestCommitted = true;
 
                     bool backupDeleted = DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
+                    bool replacedBackupsDeleted = DeleteFilesBestEffort(
+                        maDir,
+                        replacedFileRecords.Select(record => record.BackupFilename),
+                        "A replaced authenticator backup could not be removed after the manifest was committed.");
                     if (backupDeleted &&
+                        replacedBackupsDeleted &&
                         DeleteFilesBestEffort(
                             maDir,
                             obsoleteFilenames.Concat(trackedRetainedObsoleteFilenames),
@@ -1320,13 +1556,13 @@ namespace Steam_Desktop_Authenticator
                 catch (JsonException ex)
                 {
                     if (journalWritten && !manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted);
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, actuallyCreatedFilenames, replacedFileRecords, trackedRetainedObsoleteFilenames, manifestCommitStarted);
                     return StorageResult.Failure(StorageFailureKind.Serialization, "The account data could not be prepared for saving.", ex);
                 }
                 catch (NotSupportedException ex)
                 {
                     if (journalWritten && !manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted);
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, actuallyCreatedFilenames, replacedFileRecords, trackedRetainedObsoleteFilenames, manifestCommitStarted);
                     return StorageResult.Failure(
                         StorageFailureKind.Io,
                         "The selected data folder does not support the safe atomic saves required for authenticator data. Move the data folder to a local drive and try again.",
@@ -1335,7 +1571,7 @@ namespace Steam_Desktop_Authenticator
                 catch (Exception ex)
                 {
                     if (journalWritten && !manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted);
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, actuallyCreatedFilenames, replacedFileRecords, trackedRetainedObsoleteFilenames, manifestCommitStarted);
                     return StorageResult.Failure(
                         manifestCommitStarted ? StorageFailureKind.Manifest : StorageFailureKind.Io,
                         manifestCommitStarted
@@ -1352,11 +1588,25 @@ namespace Steam_Desktop_Authenticator
             string journalFilename,
             string backupFilename,
             IEnumerable<string> createdFilenames,
+            IReadOnlyList<StorageTransactionReplacedFile> replacedFiles,
             IReadOnlyList<string> retainedObsoleteFilenames,
             bool manifestCommitStarted)
         {
             if (manifestCommitStarted && !RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, true))
                 return;
+
+            if (!RestoreReplacedFilesIfNeeded(maDir, replacedFiles))
+                return;
+
+            if (replacedFiles != null &&
+                replacedFiles.Count > 0 &&
+                !DeleteFilesBestEffort(
+                    maDir,
+                    replacedFiles.Select(record => record.BackupFilename),
+                    "A replaced authenticator backup could not be removed after a failed save."))
+            {
+                return;
+            }
 
             if (DeleteFilesBestEffort(maDir, createdFilenames, "A temporary authenticator file could not be removed after a failed save."))
             {
@@ -1392,6 +1642,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     ManifestHash = GetContentHash(currentManifestContents),
                     CreatedFilenames = new List<string>(),
+                    ReplacedFiles = null,
                     ObsoleteFilenames = new List<string>(),
                     RetainedObsoleteFilenames = retainedObsoleteFilenames.ToList(),
                     BackupFilename = null
@@ -1421,10 +1672,19 @@ namespace Steam_Desktop_Authenticator
                         throw new InvalidDataException("The pending storage journal is invalid.");
 
                     List<string> created = journal.CreatedFilenames ?? new List<string>();
+                    List<StorageTransactionReplacedFile> replaced = journal.ReplacedFiles ?? new List<StorageTransactionReplacedFile>();
                     List<string> obsolete = journal.ObsoleteFilenames ?? new List<string>();
                     List<string> retainedObsolete = journal.RetainedObsoleteFilenames ?? new List<string>();
                     foreach (string filename in created.Concat(obsolete).Concat(retainedObsolete))
                         ValidateStorageFilename(filename);
+
+                    foreach (StorageTransactionReplacedFile record in replaced)
+                    {
+                        if (record == null || String.IsNullOrWhiteSpace(record.Filename) || String.IsNullOrWhiteSpace(record.BackupFilename))
+                            throw new InvalidDataException("The pending storage journal contains an invalid replaced file entry.");
+                        ValidateStorageFilename(record.Filename);
+                        GetValidatedAccountBackupPath(maDir, record.BackupFilename);
+                    }
 
                     string backupFilename = GetValidatedStorageBackupPath(maDir, journal.BackupFilename);
                     if (!RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, false))
@@ -1435,6 +1695,7 @@ namespace Steam_Desktop_Authenticator
                     HashSet<string> manifestFilenames = GetManifestFilenamesForRecovery(manifestFilename);
                     ValidateStorageTransactionFileOwnership(
                         created,
+                        replaced,
                         obsolete,
                         retainedObsolete,
                         backupFilename,
@@ -1447,15 +1708,23 @@ namespace Steam_Desktop_Authenticator
                         if (!committedBackupDeleted)
                             return false;
 
+                        bool committedReplacedBackupsDeleted = DeleteFilesBestEffort(
+                            maDir,
+                            replaced.Select(record => record.BackupFilename),
+                            "A replaced authenticator backup could not be removed during storage recovery.");
+                        if (!committedReplacedBackupsDeleted)
+                            return false;
+
                         List<string> committedObsolete = obsolete.Concat(retainedObsolete).ToList();
                         if (!DeleteFilesBestEffort(maDir, committedObsolete, "An obsolete authenticator file could not be removed during storage recovery."))
                         {
-                            // The manifest is committed and its pre-commit backup is already gone,
-                            // so its newly created files are live. Store pending deletions in
+                            // The manifest is committed and its pre-commit backups are already gone,
+                            // so its newly created/replaced files are live. Store pending deletions in
                             // retained_obsolete_filenames so they survive a subsequent manifest
                             // update even if the process exits before rebasing the journal hash.
                             journal.BackupFilename = null;
                             journal.CreatedFilenames = new List<string>();
+                            journal.ReplacedFiles = null;
                             journal.ObsoleteFilenames = new List<string>();
                             journal.RetainedObsoleteFilenames = committedObsolete;
                             WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
@@ -1469,6 +1738,18 @@ namespace Steam_Desktop_Authenticator
 
                         bool committedJournalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.");
                         return committedJournalDeleted && !File.Exists(journalFilename);
+                    }
+
+                    if (!RestoreReplacedFilesIfNeeded(maDir, replaced))
+                        return false;
+
+                    if (replaced.Count > 0 &&
+                        !DeleteFilesBestEffort(
+                            maDir,
+                            replaced.Select(record => record.BackupFilename),
+                            "A replaced authenticator backup could not be removed during storage recovery."))
+                    {
+                        return false;
                     }
 
                     if (!DeleteFilesBestEffort(maDir, created, "A temporary authenticator file could not be removed during storage recovery."))
@@ -1537,8 +1818,27 @@ namespace Steam_Desktop_Authenticator
                         return false;
                     }
 
+                    if (journal.ReplacedFiles != null && journal.ReplacedFiles.Count > 0)
+                    {
+                        foreach (StorageTransactionReplacedFile record in journal.ReplacedFiles)
+                        {
+                            if (record == null || String.IsNullOrWhiteSpace(record.BackupFilename))
+                                throw new InvalidDataException("The retained storage journal contains an invalid replaced file entry.");
+                            GetValidatedAccountBackupPath(maDir, record.BackupFilename);
+                        }
+
+                        if (!DeleteFilesBestEffort(
+                            maDir,
+                            journal.ReplacedFiles.Select(record => record.BackupFilename),
+                            "A replaced authenticator backup could not be removed while rebasing retained storage cleanup."))
+                        {
+                            return false;
+                        }
+                    }
+
                     journal.ManifestHash = GetContentHash(manifestContents);
                     journal.CreatedFilenames = new List<string>();
+                    journal.ReplacedFiles = null;
                     journal.ObsoleteFilenames = new List<string>();
                     journal.RetainedObsoleteFilenames = pendingRetainedObsolete.Count > 0 ? pendingRetainedObsolete : null;
                     journal.BackupFilename = null;
@@ -1551,6 +1851,33 @@ namespace Steam_Desktop_Authenticator
                     return false;
                 }
             }
+        }
+
+        private static bool RestoreReplacedFilesIfNeeded(string maDir, IReadOnlyList<StorageTransactionReplacedFile> replacedFiles)
+        {
+            if (replacedFiles == null || replacedFiles.Count == 0)
+                return true;
+
+            foreach (StorageTransactionReplacedFile record in replacedFiles)
+            {
+                string backupPath = Path.Combine(maDir, record.BackupFilename);
+                if (!File.Exists(backupPath))
+                    continue;
+
+                string targetPath = Path.Combine(maDir, record.Filename);
+                try
+                {
+                    string previousContents = ReadTextWithLimit(backupPath, MaximumAccountFileSizeBytes);
+                    WriteAllTextAtomically(targetPath, previousContents);
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Authenticator storage", ex, "A replaced authenticator file could not be restored safely.");
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private static bool RestoreManifestBackupIfNeeded(string manifestFilename, string backupFilename, bool overwriteManifest)
@@ -1577,15 +1904,36 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrWhiteSpace(filename))
                 return null;
 
-            if (!String.Equals(Path.GetFileName(filename), filename, StringComparison.Ordinal) ||
-                !filename.StartsWith(StorageBackupFilenamePrefix, StringComparison.OrdinalIgnoreCase) ||
-                !filename.EndsWith(StorageBackupFilenameSuffix, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("A storage transaction contained an invalid manifest backup filename.");
+            return GetValidatedGuidBackupPath(
+                maDir,
+                filename,
+                StorageBackupFilenamePrefix,
+                "A storage transaction contained an invalid manifest backup filename.");
+        }
 
-            int guidStart = StorageBackupFilenamePrefix.Length;
+        private static string GetValidatedAccountBackupPath(string maDir, string filename)
+        {
+            if (String.IsNullOrWhiteSpace(filename))
+                throw new InvalidDataException("A storage transaction contained an invalid account backup filename.");
+
+            return GetValidatedGuidBackupPath(
+                maDir,
+                filename,
+                AccountBackupFilenamePrefix,
+                "A storage transaction contained an invalid account backup filename.");
+        }
+
+        private static string GetValidatedGuidBackupPath(string maDir, string filename, string prefix, string errorMessage)
+        {
+            if (!String.Equals(Path.GetFileName(filename), filename, StringComparison.Ordinal) ||
+                !filename.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                !filename.EndsWith(StorageBackupFilenameSuffix, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(errorMessage);
+
+            int guidStart = prefix.Length;
             int guidLength = filename.Length - guidStart - StorageBackupFilenameSuffix.Length;
             if (guidLength != 32 || !Guid.TryParseExact(filename.Substring(guidStart, guidLength), "N", out _))
-                throw new InvalidDataException("A storage transaction contained an invalid manifest backup filename.");
+                throw new InvalidDataException(errorMessage);
 
             return Path.Combine(maDir, filename);
         }
@@ -1612,6 +1960,7 @@ namespace Steam_Desktop_Authenticator
 
         private static void ValidateStorageTransactionFileOwnership(
             IEnumerable<string> created,
+            IEnumerable<StorageTransactionReplacedFile> replaced,
             IEnumerable<string> obsolete,
             IEnumerable<string> retainedObsolete,
             string backupFilename,
@@ -1625,7 +1974,15 @@ namespace Steam_Desktop_Authenticator
                     throw new InvalidDataException("A storage transaction reused a filename across its file lists.");
             }
 
-            if (backupFilename != null && transactionFilenames.Contains(Path.GetFileName(backupFilename)))
+            foreach (StorageTransactionReplacedFile record in replaced)
+            {
+                if (!transactionFilenames.Add(record.Filename) || !transactionFilenames.Add(record.BackupFilename))
+                    throw new InvalidDataException("A storage transaction reused a filename across its file lists.");
+                if (manifestCommitted && !manifestFilenames.Contains(record.Filename))
+                    throw new InvalidDataException("A committed storage transaction referenced a replaced file not present in the manifest.");
+            }
+
+            if (backupFilename != null && !transactionFilenames.Add(Path.GetFileName(backupFilename)))
                 throw new InvalidDataException("A storage transaction reused its manifest backup filename.");
 
             IEnumerable<string> filesThatWouldBeDeleted = (manifestCommitted ? obsolete : created).Concat(retainedObsolete);
@@ -1636,7 +1993,18 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static void WriteAllTextAtomically(string filename, string contents, string backupFilename = null)
+        private enum AtomicWriteMode
+        {
+            CreateOrReplace,
+            CreateNewOnly,
+            ReplaceExistingOnly
+        }
+
+        private static void WriteAllTextAtomically(
+            string filename,
+            string contents,
+            string backupFilename = null,
+            AtomicWriteMode mode = AtomicWriteMode.CreateOrReplace)
         {
             string temporaryFilename = filename + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
@@ -1649,23 +2017,18 @@ namespace Steam_Desktop_Authenticator
                     stream.Flush(true);
                 }
 
-                if (File.Exists(filename))
+                if (mode == AtomicWriteMode.CreateNewOnly)
                 {
-                    try
-                    {
-                        File.Replace(temporaryFilename, filename, backupFilename);
-                    }
-                    catch (NotSupportedException ex)
-                    {
-                        throw new NotSupportedException("The selected data folder does not support the atomic file replacement required to safely save authenticator data.", ex);
-                    }
-                    catch (IOException ex) when (IsAtomicReplacementUnsupported(ex))
-                    {
-                        throw new NotSupportedException("The selected data folder does not support the atomic file replacement required to safely save authenticator data.", ex);
-                    }
+                    File.Move(temporaryFilename, filename);
+                }
+                else if (mode == AtomicWriteMode.ReplaceExistingOnly || File.Exists(filename))
+                {
+                    ReplaceFileAtomically(temporaryFilename, filename, backupFilename);
                 }
                 else
+                {
                     File.Move(temporaryFilename, filename);
+                }
             }
             finally
             {
@@ -1674,9 +2037,30 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private static void ReplaceFileAtomically(string temporaryFilename, string destinationFilename, string backupFilename)
+        {
+            try
+            {
+                File.Replace(temporaryFilename, destinationFilename, backupFilename);
+            }
+            catch (NotSupportedException ex)
+            {
+                throw new NotSupportedException("The selected data folder does not support the atomic file replacement required to safely save authenticator data.", ex);
+            }
+            catch (IOException ex) when (IsAtomicReplacementUnsupported(ex))
+            {
+                throw new NotSupportedException("The selected data folder does not support the atomic file replacement required to safely save authenticator data.", ex);
+            }
+        }
+
         private static string CreateBackupFilename(string maDir)
         {
-            return Path.Combine(maDir, ".manifest." + Guid.NewGuid().ToString("N") + ".bak");
+            return Path.Combine(maDir, StorageBackupFilenamePrefix + Guid.NewGuid().ToString("N") + StorageBackupFilenameSuffix);
+        }
+
+        private static string CreateAccountBackupFilename()
+        {
+            return AccountBackupFilenamePrefix + Guid.NewGuid().ToString("N") + StorageBackupFilenameSuffix;
         }
 
         private static bool IsAtomicReplacementUnsupported(IOException exception)
@@ -1885,6 +2269,15 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private sealed class StorageTransactionReplacedFile
+        {
+            [JsonProperty("filename")]
+            public string Filename { get; set; }
+
+            [JsonProperty("backup_filename")]
+            public string BackupFilename { get; set; }
+        }
+
         private sealed class StorageTransactionJournal
         {
             [JsonProperty("manifest_hash")]
@@ -1892,6 +2285,9 @@ namespace Steam_Desktop_Authenticator
 
             [JsonProperty("created_filenames")]
             public List<string> CreatedFilenames { get; set; }
+
+            [JsonProperty("replaced_files", NullValueHandling = NullValueHandling.Ignore)]
+            public List<StorageTransactionReplacedFile> ReplacedFiles { get; set; }
 
             [JsonProperty("obsolete_filenames")]
             public List<string> ObsoleteFilenames { get; set; }

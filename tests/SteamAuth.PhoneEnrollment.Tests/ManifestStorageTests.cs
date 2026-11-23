@@ -1300,6 +1300,334 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
+        [Fact]
+        public void CanonicalAccountFileSaves_CommitInOneTransactionAcrossCreateUpdateImportAndEncryption()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            ulong firstId = 76561198000001000UL;
+            ulong secondId = 76561198000001001UL;
+            ulong thirdId = 76561198000001002UL;
+            SteamGuardAccount first = CreateAccount(firstId);
+            first.Session.AccessToken = "token-v1";
+
+            // 1. Creating a brand-new account writes directly to its canonical filename in 1 transaction.
+            long commitsBeforeCreate = Manifest.StorageTransactionCommitCount;
+            Assert.True(manifest.SaveAccount(first, false).Succeeded);
+            Assert.Equal(1, Manifest.StorageTransactionCommitCount - commitsBeforeCreate);
+            Assert.Equal(Manifest.GetCanonicalMaFileFilename(firstId), Assert.Single(manifest.Entries).Filename);
+            Assert.Empty(Directory.EnumerateFiles(maDirectory, "*.bak"));
+
+            // 2. Updating an existing unencrypted canonical account commits in 1 transaction and increments account revision.
+            long revBeforeUpdate = manifest.GetAccountStorageRevision(firstId);
+            long commitsBeforeUpdate = Manifest.StorageTransactionCommitCount;
+            first.Session.AccessToken = "token-v2";
+            Assert.True(manifest.SaveAccount(first, false).Succeeded);
+            Assert.Equal(1, Manifest.StorageTransactionCommitCount - commitsBeforeUpdate);
+            Assert.Equal(revBeforeUpdate + 1, manifest.GetAccountStorageRevision(firstId));
+            Assert.Equal("token-v2", Assert.Single(Manifest.GetManifest(true).GetAllAccounts()).Session.AccessToken);
+
+            // Stale refresh using the pre-update revision must still be rejected.
+            first.Session.AccessToken = "stale-token";
+            StorageResult staleResult = manifest.SaveAccount(first, false, null, revBeforeUpdate, allowCreate: false);
+            Assert.False(staleResult.Succeeded);
+            Assert.Equal(StorageFailureKind.Validation, staleResult.FailureKind);
+
+            // 3. Enabling encryption, updating encrypted canonical account, rotating passkey, and disabling encryption each take 1 transaction.
+            long commitsBeforeEncrypt = Manifest.StorageTransactionCommitCount;
+            Assert.True(manifest.ChangeEncryptionKey(null, "passkey-1").Succeeded);
+            Assert.Equal(1, Manifest.StorageTransactionCommitCount - commitsBeforeEncrypt);
+            Assert.Equal(Manifest.GetCanonicalMaFileFilename(firstId), Assert.Single(manifest.Entries).Filename);
+
+            long commitsBeforeEncryptedUpdate = Manifest.StorageTransactionCommitCount;
+            first.Session.AccessToken = "token-v3-enc";
+            Assert.True(manifest.SaveAccount(first, true, "passkey-1").Succeeded);
+            Assert.Equal(1, Manifest.StorageTransactionCommitCount - commitsBeforeEncryptedUpdate);
+            Assert.Equal("token-v3-enc", Assert.Single(Manifest.GetManifest(true).GetAllAccounts("passkey-1")).Session.AccessToken);
+
+            long commitsBeforeRotate = Manifest.StorageTransactionCommitCount;
+            Assert.True(manifest.ChangeEncryptionKey("passkey-1", "passkey-2").Succeeded);
+            Assert.Equal(1, Manifest.StorageTransactionCommitCount - commitsBeforeRotate);
+            Assert.Equal("token-v3-enc", Assert.Single(Manifest.GetManifest(true).GetAllAccounts("passkey-2")).Session.AccessToken);
+
+            // 4. Importing both a non-canonical source file and an already-canonical source file commits in 1 transaction.
+            string nonCanonicalSource = "imported-legacy.maFile";
+            string canonicalSource = Manifest.GetCanonicalMaFileFilename(thirdId);
+            File.WriteAllText(Path.Combine(maDirectory, nonCanonicalSource), JsonConvert.SerializeObject(CreateAccount(secondId)));
+            File.WriteAllText(Path.Combine(maDirectory, canonicalSource), JsonConvert.SerializeObject(CreateAccount(thirdId)));
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Equal(2, candidates.Count);
+
+            long commitsBeforeImport = Manifest.StorageTransactionCommitCount;
+            Assert.True(manifest.ImportUnmanagedMaFiles(candidates, "passkey-2").Succeeded);
+            Assert.Equal(1, Manifest.StorageTransactionCommitCount - commitsBeforeImport);
+            Assert.False(File.Exists(Path.Combine(maDirectory, nonCanonicalSource)));
+            Assert.Equal(
+                new[]
+                {
+                    Manifest.GetCanonicalMaFileFilename(firstId),
+                    Manifest.GetCanonicalMaFileFilename(thirdId),
+                    Manifest.GetCanonicalMaFileFilename(secondId)
+                },
+                manifest.Entries.Select(e => e.Filename).ToArray());
+            Assert.Equal(3, Manifest.GetManifest(true).GetAllAccounts("passkey-2").Length);
+
+            long commitsBeforeDecrypt = Manifest.StorageTransactionCommitCount;
+            Assert.True(manifest.ChangeEncryptionKey("passkey-2", null).Succeeded);
+            Assert.Equal(1, Manifest.StorageTransactionCommitCount - commitsBeforeDecrypt);
+            Assert.Equal(3, Manifest.GetManifest(true).GetAllAccounts().Length);
+            Assert.Empty(Directory.EnumerateFiles(maDirectory, "*.bak"));
+            Assert.False(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+        }
+
+        [Fact]
+        public void SaveAccount_InPlaceCanonicalUpdateRollbackRestoresPreviousPlaintextAndEncryptedFile()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000002000UL;
+            ulong secondId = 76561198000002001UL;
+            SteamGuardAccount first = CreateAccount(firstId);
+            first.Session.AccessToken = "plaintext-v1";
+            SteamGuardAccount second = CreateAccount(secondId);
+            second.Session.AccessToken = "second-v1";
+            Assert.True(manifest.SaveAccount(first, false).Succeeded);
+            Assert.True(manifest.SaveAccount(second, false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            long revisionBefore = manifest.GetAccountStorageRevision(firstId);
+
+            // 1. Plaintext in-place update rollback when manifest.json replacement is blocked.
+            first.Session.AccessToken = "plaintext-v2-blocked";
+            using (new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult result = manifest.SaveAccount(first, false);
+                Assert.False(result.Succeeded);
+            }
+
+            Assert.Equal(revisionBefore, manifest.GetAccountStorageRevision(firstId));
+            Assert.Empty(Directory.EnumerateFiles(maDirectory, "*.bak"));
+            Assert.False(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+            Assert.Equal(
+                "plaintext-v1",
+                Assert.Single(Manifest.GetManifest(true).GetAllAccounts(), a => a.Session.SteamID == firstId).Session.AccessToken);
+
+            // 2. Multi-account ChangeEncryptionKey rollback restores every replaced canonical file.
+            using (new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult encryptResult = manifest.ChangeEncryptionKey(null, "blocked-key");
+                Assert.False(encryptResult.Succeeded);
+            }
+
+            Assert.False(manifest.Encrypted);
+            Assert.Empty(Directory.EnumerateFiles(maDirectory, "*.bak"));
+            Assert.False(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+            SteamGuardAccount[] restoredPlaintext = Manifest.GetManifest(true).GetAllAccounts();
+            Assert.Equal("plaintext-v1", Assert.Single(restoredPlaintext, a => a.Session.SteamID == firstId).Session.AccessToken);
+            Assert.Equal("second-v1", Assert.Single(restoredPlaintext, a => a.Session.SteamID == secondId).Session.AccessToken);
+
+            // 3. Encrypted in-place update rollback restores prior ciphertext matching prior Salt/IV.
+            Assert.True(manifest.ChangeEncryptionKey(null, "active-key").Succeeded);
+            first.Session.AccessToken = "encrypted-v2-blocked";
+            using (new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult encryptedUpdateResult = manifest.SaveAccount(first, true, "active-key");
+                Assert.False(encryptedUpdateResult.Succeeded);
+            }
+
+            Assert.Empty(Directory.EnumerateFiles(maDirectory, "*.bak"));
+            Assert.False(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+            SteamGuardAccount[] restoredEncrypted = Manifest.GetManifest(true).GetAllAccounts("active-key");
+            Assert.Equal("plaintext-v1", Assert.Single(restoredEncrypted, a => a.Session.SteamID == firstId).Session.AccessToken);
+            Assert.Equal("second-v1", Assert.Single(restoredEncrypted, a => a.Session.SteamID == secondId).Session.AccessToken);
+        }
+
+        [Fact]
+        public void SaveAccount_CanonicalCollisionPreservesForeignFileAndFallsBackToGuid()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            ulong accountId = 76561198000003000UL;
+            ulong foreignId = 76561198000003999UL;
+            string canonicalFilename = Manifest.GetCanonicalMaFileFilename(accountId);
+            string canonicalPath = Path.Combine(maDirectory, canonicalFilename);
+            string foreignContents = JsonConvert.SerializeObject(CreateAccount(foreignId));
+            File.WriteAllText(canonicalPath, foreignContents);
+
+            SteamGuardAccount account = CreateAccount(accountId);
+            account.Session.AccessToken = "owned-v1";
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+
+            string assignedFilename = Assert.Single(manifest.Entries).Filename;
+            Assert.NotEqual(canonicalFilename, assignedFilename);
+            Assert.Equal(foreignContents, File.ReadAllText(canonicalPath));
+            Assert.Equal("owned-v1", Assert.Single(Manifest.GetManifest(true).GetAllAccounts()).Session.AccessToken);
+
+            // Subsequent update while the foreign canonical file still occupies the slot also keeps it untouched.
+            account.Session.AccessToken = "owned-v2";
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+            Assert.NotEqual(canonicalFilename, Assert.Single(manifest.Entries).Filename);
+            Assert.Equal(foreignContents, File.ReadAllText(canonicalPath));
+            Assert.Equal("owned-v2", Assert.Single(Manifest.GetManifest(true).GetAllAccounts()).Session.AccessToken);
+        }
+
+        [Fact]
+        public void ImportUnmanagedMaFiles_SwappedCanonicalFilenamesPreserveBothAccountsAndNormalize()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            ulong firstId = 76561198000004000UL;
+            ulong secondId = 76561198000004001UL;
+            SteamGuardAccount first = CreateAccount(firstId);
+            first.Session.AccessToken = "first-token";
+            SteamGuardAccount second = CreateAccount(secondId);
+            second.Session.AccessToken = "second-token";
+
+            // Deliberately swap canonical filenames on disk.
+            File.WriteAllText(Path.Combine(maDirectory, Manifest.GetCanonicalMaFileFilename(firstId)), JsonConvert.SerializeObject(second));
+            File.WriteAllText(Path.Combine(maDirectory, Manifest.GetCanonicalMaFileFilename(secondId)), JsonConvert.SerializeObject(first));
+
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Equal(2, candidates.Count);
+            Assert.True(manifest.ImportUnmanagedMaFiles(candidates).Succeeded);
+
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(2, reloaded.Entries.Count);
+            Assert.Equal(Manifest.GetCanonicalMaFileFilename(firstId), Assert.Single(reloaded.Entries, e => e.SteamID == firstId).Filename);
+            Assert.Equal(Manifest.GetCanonicalMaFileFilename(secondId), Assert.Single(reloaded.Entries, e => e.SteamID == secondId).Filename);
+            SteamGuardAccount[] loadedAccounts = reloaded.GetAllAccounts();
+            Assert.Equal("first-token", Assert.Single(loadedAccounts, a => a.Session.SteamID == firstId).Session.AccessToken);
+            Assert.Equal("second-token", Assert.Single(loadedAccounts, a => a.Session.SteamID == secondId).Session.AccessToken);
+        }
+
+        [Fact]
+        public void ImportUnmanagedMaFiles_AlreadyCanonicalSourceRollbackRestoresOriginalPlaintext()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.SaveAccount(CreateAccount(76561198000005000UL), true, "import-key").Succeeded);
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            ulong importId = 76561198000005001UL;
+            string sourcePath = Path.Combine(maDirectory, Manifest.GetCanonicalMaFileFilename(importId));
+            string originalPlaintext = JsonConvert.SerializeObject(CreateAccount(importId));
+            File.WriteAllText(sourcePath, originalPlaintext);
+
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Single(candidates);
+
+            using (new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult result = manifest.ImportUnmanagedMaFiles(candidates, "import-key");
+                Assert.False(result.Succeeded);
+            }
+
+            Assert.Single(manifest.Entries);
+            Assert.Equal(originalPlaintext, File.ReadAllText(sourcePath));
+            Assert.Empty(Directory.EnumerateFiles(maDirectory, "*.bak"));
+            Assert.False(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+        }
+
+        [Fact]
+        public void StartupRecovery_UncommittedAndCommittedReplacedFilesRecoverSafely()
+        {
+            const string testAccountBackupFilename = ".mafile.11111111111111111111111111111111.bak";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong accountId = 76561198000006000UL;
+            SteamGuardAccount original = CreateAccount(accountId);
+            original.Session.AccessToken = "original-token";
+            Assert.True(manifest.SaveAccount(original, false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string canonicalFilename = Manifest.GetCanonicalMaFileFilename(accountId);
+            string canonicalPath = Path.Combine(maDirectory, canonicalFilename);
+            string accountBackupPath = Path.Combine(maDirectory, testAccountBackupFilename);
+
+            // 1. Uncommitted crash: manifest still has old storage_transaction_id, account file has new contents, backup has old contents.
+            string originalFileContents = File.ReadAllText(canonicalPath);
+            SteamGuardAccount replacementAccount = CreateAccount(accountId);
+            replacementAccount.Session.AccessToken = "uncommitted-replacement-token";
+            File.WriteAllText(accountBackupPath, originalFileContents);
+            File.WriteAllText(canonicalPath, JsonConvert.SerializeObject(replacementAccount));
+
+            JObject nextManifestJson = JObject.Parse(File.ReadAllText(manifestPath));
+            nextManifestJson["storage_transaction_id"] = Guid.NewGuid().ToString("N");
+            string uncommittedManifestContents = nextManifestJson.ToString(Formatting.None);
+
+            JObject uncommittedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(uncommittedManifestContents),
+                ["created_filenames"] = new JArray(),
+                ["replaced_files"] = new JArray(new JObject
+                {
+                    ["filename"] = canonicalFilename,
+                    ["backup_filename"] = testAccountBackupFilename
+                }),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = TestBackupFilename
+            };
+            File.WriteAllText(journalPath, uncommittedJournal.ToString(Formatting.None));
+
+            Manifest recoveredUncommitted = Manifest.GetManifest(true);
+            Assert.Equal("original-token", Assert.Single(recoveredUncommitted.GetAllAccounts()).Session.AccessToken);
+            Assert.False(File.Exists(accountBackupPath));
+            Assert.False(File.Exists(journalPath));
+
+            // 2. Committed crash with locked account backup fails closed without touching obsolete files, then completes once unlocked.
+            string obsoletePath = Path.Combine(maDirectory, "obsolete-after-replace.maFile");
+            File.WriteAllText(obsoletePath, "obsolete");
+            File.WriteAllText(accountBackupPath, originalFileContents);
+            File.WriteAllText(canonicalPath, JsonConvert.SerializeObject(replacementAccount));
+            File.WriteAllText(manifestPath, uncommittedManifestContents);
+
+            JObject committedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(uncommittedManifestContents),
+                ["created_filenames"] = new JArray(),
+                ["replaced_files"] = new JArray(new JObject
+                {
+                    ["filename"] = canonicalFilename,
+                    ["backup_filename"] = testAccountBackupFilename
+                }),
+                ["obsolete_filenames"] = new JArray("obsolete-after-replace.maFile"),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, committedJournal.ToString(Formatting.None));
+
+            using (new FileStream(accountBackupPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            Manifest recoveredCommitted = Manifest.GetManifest(true);
+            Assert.Equal("uncommitted-replacement-token", Assert.Single(recoveredCommitted.GetAllAccounts()).Session.AccessToken);
+            Assert.False(File.Exists(accountBackupPath));
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
+
+            // 3. Tampered replaced_files backup targeting a live account file is rejected.
+            JObject tamperedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(File.ReadAllText(manifestPath)),
+                ["created_filenames"] = new JArray(),
+                ["replaced_files"] = new JArray(new JObject
+                {
+                    ["filename"] = canonicalFilename,
+                    ["backup_filename"] = canonicalFilename
+                }),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, tamperedJournal.ToString(Formatting.None));
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(canonicalPath));
+        }
+
         public void Dispose()
         {
             Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);
