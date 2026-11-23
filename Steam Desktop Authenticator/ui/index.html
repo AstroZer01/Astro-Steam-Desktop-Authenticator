@@ -374,7 +374,7 @@
         </button>
         <button id="btn-remove-account" type="button" class="w-full text-left rounded-lg border border-white/10 bg-surface-variant p-3 hover:bg-surface-bright transition-colors">
             <span class="block font-semibold text-on-surface">Remove user from app</span>
-            <span class="block text-sm text-on-surface-variant mt-1">Keeps Steam Guard enabled on Steam and deletes only this account's local data.</span>
+            <span id="remove-account-local-desc" class="block text-sm text-on-surface-variant mt-1">Keeps Steam Guard enabled on Steam and deletes only this account's local data.</span>
         </button>
         <button id="btn-cancel-remove-account" type="button" class="w-full rounded-lg border border-white/10 py-2.5 text-sm text-on-surface-variant hover:bg-surface-variant transition-colors">Cancel</button>
     </div>
@@ -710,12 +710,16 @@
             accountActions.className = "shrink-0 flex items-center gap-1";
             const renewButton = document.createElement('button');
             renewButton.type = 'button';
-            renewButton.disabled = !sessionExpired || !acc.steamId || pendingActivation;
-            renewButton.className = sessionExpired && acc.steamId && !pendingActivation
-                ? "shrink-0 rounded-sm p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
-                : "shrink-0 rounded-sm p-1 text-on-surface-variant opacity-70 cursor-not-allowed transition-colors";
-            renewButton.title = "Renew session";
-            renewButton.setAttribute('aria-label', "Renew session");
+            const canVerifyPending = pendingActivation && Boolean(acc.steamId);
+            const canRenewSession = sessionExpired && Boolean(acc.steamId) && !pendingActivation;
+            renewButton.disabled = !canVerifyPending && !canRenewSession;
+            renewButton.className = canVerifyPending
+                ? "shrink-0 rounded-sm p-1 text-[#ffd180] hover:bg-primary/20 hover:text-primary transition-colors"
+                : (canRenewSession
+                    ? "shrink-0 rounded-sm p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
+                    : "shrink-0 rounded-sm p-1 text-on-surface-variant opacity-70 cursor-not-allowed transition-colors");
+            renewButton.title = canVerifyPending ? "Verify Steam activation" : "Renew session";
+            renewButton.setAttribute('aria-label', canVerifyPending ? "Verify Steam activation" : "Renew session");
             renewButton.innerHTML = '<svg class="ui-icon renew-session-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 0 0-13.66-5.66L4 8"/><path d="M4 4v4h4"/><path d="M4 12a8 8 0 0 0 13.66 5.66L20 16"/><path d="M20 20v-4h-4"/></svg>';
             renewButton.onclick = event => {
                 if (renewButton.disabled) return;
@@ -755,6 +759,12 @@
             : (account.pendingActivation
                 ? 'This authenticator is pending Steam activation and has not been finalized yet.'
                 : 'This local account has no saved Steam session to unlink Steam Guard.');
+        const removeLocalDesc = document.getElementById('remove-account-local-desc');
+        if (removeLocalDesc) {
+            removeLocalDesc.textContent = account.pendingActivation
+                ? "Deletes this pending local record and its saved recovery code from this app. Back up your recovery code first."
+                : "Keeps Steam Guard enabled on Steam and deletes only this account's local data.";
+        }
         const modal = document.getElementById('remove-account-modal');
         modal.classList.remove('hidden');
         modal.classList.add('flex');

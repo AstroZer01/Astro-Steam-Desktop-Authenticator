@@ -729,10 +729,23 @@ namespace Steam_Desktop_Authenticator
                 return false;
 
             pendingAccount.FullyEnrolled = true;
-            if (!persistActivatedAccount(pendingAccount))
+            try
+            {
+                if (!persistActivatedAccount(pendingAccount))
+                {
+                    pendingAccount.FullyEnrolled = false;
+                    return false;
+                }
+            }
+            catch (StaleAccountGenerationException)
             {
                 pendingAccount.FullyEnrolled = false;
                 return false;
+            }
+            catch
+            {
+                pendingAccount.FullyEnrolled = false;
+                throw;
             }
 
             return true;
@@ -748,26 +761,51 @@ namespace Steam_Desktop_Authenticator
 
                 if (IsPendingEnrollment(account))
                 {
-                    if (account.Session.IsRefreshTokenExpired())
+                    SessionData pendingSessionAtStart = account.Session;
+                    if (pendingSessionAtStart.IsAccessTokenExpired() && pendingSessionAtStart.IsRefreshTokenExpired())
                         continue;
 
                     try
                     {
                         await RunSteamAccountOperationAsync(account, async () =>
                         {
-                            if (account.Session.IsAccessTokenExpired())
+                            bool refreshedAccessToken = false;
+                            if (pendingSessionAtStart.IsAccessTokenExpired())
+                            {
+                                if (pendingSessionAtStart.IsRefreshTokenExpired())
+                                    return false;
                                 await RefreshAndPersistAccessTokenAsync(account, lifetimeCancellationSource.Token);
+                                refreshedAccessToken = true;
+                            }
 
+                            long storageRevisionAtCheck = manifest?.GetAccountStorageRevision(pendingSessionAtStart.SteamID) ?? 0;
                             return await TryRecoverPendingAccountActivationAsync(
                                 account,
-                                ct => account.VerifyAuthenticatorActivationAsync(ct),
-                                activated => manifest.SaveAccount(activated, manifest.Encrypted, passKey).Succeeded,
+                                async ct =>
+                                {
+                                    AuthenticatorActivationStatus status = await account.VerifyAuthenticatorActivationAsync(ct);
+                                    if (status == AuthenticatorActivationStatus.SessionInvalid &&
+                                        !refreshedAccessToken &&
+                                        !pendingSessionAtStart.IsRefreshTokenExpired())
+                                    {
+                                        await RefreshAndPersistAccessTokenAsync(account, ct);
+                                        refreshedAccessToken = true;
+                                        storageRevisionAtCheck = manifest?.GetAccountStorageRevision(pendingSessionAtStart.SteamID) ?? 0;
+                                        status = await account.VerifyAuthenticatorActivationAsync(ct);
+                                    }
+                                    return status;
+                                },
+                                activated => PersistLoginSession(activated, pendingSessionAtStart, storageRevisionAtCheck),
                                 lifetimeCancellationSource.Token);
                         }, lifetimeCancellationSource.Token);
                     }
                     catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
                     {
                         return;
+                    }
+                    catch (StaleAccountGenerationException)
+                    {
+                        // The pending account was removed or replaced before startup recovery finished.
                     }
                     catch (Exception ex)
                     {
@@ -2254,7 +2292,7 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private bool PersistLoginSession(SteamGuardAccount account, SessionData expectedSession = null, long? expectedStorageRevision = null)
+        internal bool PersistLoginSession(SteamGuardAccount account, SessionData expectedSession = null, long? expectedStorageRevision = null)
         {
             if (manifest == null)
                 return false;
@@ -3239,11 +3277,6 @@ namespace Steam_Desktop_Authenticator
             if (account == null)
             {
                 AstroMessageBox.Show("Please select an account first.", "Login Again", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return false;
-            }
-            if (IsPendingEnrollment(account))
-            {
-                AstroMessageBox.Show("This authenticator is still pending Steam activation. Complete authenticator setup before renewing its session.", "Login Again", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return false;
             }
 

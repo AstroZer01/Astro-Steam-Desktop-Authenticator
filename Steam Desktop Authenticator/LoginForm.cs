@@ -450,7 +450,7 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            // If we're only logging in for a session refresh then save it and exit
+            // If we're only logging in for a session refresh (or verifying a pending account) then save it and exit
             if (LoginReason == LoginType.Refresh)
             {
                 if (account?.Session == null || sessionData.SteamID == 0 || sessionData.SteamID != account.Session.SteamID)
@@ -461,6 +461,80 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 Manifest man = Manifest.GetManifest();
+                if (!account.FullyEnrolled)
+                {
+                    if (!TryResolveManifestPassKey(man, suppliedPassKey, out string resolvedKey))
+                    {
+                        ResetLoginButton(cancellationToken);
+                        return;
+                    }
+
+                    PendingAuthenticatorRecoveryResult pendingRecovery;
+                    try
+                    {
+                        pendingRecovery = await TryRecoverPendingAccountWithFreshSessionAsync(
+                            man,
+                            account,
+                            sessionData,
+                            resolvedKey,
+                            (candidate, ct) => candidate.VerifyAuthenticatorActivationAsync(ct),
+                            cancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        ResetLoginButton(cancellationToken);
+                        return;
+                    }
+                    if (IsDisposed || Disposing)
+                        return;
+
+                    switch (pendingRecovery.Status)
+                    {
+                        case PendingAuthenticatorRecoveryStatus.Recovered:
+                            bool recoveredEncrypt = (man.Entries.Count > 0 && man.Encrypted) || resolvedKey != null;
+                            ResolvedPassKey = recoveredEncrypt ? resolvedKey : null;
+                            RefreshSucceeded = true;
+                            AstroMessageBox.Show(
+                                "Steam confirmed this authenticator is active. Your saved authenticator record has been recovered and activated.",
+                                "Steam Guard Setup",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Information);
+                            this.Close();
+                            return;
+
+                        case PendingAuthenticatorRecoveryStatus.SaveFailed:
+                            DiagnosticErrorLogger.Log(
+                                "Authenticator storage",
+                                pendingRecovery.SaveResult?.Exception,
+                                "Steam confirmed the pending authenticator is active, but the updated record could not be saved.");
+                            AstroMessageBox.Show(
+                                pendingRecovery.SaveResult?.UserMessage ?? "Steam confirmed this authenticator is active, but the updated local record could not be saved.",
+                                "Steam Guard Setup",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Error);
+                            ResetLoginButton(cancellationToken);
+                            return;
+
+                        case PendingAuthenticatorRecoveryStatus.Inconclusive:
+                            AstroMessageBox.Show(
+                                "Steam could not verify whether this pending authenticator is active right now. Your pending record was kept safely; try again later.",
+                                "Steam Guard Setup",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Warning);
+                            ResetLoginButton(cancellationToken);
+                            return;
+
+                        case PendingAuthenticatorRecoveryStatus.ConfirmedMismatch:
+                        default:
+                            string mismatchMessage = pendingRecovery.ActivationStatus == AuthenticatorActivationStatus.ActiveForDifferentAuthenticator
+                                ? "Steam reports that a different authenticator is active on this account, so this pending record was kept inactive."
+                                : "Steam reports that this authenticator has not been activated yet. Remove this pending record or complete Steam Guard setup.";
+                            AstroMessageBox.Show(mismatchMessage, "Steam Guard Setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            this.Close();
+                            return;
+                    }
+                }
+
                 if (!ApplyRefreshedSession(account, sessionData, () => SaveRefreshedSession(man, suppliedPassKey)))
                 {
                     ResetLoginButton(cancellationToken);
@@ -555,6 +629,16 @@ namespace Steam_Desktop_Authenticator
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Error);
                         this.Close();
+                        return;
+                    }
+                    if (recoveryResult.Status == PendingAuthenticatorRecoveryStatus.Inconclusive)
+                    {
+                        AstroMessageBox.Show(
+                            "Steam reported an existing authenticator, and Astro SDA could not verify whether your saved pending record is already active. Your pending record was kept safely; try again later before removing Steam Guard.",
+                            "Steam Guard Setup",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        ResetLoginButton(cancellationToken);
                         return;
                     }
                     AstroMessageBox.Show("This account already has an authenticator linked. You must remove that authenticator to add SDA as your authenticator.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -1046,21 +1130,96 @@ namespace Steam_Desktop_Authenticator
         internal enum PendingAuthenticatorRecoveryStatus
         {
             NotApplicable,
-            NotConfirmed,
+            ConfirmedMismatch,
+            Inconclusive,
             Recovered,
             SaveFailed
         }
 
         internal readonly struct PendingAuthenticatorRecoveryResult
         {
-            public PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus status, StorageResult saveResult = null)
+            public PendingAuthenticatorRecoveryResult(
+                PendingAuthenticatorRecoveryStatus status,
+                StorageResult saveResult = null,
+                AuthenticatorActivationStatus activationStatus = AuthenticatorActivationStatus.Unverified)
             {
                 Status = status;
                 SaveResult = saveResult;
+                ActivationStatus = activationStatus;
             }
 
             public PendingAuthenticatorRecoveryStatus Status { get; }
             public StorageResult SaveResult { get; }
+            public AuthenticatorActivationStatus ActivationStatus { get; }
+        }
+
+        internal static async Task<PendingAuthenticatorRecoveryResult> TryRecoverPendingAccountWithFreshSessionAsync(
+            Manifest manifest,
+            SteamGuardAccount pendingAccount,
+            SessionData freshSession,
+            string passKey,
+            Func<SteamGuardAccount, CancellationToken, Task<AuthenticatorActivationStatus>> verifyActivationAsync,
+            CancellationToken cancellationToken)
+        {
+            if (manifest == null || pendingAccount == null || pendingAccount.FullyEnrolled ||
+                freshSession == null || freshSession.SteamID == 0 || verifyActivationAsync == null)
+            {
+                return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.NotApplicable);
+            }
+
+            long expectedStorageRevision = manifest.GetAccountStorageRevision(freshSession.SteamID);
+            SessionData previousSession = pendingAccount.Session;
+            pendingAccount.Session = freshSession;
+            AuthenticatorActivationStatus activationStatus;
+            try
+            {
+                activationStatus = await verifyActivationAsync(pendingAccount, cancellationToken);
+            }
+            catch
+            {
+                pendingAccount.Session = previousSession;
+                throw;
+            }
+
+            if (activationStatus == AuthenticatorActivationStatus.NotActive ||
+                activationStatus == AuthenticatorActivationStatus.ActiveForDifferentAuthenticator)
+            {
+                pendingAccount.Session = previousSession;
+                return new PendingAuthenticatorRecoveryResult(
+                    PendingAuthenticatorRecoveryStatus.ConfirmedMismatch,
+                    activationStatus: activationStatus);
+            }
+
+            if (activationStatus != AuthenticatorActivationStatus.ActiveForThisRecord)
+            {
+                pendingAccount.Session = previousSession;
+                return new PendingAuthenticatorRecoveryResult(
+                    PendingAuthenticatorRecoveryStatus.Inconclusive,
+                    activationStatus: activationStatus);
+            }
+
+            pendingAccount.FullyEnrolled = true;
+            bool encrypt = (manifest.Entries.Count > 0 && manifest.Encrypted) || passKey != null;
+            StorageResult saveResult = manifest.SaveAccount(
+                pendingAccount,
+                encrypt,
+                passKey,
+                expectedStorageRevision,
+                allowCreate: false);
+            if (!saveResult.Succeeded)
+            {
+                pendingAccount.FullyEnrolled = false;
+                pendingAccount.Session = previousSession;
+                return new PendingAuthenticatorRecoveryResult(
+                    PendingAuthenticatorRecoveryStatus.SaveFailed,
+                    saveResult,
+                    activationStatus);
+            }
+
+            return new PendingAuthenticatorRecoveryResult(
+                PendingAuthenticatorRecoveryStatus.Recovered,
+                saveResult,
+                activationStatus);
         }
 
         internal static async Task<PendingAuthenticatorRecoveryResult> TryRecoverExistingPendingAuthenticatorAsync(
@@ -1081,7 +1240,7 @@ namespace Steam_Desktop_Authenticator
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Authenticator recovery", ex, "Saved accounts could not be inspected while checking for a pending authenticator.");
-                return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.NotConfirmed);
+                return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.Inconclusive);
             }
 
             SteamGuardAccount pendingAccount = Array.Find(
@@ -1093,36 +1252,13 @@ namespace Steam_Desktop_Authenticator
             if (pendingAccount == null)
                 return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.NotApplicable);
 
-            SessionData previousSession = pendingAccount.Session;
-            pendingAccount.Session = freshSession;
-            AuthenticatorActivationStatus activationStatus;
-            try
-            {
-                activationStatus = await verifyActivationAsync(pendingAccount, cancellationToken);
-            }
-            catch
-            {
-                pendingAccount.Session = previousSession;
-                throw;
-            }
-
-            if (activationStatus != AuthenticatorActivationStatus.ActiveForThisRecord)
-            {
-                pendingAccount.Session = previousSession;
-                return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.NotConfirmed);
-            }
-
-            pendingAccount.FullyEnrolled = true;
-            bool encrypt = (manifest.Entries.Count > 0 && manifest.Encrypted) || passKey != null;
-            StorageResult saveResult = manifest.SaveAccount(pendingAccount, encrypt, passKey);
-            if (!saveResult.Succeeded)
-            {
-                pendingAccount.FullyEnrolled = false;
-                pendingAccount.Session = previousSession;
-                return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.SaveFailed, saveResult);
-            }
-
-            return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.Recovered, saveResult);
+            return await TryRecoverPendingAccountWithFreshSessionAsync(
+                manifest,
+                pendingAccount,
+                freshSession,
+                passKey,
+                verifyActivationAsync,
+                cancellationToken);
         }
 
         internal static bool ApplyRefreshedSession(

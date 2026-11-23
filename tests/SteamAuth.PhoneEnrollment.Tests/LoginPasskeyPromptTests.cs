@@ -1465,6 +1465,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Contains("Complete Steam activation to use QR login", html);
             Assert.Contains("const canCopy = hasAccounts && !currentAccPending;", html);
             Assert.Contains("const canUnlinkSteamGuard = Boolean(account.steamId) && !Boolean(account.pendingActivation);", html);
+            Assert.Contains("Verify Steam activation", html);
+            Assert.Contains("remove-account-local-desc", html);
             Assert.Contains("document.getElementById('account-title').innerText = \"Account: ...\";", html);
             Assert.Contains("updateToken(\"\");", html);
         }
@@ -1621,17 +1623,28 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 RefreshToken = "fresh-refresh-token"
             };
 
-            // When Steam reports a different authenticator, the pending record remains unpromoted.
-            LoginForm.PendingAuthenticatorRecoveryResult unconfirmed = await LoginForm.TryRecoverExistingPendingAuthenticatorAsync(
+            // When Steam reports a different authenticator, the pending record remains unpromoted with ConfirmedMismatch.
+            LoginForm.PendingAuthenticatorRecoveryResult mismatch = await LoginForm.TryRecoverExistingPendingAuthenticatorAsync(
                 manifest,
                 freshSession,
                 passKey,
                 (_, _) => Task.FromResult(AuthenticatorActivationStatus.ActiveForDifferentAuthenticator),
                 CancellationToken.None);
-            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.NotConfirmed, unconfirmed.Status);
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.ConfirmedMismatch, mismatch.Status);
+            Assert.Equal(AuthenticatorActivationStatus.ActiveForDifferentAuthenticator, mismatch.ActivationStatus);
             SteamGuardAccount stillPending = Assert.Single(manifest.GetAllAccounts(passKey));
             Assert.False(stillPending.FullyEnrolled);
             Assert.Equal("test-access-token", stillPending.Session.AccessToken);
+
+            // When Steam verification is inconclusive (transient failure or invalid session), report Inconclusive without telling the user to unlink.
+            LoginForm.PendingAuthenticatorRecoveryResult inconclusive = await LoginForm.TryRecoverExistingPendingAuthenticatorAsync(
+                manifest,
+                freshSession,
+                passKey,
+                (_, _) => Task.FromResult(AuthenticatorActivationStatus.Unverified),
+                CancellationToken.None);
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.Inconclusive, inconclusive.Status);
+            Assert.False(Assert.Single(manifest.GetAllAccounts(passKey)).FullyEnrolled);
 
             // When Steam confirms this record is active, it is durably saved with FullyEnrolled = true and the fresh session.
             LoginForm.PendingAuthenticatorRecoveryResult recovered = await LoginForm.TryRecoverExistingPendingAuthenticatorAsync(
@@ -1650,6 +1663,62 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(reloaded.FullyEnrolled);
             Assert.Equal("fresh-access-token", reloaded.Session.AccessToken);
             Assert.Equal(5, MainForm.GetDisplayLoginToken(reloaded, 1700000000L).Length);
+        }
+
+        [Fact]
+        public async Task TryRecoverPendingAccountActivationAsync_DoesNotRecreateDeletedEncryptedAccountAsPlaintext()
+        {
+            const string passKey = "encrypted-pending-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001016UL, "deleted-during-startup-user");
+            pendingAccount.TokenGID = "gid-delete-race";
+            pendingAccount.FullyEnrolled = false;
+            Assert.True(manifest.SaveAccount(pendingAccount, encrypt: true, passKey: passKey).Succeeded);
+            Assert.True(manifest.Encrypted);
+
+            string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+            SessionData originalSession = pendingAccount.Session;
+            long revisionAtCheck = manifest.GetAccountStorageRevision(originalSession.SteamID);
+
+            using (MainForm form = new MainForm(manifest, null, null, null))
+            {
+                form.SetEncryptionKey(passKey);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, new[] { pendingAccount });
+
+                // Simulate user locally deleting the last encrypted pending account while QueryStatus is in flight.
+                bool recovered = await MainForm.TryRecoverPendingAccountActivationAsync(
+                    pendingAccount,
+                    _ =>
+                    {
+                        Assert.True(manifest.RemoveAccount(pendingAccount, passKey));
+                        Assert.False(manifest.Encrypted);
+                        Assert.Empty(manifest.Entries);
+                        return Task.FromResult(AuthenticatorActivationStatus.ActiveForThisRecord);
+                    },
+                    activated => form.PersistLoginSession(activated, originalSession, revisionAtCheck),
+                    CancellationToken.None);
+
+                Assert.False(recovered);
+                Assert.False(pendingAccount.FullyEnrolled);
+                Assert.Empty(manifest.Entries);
+                Assert.False(manifest.Encrypted);
+                Assert.Empty(Directory.GetFiles(maDir, "*.maFile"));
+            }
+        }
+
+        [Fact]
+        public async Task UserFormAuthenticator_GeneratesDeviceCodeForSavedPendingAccountDuringRecovery()
+        {
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001017UL, "device-code-recovery-user");
+            pendingAccount.FullyEnrolled = false;
+
+            using (Form owner = new Form())
+            {
+                var authenticator = new UserFormAuthenticator(pendingAccount, owner, CancellationToken.None);
+                string deviceCode = await authenticator.GetDeviceCodeAsync(previousCodeWasIncorrect: false);
+                Assert.False(string.IsNullOrWhiteSpace(deviceCode));
+                Assert.Equal(5, deviceCode.Length);
+            }
         }
 
         [Fact]
