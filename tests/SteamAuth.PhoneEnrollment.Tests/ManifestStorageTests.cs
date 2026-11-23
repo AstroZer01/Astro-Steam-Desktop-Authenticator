@@ -1553,9 +1553,9 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [Fact]
         public void StartupRecovery_UncommittedAndCommittedReplacedFilesRecoverSafely()
         {
-            const string testAccountBackupFilename = ".mafile.11111111111111111111111111111111.bak";
             Manifest manifest = Manifest.GenerateNewManifest(false);
             ulong accountId = 76561198000006000UL;
+            string testAccountBackupFilename = $".mafile.{accountId}.11111111111111111111111111111111.bak";
             SteamGuardAccount original = CreateAccount(accountId);
             original.Session.AccessToken = "original-token";
             Assert.True(manifest.SaveAccount(original, false).Succeeded);
@@ -1703,14 +1703,28 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Equal(otherWriterContents, File.ReadAllText(racedPath));
             Assert.False(File.Exists(createdPath));
             Assert.False(File.Exists(journalPath));
+
+            // A v2 journal (with previous_manifest_hash) that omits created_file_hashes for non-empty created_filenames must fail closed.
+            JObject missingHashesJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(File.ReadAllText(manifestPath) + "-missing-hashes"),
+                ["previous_manifest_hash"] = ComputeContentHash(File.ReadAllText(manifestPath)),
+                ["created_filenames"] = new JArray(racedFilename),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, missingHashesJournal.ToString(Formatting.None));
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(racedPath));
+            Assert.Equal(otherWriterContents, File.ReadAllText(racedPath));
         }
 
         [Fact]
         public void StartupRecovery_UncommittedReplacedFilesRejectUnverifiedOwnershipAndHashMismatches()
         {
-            const string testAccountBackupFilename = ".mafile.22222222222222222222222222222222.bak";
             Manifest manifest = Manifest.GenerateNewManifest(false);
             ulong liveId = 76561198000008000UL;
+            string testAccountBackupFilename = $".mafile.{liveId}.22222222222222222222222222222222.bak";
             SteamGuardAccount liveAccount = CreateAccount(liveId);
             liveAccount.Session.AccessToken = "live-untouched";
             Assert.True(manifest.SaveAccount(liveAccount, false).Succeeded);
@@ -1790,9 +1804,9 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [Fact]
         public void SaveAccount_InPlaceRollbackAndStartupRecoveryRestoreOversizedAndInvalidUtf8Backups()
         {
-            const string testAccountBackupFilename = ".mafile.33333333333333333333333333333333.bak";
             Manifest manifest = Manifest.GenerateNewManifest(false);
             ulong accountId = 76561198000009000UL;
+            string testAccountBackupFilename = $".mafile.{accountId}.33333333333333333333333333333333.bak";
             SteamGuardAccount account = CreateAccount(accountId);
             account.Session.AccessToken = "initial-token";
             Assert.True(manifest.SaveAccount(account, false).Succeeded);
@@ -1860,9 +1874,9 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [Fact]
         public void ChangeEncryptionKey_RecoversPendingUncommittedReplacementBeforeReadingAccountFiles()
         {
-            const string testAccountBackupFilename = ".mafile.44444444444444444444444444444444.bak";
             Manifest manifest = Manifest.GenerateNewManifest(false);
             ulong accountId = 76561198000010000UL;
+            string testAccountBackupFilename = $".mafile.{accountId}.44444444444444444444444444444444.bak";
             SteamGuardAccount committed = CreateAccount(accountId);
             committed.Session.AccessToken = "committed-v1";
             Assert.True(manifest.SaveAccount(committed, false).Succeeded);
@@ -1991,6 +2005,255 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Equal("encrypted-v1", recoveredAccount.Session.AccessToken);
             Assert.Empty(Directory.EnumerateFiles(maDirectory, "*.bak"));
             Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public async Task GetAllAccounts_AndVerifyPasskey_RecoverPendingUncommittedReplacementAndStaySafeUnderConcurrentSaves()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong accountId = 76561198000013000UL;
+            SteamGuardAccount committed = CreateAccount(accountId);
+            committed.Session.AccessToken = "committed-enc-v1";
+            Assert.True(manifest.SaveAccount(committed, true, "active-key").Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string canonicalFilename = Manifest.GetCanonicalMaFileFilename(accountId);
+            string canonicalPath = Path.Combine(maDirectory, canonicalFilename);
+            string backupFilename = $".mafile.{accountId}.55555555555555555555555555555555.bak";
+            string backupPath = Path.Combine(maDirectory, backupFilename);
+
+            string committedManifestContents = File.ReadAllText(manifestPath);
+            string committedCiphertext = File.ReadAllText(canonicalPath);
+            string uncommittedSalt = FileEncryptor.GetRandomSalt();
+            string uncommittedIv = FileEncryptor.GetInitializationVector();
+            SteamGuardAccount uncommitted = CreateAccount(accountId);
+            uncommitted.Session.AccessToken = "uncommitted-enc-v2";
+            string uncommittedCiphertext = FileEncryptor.EncryptData(
+                "active-key",
+                uncommittedSalt,
+                uncommittedIv,
+                JsonConvert.SerializeObject(uncommitted));
+
+            // 1. Leave an uncommitted encrypted replacement on disk (new ciphertext with different Salt/IV).
+            File.WriteAllText(backupPath, committedCiphertext);
+            File.WriteAllText(canonicalPath, uncommittedCiphertext);
+            JObject uncommittedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(committedManifestContents + "-failed-enc-save"),
+                ["previous_manifest_hash"] = ComputeContentHash(committedManifestContents),
+                ["created_filenames"] = new JArray(),
+                ["replaced_files"] = new JArray(new JObject
+                {
+                    ["filename"] = canonicalFilename,
+                    ["backup_filename"] = backupFilename,
+                    ["original_hash"] = ComputeContentHash(committedCiphertext),
+                    ["replacement_hash"] = ComputeContentHash(uncommittedCiphertext)
+                }),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, uncommittedJournal.ToString(Formatting.None));
+
+            // While backup is exclusively locked, recovery cannot run so readers must fail closed.
+            using (new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.False(manifest.VerifyPasskey("active-key"));
+                Assert.Empty(manifest.GetAllAccounts("active-key"));
+            }
+
+            // Once unlocked, VerifyPasskey and GetAllAccounts recover the committed ciphertext before reading.
+            Assert.True(manifest.VerifyPasskey("active-key"));
+            SteamGuardAccount recovered = Assert.Single(manifest.GetAllAccounts("active-key"));
+            Assert.Equal("committed-enc-v1", recovered.Session.AccessToken);
+            Assert.False(File.Exists(backupPath));
+            Assert.False(File.Exists(journalPath));
+
+            // 2. Concurrent encrypted in-place SaveAccount updates must never cause torn reads in GetAllAccounts/VerifyPasskey.
+            Task writerTask = Task.Run(() =>
+            {
+                for (int i = 0; i < 20; i++)
+                {
+                    SteamGuardAccount next = CreateAccount(accountId);
+                    next.Session.AccessToken = "concurrent-enc-" + i;
+                    StorageResult saveResult = manifest.SaveAccount(next, true, "active-key");
+                    Assert.True(saveResult.Succeeded);
+                }
+            });
+
+            Task readerTask = Task.Run(() =>
+            {
+                for (int i = 0; i < 20; i++)
+                {
+                    Assert.True(manifest.VerifyPasskey("active-key"));
+                    SteamGuardAccount[] accounts = manifest.GetAllAccounts("active-key");
+                    Assert.Single(accounts);
+                }
+            });
+
+            await Task.WhenAll(writerTask, readerTask);
+
+            // 3. Plaintext GetAllAccounts also recovers uncommitted replacements before returning accounts.
+            Assert.True(manifest.ChangeEncryptionKey("active-key", null).Succeeded);
+            string plaintextManifestContents = File.ReadAllText(manifestPath);
+            string plaintextCommitted = File.ReadAllText(canonicalPath);
+            string expectedToken = Assert.Single(manifest.GetAllAccounts()).Session.AccessToken;
+            SteamGuardAccount plaintextUncommitted = CreateAccount(accountId);
+            plaintextUncommitted.Session.AccessToken = "uncommitted-plaintext-leak";
+            string plaintextUncommittedContents = JsonConvert.SerializeObject(plaintextUncommitted);
+
+            File.WriteAllText(backupPath, plaintextCommitted);
+            File.WriteAllText(canonicalPath, plaintextUncommittedContents);
+            JObject plaintextJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(plaintextManifestContents + "-failed-plain-save"),
+                ["previous_manifest_hash"] = ComputeContentHash(plaintextManifestContents),
+                ["created_filenames"] = new JArray(),
+                ["replaced_files"] = new JArray(new JObject
+                {
+                    ["filename"] = canonicalFilename,
+                    ["backup_filename"] = backupFilename,
+                    ["original_hash"] = ComputeContentHash(plaintextCommitted),
+                    ["replacement_hash"] = ComputeContentHash(plaintextUncommittedContents)
+                }),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, plaintextJournal.ToString(Formatting.None));
+
+            SteamGuardAccount plaintextRecovered = Assert.Single(manifest.GetAllAccounts());
+            Assert.Equal(expectedToken, plaintextRecovered.Session.AccessToken);
+            Assert.False(File.Exists(backupPath));
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void ImportUnmanagedMaFiles_OneLockedCanonicalSourceDoesNotBlockOtherAccountsNormalizationOrSaves()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            Assert.True(manifest.Save());
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            ulong unlockedId = 76561198000014000UL;
+            ulong lockedId = 76561198000014001UL;
+            string unlockedCanonical = Manifest.GetCanonicalMaFileFilename(unlockedId);
+            string lockedCanonical = Manifest.GetCanonicalMaFileFilename(lockedId);
+            string unlockedPath = Path.Combine(maDirectory, unlockedCanonical);
+            string lockedPath = Path.Combine(maDirectory, lockedCanonical);
+
+            SteamGuardAccount unlockedAccount = CreateAccount(unlockedId);
+            unlockedAccount.Session.AccessToken = "unlocked-v1";
+            SteamGuardAccount lockedAccount = CreateAccount(lockedId);
+            lockedAccount.Session.AccessToken = "locked-v1";
+            File.WriteAllText(unlockedPath, JsonConvert.SerializeObject(unlockedAccount));
+            File.WriteAllText(lockedPath, JsonConvert.SerializeObject(lockedAccount));
+
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Equal(2, candidates.Count);
+
+            // Lock only the second canonical source against deletion during import.
+            using (new FileStream(lockedPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Assert.True(manifest.ImportUnmanagedMaFiles(candidates).Succeeded);
+
+                // The unlocked account must be normalized to its canonical filename and remain saveable
+                // while the unrelated second source file is still locked.
+                Assert.Equal(unlockedCanonical, Assert.Single(manifest.Entries, e => e.SteamID == unlockedId).Filename);
+                unlockedAccount.Session.AccessToken = "unlocked-v2";
+                Assert.True(manifest.SaveAccount(unlockedAccount, false).Succeeded);
+                Assert.Equal(unlockedCanonical, Assert.Single(manifest.Entries, e => e.SteamID == unlockedId).Filename);
+            }
+
+            // Once unlocked, startup recovery cleans up the retained locked source and normalizes the second account.
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.Equal(unlockedCanonical, Assert.Single(reloaded.Entries, e => e.SteamID == unlockedId).Filename);
+            Assert.Equal(lockedCanonical, Assert.Single(reloaded.Entries, e => e.SteamID == lockedId).Filename);
+            Assert.False(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+        }
+
+        [Fact]
+        public void StartupRecovery_RejectsMismatchedManifestBackupBeforePublishingToManifestPath()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong accountId = 76561198000015000UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(accountId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string backupPath = Path.Combine(maDirectory, TestBackupFilename);
+
+            string originalManifestContents = File.ReadAllText(manifestPath);
+            JObject mismatchedManifest = JObject.Parse(originalManifestContents);
+            mismatchedManifest["storage_transaction_id"] = Guid.NewGuid().ToString("N");
+            File.WriteAllText(backupPath, mismatchedManifest.ToString(Formatting.None));
+            File.Delete(manifestPath);
+
+            JObject journal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(originalManifestContents + "-committed"),
+                ["previous_manifest_hash"] = ComputeContentHash(originalManifestContents),
+                ["created_filenames"] = new JArray(),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = TestBackupFilename
+            };
+            File.WriteAllText(journalPath, journal.ToString(Formatting.None));
+
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.False(File.Exists(manifestPath));
+            Assert.True(File.Exists(backupPath));
+            Assert.True(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void StartupRecovery_RejectsCrossAccountReplacedBackupSwap()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000016000UL;
+            ulong secondId = 76561198000016001UL;
+            SteamGuardAccount first = CreateAccount(firstId);
+            first.Session.AccessToken = "first-original";
+            SteamGuardAccount second = CreateAccount(secondId);
+            second.Session.AccessToken = "second-original";
+            Assert.True(manifest.SaveAccount(first, false).Succeeded);
+            Assert.True(manifest.SaveAccount(second, false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string firstFilename = Manifest.GetCanonicalMaFileFilename(firstId);
+            string secondFilename = Manifest.GetCanonicalMaFileFilename(secondId);
+            string firstPath = Path.Combine(maDirectory, firstFilename);
+            string secondPath = Path.Combine(maDirectory, secondFilename);
+
+            string originalManifestContents = File.ReadAllText(manifestPath);
+            string firstOriginalContents = File.ReadAllText(firstPath);
+            string secondOriginalContents = File.ReadAllText(secondPath);
+
+            string secondBackupFilename = $".mafile.{secondId}.66666666666666666666666666666666.bak";
+            File.WriteAllText(Path.Combine(maDirectory, secondBackupFilename), secondOriginalContents);
+
+            // Tampered journal tries to associate account 1's filename with account 2's backup file.
+            JObject swappedJournal = new JObject
+            {
+                ["manifest_hash"] = ComputeContentHash(originalManifestContents + "-uncommitted"),
+                ["previous_manifest_hash"] = ComputeContentHash(originalManifestContents),
+                ["created_filenames"] = new JArray(),
+                ["replaced_files"] = new JArray(new JObject
+                {
+                    ["filename"] = firstFilename,
+                    ["backup_filename"] = secondBackupFilename,
+                    ["original_hash"] = ComputeContentHash(secondOriginalContents),
+                    ["replacement_hash"] = ComputeContentHash(firstOriginalContents)
+                }),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, swappedJournal.ToString(Formatting.None));
+
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.Equal(firstOriginalContents, File.ReadAllText(firstPath));
+            Assert.Equal(secondOriginalContents, File.ReadAllText(secondPath));
         }
 
         public void Dispose()
