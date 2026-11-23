@@ -1126,17 +1126,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
-        [Theory]
-        [InlineData(true)]
-        [InlineData(false)]
-        public void EvaluateConfirmationCodePrompt_CancelsAndRemovesPendingOnlyWhenReadyUiIsDismissed(bool explicitCancel)
+        [Fact]
+        public void EvaluateConfirmationCodePrompt_CancelsAndRemovesPendingOnlyOnExplicitInPageCancel()
         {
             using (InputForm form = new InputForm("Enter confirmation code", password: false, initializeModernUi: false))
             {
-                if (explicitCancel)
-                    form.CancelInput();
-                else
-                    form.SimulateWindowClose();
+                form.CancelInput();
 
                 int retryPrompts = 0;
                 LoginForm.ConfirmationCodePromptDecision decision = LoginForm.EvaluateConfirmationCodePrompt(
@@ -1149,6 +1144,47 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
                 Assert.Equal(0, retryPrompts);
                 Assert.Equal(LoginForm.ConfirmationCodePromptAction.CancelAndRemovePending, decision.Action);
+            }
+        }
+
+        [Theory]
+        [InlineData(false, true)]
+        [InlineData(false, false)]
+        [InlineData(true, true)]
+        [InlineData(true, false)]
+        public void EvaluateConfirmationCodePrompt_PreservesPendingOnReadyNativeWindowCloseOrBlankSubmit(bool submitBlank, bool retry)
+        {
+            using (InputForm form = new InputForm("Enter confirmation code", password: false, initializeModernUi: false))
+            {
+                form.BeginModernUiNavigation(1UL);
+                Assert.True(form.ShouldHandleNavigationCompleted(1UL, out int generation));
+                Assert.True(form.TryHandleNavigationCompletedResult(1UL, generation, succeeded: true));
+
+                if (submitBlank)
+                    form.SubmitInput(string.Empty);
+                else
+                    form.SimulateWindowClose();
+
+                Assert.True(form.UiReady);
+                Assert.False(form.LoadFailed);
+                Assert.True(form.Canceled);
+                Assert.False(form.ExplicitCancel);
+
+                int retryPrompts = 0;
+                LoginForm.ConfirmationCodePromptDecision decision = LoginForm.EvaluateConfirmationCodePrompt(
+                    form.ToPassKeyPromptResult(),
+                    () =>
+                    {
+                        retryPrompts++;
+                        return retry;
+                    });
+
+                Assert.Equal(1, retryPrompts);
+                Assert.Equal(
+                    retry
+                        ? LoginForm.ConfirmationCodePromptAction.RetryPrompt
+                        : LoginForm.ConfirmationCodePromptAction.KeepPendingAndStop,
+                    decision.Action);
             }
         }
 
@@ -1178,17 +1214,21 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Empty(emptyEncryptedManifest.Entries);
             Assert.False(MainForm.ShouldPromptStartupPassKey(emptyEncryptedManifest, null));
 
-            // Persisted empty encrypted manifest loaded on startup normalizes and reaches first-account setup.
+            // Persisted empty encrypted manifest loaded on startup normalizes on disk and reaches first-account setup.
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
             Directory.CreateDirectory(maDir);
+            string manifestPath = Path.Combine(maDir, "manifest.json");
             File.WriteAllText(
-                Path.Combine(maDir, "manifest.json"),
+                manifestPath,
                 "{\"encrypted\":true,\"first_run\":false,\"entries\":[]}");
 
             Manifest loadedEmptyManifest = Manifest.GetManifest(forceLoad: true);
             Assert.False(loadedEmptyManifest.Encrypted);
             Assert.Empty(loadedEmptyManifest.Entries);
             Assert.False(MainForm.ShouldPromptStartupPassKey(loadedEmptyManifest, null));
+            Newtonsoft.Json.Linq.JObject persistedEmptyJson = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(manifestPath));
+            Assert.False(persistedEmptyJson.Value<bool>("encrypted"));
+            Assert.Empty((Newtonsoft.Json.Linq.JArray)persistedEmptyJson["entries"]);
 
             bool resolved = LoginForm.TryResolveManifestPassKey(
                 loadedEmptyManifest,
@@ -1208,7 +1248,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(MainForm.ShouldPromptStartupPassKey(loadedEmptyManifest, null));
             Assert.False(MainForm.ShouldPromptStartupPassKey(loadedEmptyManifest, resolvedPassKey));
 
-            // Persisted encrypted manifest whose only entry's maFile was deleted also recovers cleanly on load.
+            // Persisted encrypted manifest whose only entry's maFile was deleted also recovers cleanly on disk.
             string savedMaFilePath = Path.Combine(maDir, Assert.Single(loadedEmptyManifest.Entries).Filename);
             File.Delete(savedMaFilePath);
 
@@ -1216,6 +1256,9 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False(loadedMissingFileManifest.Encrypted);
             Assert.Empty(loadedMissingFileManifest.Entries);
             Assert.False(MainForm.ShouldPromptStartupPassKey(loadedMissingFileManifest, null));
+            Newtonsoft.Json.Linq.JObject persistedMissingFileJson = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(manifestPath));
+            Assert.False(persistedMissingFileJson.Value<bool>("encrypted"));
+            Assert.Empty((Newtonsoft.Json.Linq.JArray)persistedMissingFileJson["entries"]);
         }
 
         [Theory]
@@ -1228,8 +1271,9 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [InlineData("")]
         public void TryParseWebMessagePayload_RejectsInvalidOrNonStringActionTokensWithoutThrowing(string json)
         {
-            bool parsed = InputForm.TryParseWebMessagePayload(json, out _, out string action);
+            bool parsed = InputForm.TryParseWebMessagePayload(json, out Newtonsoft.Json.Linq.JObject payload, out string action);
             Assert.False(parsed);
+            Assert.Null(payload);
             Assert.Null(action);
         }
 

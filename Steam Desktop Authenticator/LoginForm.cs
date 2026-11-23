@@ -578,12 +578,11 @@ namespace Steam_Desktop_Authenticator
                         : "Please input the confirmation code sent to your " + confirmationDestination + "."))
                 {
                     confirmationCodeForm.ShowInputDialog(this);
+                    Manifest.PassKeyPromptResult confirmationPromptResult = confirmationCodeForm.ToPassKeyPromptResult();
                     ConfirmationCodePromptDecision promptDecision = EvaluateConfirmationCodePrompt(
-                        confirmationCodeForm.ToPassKeyPromptResult(),
+                        confirmationPromptResult,
                         () => AstroMessageBox.Show(
-                            confirmationCodeForm.LoadFailed
-                                ? "The confirmation code window could not be displayed. Your pending authenticator and recovery code have been kept safely.\n\nDo you want to reopen the confirmation code prompt?"
-                                : "The confirmation code window was closed before it finished loading. Your pending authenticator and recovery code have been kept safely.\n\nDo you want to reopen the confirmation code prompt?",
+                            GetConfirmationCodeRetryPromptMessage(confirmationPromptResult),
                             "Steam Guard Setup",
                             MessageBoxButtons.YesNo,
                             MessageBoxIcon.Warning) == DialogResult.Yes);
@@ -978,16 +977,28 @@ namespace Steam_Desktop_Authenticator
             public string ConfirmationCode { get; }
         }
 
+        internal static string GetConfirmationCodeRetryPromptMessage(Manifest.PassKeyPromptResult promptResult)
+        {
+            if (promptResult.LoadFailed)
+                return "The confirmation code window could not be displayed. Your pending authenticator and recovery code have been kept safely.\n\nDo you want to reopen the confirmation code prompt?";
+            if (!promptResult.UiReady)
+                return "The confirmation code window was closed before it finished loading. Your pending authenticator and recovery code have been kept safely.\n\nDo you want to reopen the confirmation code prompt?";
+            if (promptResult.Accepted)
+                return "No confirmation code was entered. Your pending authenticator and recovery code have been kept safely.\n\nDo you want to reopen the confirmation code prompt?";
+
+            return "The confirmation code window was closed without canceling setup. Your pending authenticator and recovery code have been kept safely.\n\nDo you want to reopen the confirmation code prompt?";
+        }
+
         internal static ConfirmationCodePromptDecision EvaluateConfirmationCodePrompt(
             Manifest.PassKeyPromptResult promptResult,
-            Func<bool> promptRetryOnUiFailure)
+            Func<bool> promptRetryOnNonExplicitDismissal)
         {
-            if (promptRetryOnUiFailure == null)
-                throw new ArgumentNullException(nameof(promptRetryOnUiFailure));
+            if (promptRetryOnNonExplicitDismissal == null)
+                throw new ArgumentNullException(nameof(promptRetryOnNonExplicitDismissal));
 
-            if (promptResult.LoadFailed || !promptResult.UiReady)
+            if (promptResult.LoadFailed || !promptResult.UiReady || (promptResult.Canceled && !promptResult.ExplicitCancel))
             {
-                return promptRetryOnUiFailure()
+                return promptRetryOnNonExplicitDismissal()
                     ? new ConfirmationCodePromptDecision(ConfirmationCodePromptAction.RetryPrompt)
                     : new ConfirmationCodePromptDecision(ConfirmationCodePromptAction.KeepPendingAndStop);
             }

@@ -326,12 +326,13 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrEmpty(message) || message.Length > 64 * 1024)
                 return false;
 
+            JObject parsedPayload;
             try
             {
                 using (StringReader stringReader = new StringReader(message))
                 using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = 16, DateParseHandling = DateParseHandling.None })
                 {
-                    payload = JObject.Load(jsonReader);
+                    parsedPayload = JObject.Load(jsonReader);
                 }
             }
             catch (JsonException)
@@ -339,7 +340,7 @@ namespace Steam_Desktop_Authenticator
                 return false;
             }
 
-            JToken actionToken = payload["action"];
+            JToken actionToken = parsedPayload["action"];
             if (actionToken == null || actionToken.Type != JTokenType.String)
                 return false;
 
@@ -347,6 +348,7 @@ namespace Steam_Desktop_Authenticator
             if (parsedAction == null || parsedAction.Length > 32)
                 return false;
 
+            payload = parsedPayload;
             action = parsedAction;
             return true;
         }
