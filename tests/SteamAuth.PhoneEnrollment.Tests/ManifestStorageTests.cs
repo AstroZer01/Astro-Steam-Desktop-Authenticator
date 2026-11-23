@@ -1707,6 +1707,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             // A v2 journal (with previous_manifest_hash) that omits created_file_hashes for non-empty created_filenames must fail closed.
             JObject missingHashesJournal = new JObject
             {
+                ["journal_version"] = 2,
                 ["manifest_hash"] = ComputeContentHash(File.ReadAllText(manifestPath) + "-missing-hashes"),
                 ["previous_manifest_hash"] = ComputeContentHash(File.ReadAllText(manifestPath)),
                 ["created_filenames"] = new JArray(racedFilename),
@@ -1717,6 +1718,56 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
             Assert.True(File.Exists(racedPath));
             Assert.Equal(otherWriterContents, File.ReadAllText(racedPath));
+
+            // A first-save v2 journal (no previous_manifest_hash, no replaced_files) omitting created_file_hashes must also fail closed.
+            File.Delete(manifestPath);
+            JObject firstSaveMissingHashesJournal = new JObject
+            {
+                ["journal_version"] = 2,
+                ["manifest_hash"] = ComputeContentHash("first-save-uncommitted"),
+                ["created_filenames"] = new JArray(racedFilename),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, firstSaveMissingHashesJournal.ToString(Formatting.None));
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(racedPath));
+            Assert.Equal(otherWriterContents, File.ReadAllText(racedPath));
+
+            // Unsupported future journal versions must fail closed.
+            firstSaveMissingHashesJournal["journal_version"] = 99;
+            File.WriteAllText(journalPath, firstSaveMissingHashesJournal.ToString(Formatting.None));
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(racedPath));
+
+            // Handle-bound exclusive deletion fails closed even if another reader holds FileShare.Read | FileShare.Delete,
+            // preventing any concurrent rename/swap between hash verification and unlink.
+            File.WriteAllText(createdPath, ourCreatedContents);
+            JObject exclusiveLockJournal = new JObject
+            {
+                ["journal_version"] = 2,
+                ["manifest_hash"] = ComputeContentHash("first-save-exclusive-check"),
+                ["created_filenames"] = new JArray(createdFilename),
+                ["created_file_hashes"] = new JObject
+                {
+                    [createdFilename] = ComputeContentHash(ourCreatedContents)
+                },
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, exclusiveLockJournal.ToString(Formatting.None));
+            using (new FileStream(createdPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
+            {
+                Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+                Assert.True(File.Exists(createdPath));
+            }
+
+            // Once unlocked, handle-bound verified deletion removes the created file cleanly.
+            File.Delete(racedPath);
+            File.Delete(Path.Combine(maDirectory, Manifest.GetCanonicalMaFileFilename(existingId)));
+            Manifest.GetManifest(true);
+            Assert.False(File.Exists(createdPath));
+            Assert.False(File.Exists(journalPath));
         }
 
         [Fact]
