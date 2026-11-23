@@ -1753,7 +1753,19 @@ namespace Steam_Desktop_Authenticator
 
                 try
                 {
-                    StorageTransactionJournal journal = JsonConvert.DeserializeObject<StorageTransactionJournal>(ReadTextWithLimit(journalFilename, MaximumManifestFileSizeBytes), storageJsonSettings);
+                    string journalText = ReadTextWithLimit(journalFilename, MaximumManifestFileSizeBytes);
+                    JObject journalJson;
+                    using (StringReader stringReader = new StringReader(journalText))
+                    using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = storageJsonSettings.MaxDepth, DateParseHandling = DateParseHandling.None })
+                    {
+                        journalJson = JObject.Load(jsonReader);
+                    }
+
+                    JProperty versionProperty = journalJson.Property("journal_version", StringComparison.OrdinalIgnoreCase);
+                    if (versionProperty != null && versionProperty.Value.Type != JTokenType.Integer)
+                        throw new InvalidDataException("The pending storage journal version is invalid.");
+
+                    StorageTransactionJournal journal = journalJson.ToObject<StorageTransactionJournal>(JsonSerializer.Create(storageJsonSettings));
                     if (journal == null || String.IsNullOrWhiteSpace(journal.ManifestHash))
                         throw new InvalidDataException("The pending storage journal is invalid.");
                     if (journal.JournalVersion.HasValue && journal.JournalVersion.Value != CurrentStorageJournalVersion)
@@ -2061,7 +2073,7 @@ namespace Steam_Desktop_Authenticator
                     // other process can write, rename, or replace the file between hashing and unlink,
                     // and bind deletion directly to this verified handle via SetFileInformationByHandle.
                     using (SafeFileHandle handle = CreateFile(
-                        fullPath,
+                        ToNativeWindowsPath(fullPath),
                         FileReadData | FileReadAttributes | DeleteAccess,
                         0,
                         IntPtr.Zero,
@@ -2139,6 +2151,16 @@ namespace Steam_Desktop_Authenticator
             return succeeded;
         }
 
+        private static string ToNativeWindowsPath(string path)
+        {
+            string fullPath = Path.GetFullPath(path);
+            if (fullPath.Length < 248 || fullPath.StartsWith(@"\\?\", StringComparison.Ordinal))
+                return fullPath;
+            if (fullPath.StartsWith(@"\\", StringComparison.Ordinal))
+                return @"\\?\UNC\" + fullPath.Substring(2);
+            return @"\\?\" + fullPath;
+        }
+
         private const uint FileReadData = 0x00000001;
         private const uint FileReadAttributes = 0x00000080;
         private const uint DeleteAccess = 0x00010000;
@@ -2208,17 +2230,16 @@ namespace Steam_Desktop_Authenticator
                 {
                     if (File.Exists(backupPath))
                     {
-                        string backupHash = GetFileBytesHash(backupPath);
-                        if (!String.Equals(backupHash, record.OriginalHash, StringComparison.Ordinal))
-                        {
-                            throw new InvalidDataException("A replaced authenticator backup did not match the expected original file hash.");
-                        }
-
                         if (File.Exists(targetPath))
                         {
                             string targetHash = GetFileBytesHash(targetPath);
                             if (String.Equals(targetHash, record.OriginalHash, StringComparison.Ordinal))
+                            {
+                                string backupHash = GetFileBytesHash(backupPath);
+                                if (!String.Equals(backupHash, record.OriginalHash, StringComparison.Ordinal))
+                                    throw new InvalidDataException("A replaced authenticator backup did not match the expected original file hash.");
                                 continue;
+                            }
 
                             if (!String.Equals(targetHash, record.ReplacementHash, StringComparison.Ordinal))
                             {
@@ -2230,7 +2251,7 @@ namespace Steam_Desktop_Authenticator
                             throw new InvalidDataException("The target authenticator path is not a regular file.");
                         }
 
-                        RestoreFileBytesAtomically(backupPath, targetPath);
+                        RestoreFileBytesAtomically(backupPath, targetPath, record.OriginalHash);
                     }
                     else
                     {
@@ -2490,7 +2511,7 @@ namespace Steam_Desktop_Authenticator
             return exception.HResult == ErrorInvalidFunction || exception.HResult == ErrorNotSupported;
         }
 
-        private static void RestoreFileBytesAtomically(string sourcePath, string destinationPath)
+        private static void RestoreFileBytesAtomically(string sourcePath, string destinationPath, string expectedSourceHash)
         {
             FileInfo sourceInfo = new FileInfo(sourcePath);
             if (!sourceInfo.Exists)
@@ -2511,12 +2532,25 @@ namespace Steam_Desktop_Authenticator
             string temporaryFilename = destinationPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
+                string copiedHash;
                 using (FileStream sourceStream = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan))
                 using (FileStream destinationStream = new FileStream(temporaryFilename, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, FileOptions.WriteThrough))
+                using (IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
                 {
-                    sourceStream.CopyTo(destinationStream, 81920);
+                    byte[] buffer = new byte[81920];
+                    int bytesRead;
+                    while ((bytesRead = sourceStream.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        hasher.AppendData(buffer, 0, bytesRead);
+                        destinationStream.Write(buffer, 0, bytesRead);
+                    }
+
                     destinationStream.Flush(true);
+                    copiedHash = Convert.ToBase64String(hasher.GetHashAndReset());
                 }
+
+                if (!String.Equals(copiedHash, expectedSourceHash, StringComparison.Ordinal))
+                    throw new InvalidDataException("A replaced authenticator backup did not match the expected original file hash.");
 
                 if (File.Exists(destinationPath))
                     ReplaceFileAtomically(temporaryFilename, destinationPath, null);

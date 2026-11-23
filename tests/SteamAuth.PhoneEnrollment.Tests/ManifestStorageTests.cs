@@ -1734,6 +1734,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(File.Exists(racedPath));
             Assert.Equal(otherWriterContents, File.ReadAllText(racedPath));
 
+            // Explicit null journal_version must not fall back to legacy recovery.
+            firstSaveMissingHashesJournal["journal_version"] = JValue.CreateNull();
+            File.WriteAllText(journalPath, firstSaveMissingHashesJournal.ToString(Formatting.None));
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(racedPath));
+
             // Unsupported future journal versions must fail closed.
             firstSaveMissingHashesJournal["journal_version"] = 99;
             File.WriteAllText(journalPath, firstSaveMissingHashesJournal.ToString(Formatting.None));
@@ -2305,6 +2311,50 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
             Assert.Equal(firstOriginalContents, File.ReadAllText(firstPath));
             Assert.Equal(secondOriginalContents, File.ReadAllText(secondPath));
+        }
+
+        [Fact]
+        public void StartupRecovery_HandleBoundCreatedFileDeletionWorksInLongDataDirectoryPaths()
+        {
+            string nestedSegment = new string('a', 60);
+            string longDataDir = Path.Combine(dataDirectory, nestedSegment, nestedSegment, nestedSegment, nestedSegment);
+            string longMaDir = Path.Combine(longDataDir, "maFiles");
+            Directory.CreateDirectory(longMaDir);
+            Assert.True(longMaDir.Length > 260);
+
+            string previousDir = Environment.GetEnvironmentVariable("ASDA_DATA_DIRECTORY");
+            Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", longDataDir);
+            try
+            {
+                ulong accountId = 76561198000017000UL;
+                string createdFilename = Manifest.GetCanonicalMaFileFilename(accountId);
+                string createdPath = Path.Combine(longMaDir, createdFilename);
+                string createdContents = JsonConvert.SerializeObject(CreateAccount(accountId));
+                File.WriteAllText(createdPath, createdContents);
+
+                JObject journal = new JObject
+                {
+                    ["journal_version"] = 2,
+                    ["manifest_hash"] = ComputeContentHash("long-path-uncommitted"),
+                    ["created_filenames"] = new JArray(createdFilename),
+                    ["created_file_hashes"] = new JObject
+                    {
+                        [createdFilename] = ComputeContentHash(createdContents)
+                    },
+                    ["obsolete_filenames"] = new JArray(),
+                    ["backup_filename"] = null
+                };
+                string journalPath = Path.Combine(longMaDir, ".asda-storage-transaction.json");
+                File.WriteAllText(journalPath, journal.ToString(Formatting.None));
+
+                Manifest.GetManifest(true);
+                Assert.False(File.Exists(createdPath));
+                Assert.False(File.Exists(journalPath));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDir);
+            }
         }
 
         public void Dispose()
