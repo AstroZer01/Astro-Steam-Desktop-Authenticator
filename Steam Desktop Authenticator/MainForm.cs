@@ -102,7 +102,7 @@ namespace Steam_Desktop_Authenticator
         private readonly Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate;
         private readonly Func<bool, string, string, Task> publishUpdateCheckStateAsync;
         private readonly Func<string, string> showAddAccountLoginDialog;
-        private readonly Func<SteamGuardAccount, string, (bool Succeeded, string ResolvedPassKey)> showRefreshLoginDialog;
+        private readonly Func<SteamGuardAccount, string, long?, (bool Succeeded, string ResolvedPassKey)> showRefreshLoginDialog;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -523,7 +523,9 @@ namespace Steam_Desktop_Authenticator
             this.promptForUpdate = promptForUpdate ?? ShowUpdateAvailablePrompt;
             this.publishUpdateCheckStateAsync = publishUpdateCheckStateAsync;
             this.showAddAccountLoginDialog = showAddAccountLoginDialog ?? ShowAddAccountLoginDialog;
-            this.showRefreshLoginDialog = showRefreshLoginDialog ?? ShowRefreshLoginDialog;
+            this.showRefreshLoginDialog = showRefreshLoginDialog != null
+                ? (targetAccount, currentPassKey, _) => showRefreshLoginDialog(targetAccount, currentPassKey)
+                : (Func<SteamGuardAccount, string, long?, (bool Succeeded, string ResolvedPassKey)>)ShowRefreshLoginDialog;
         }
 
         private string ShowAddAccountLoginDialog(string currentPassKey)
@@ -535,9 +537,12 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private (bool Succeeded, string ResolvedPassKey) ShowRefreshLoginDialog(SteamGuardAccount account, string currentPassKey)
+        private (bool Succeeded, string ResolvedPassKey) ShowRefreshLoginDialog(
+            SteamGuardAccount account,
+            string currentPassKey,
+            long? expectedStorageRevision)
         {
-            using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Refresh, account, currentPassKey))
+            using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Refresh, account, currentPassKey, expectedStorageRevision))
             {
                 loginForm.ShowDialog(this);
                 return (loginForm.RefreshSucceeded, loginForm.ResolvedPassKey);
@@ -751,6 +756,55 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
+        internal static async Task<bool> RecoverPendingAccountOnStartupAsync(
+            SteamGuardAccount pendingAccount,
+            Func<bool> isAccessTokenExpired,
+            Func<bool> isRefreshTokenExpired,
+            Func<CancellationToken, Task> refreshAccessTokenAsync,
+            Func<long> getCurrentStorageRevision,
+            Func<CancellationToken, Task<AuthenticatorActivationStatus>> verifyActivationAsync,
+            Func<SteamGuardAccount, long, bool> persistActivatedAccount,
+            CancellationToken cancellationToken)
+        {
+            if (pendingAccount == null || pendingAccount.FullyEnrolled ||
+                isAccessTokenExpired == null || isRefreshTokenExpired == null ||
+                refreshAccessTokenAsync == null || getCurrentStorageRevision == null ||
+                verifyActivationAsync == null || persistActivatedAccount == null)
+            {
+                return false;
+            }
+
+            if (isAccessTokenExpired() && isRefreshTokenExpired())
+                return false;
+
+            bool refreshedAccessToken = false;
+            if (isAccessTokenExpired())
+            {
+                await refreshAccessTokenAsync(cancellationToken);
+                refreshedAccessToken = true;
+            }
+
+            long storageRevisionAtCheck = getCurrentStorageRevision();
+            return await TryRecoverPendingAccountActivationAsync(
+                pendingAccount,
+                async ct =>
+                {
+                    AuthenticatorActivationStatus status = await verifyActivationAsync(ct);
+                    if (status == AuthenticatorActivationStatus.SessionInvalid &&
+                        !refreshedAccessToken &&
+                        !isRefreshTokenExpired())
+                    {
+                        await refreshAccessTokenAsync(ct);
+                        refreshedAccessToken = true;
+                        storageRevisionAtCheck = getCurrentStorageRevision();
+                        status = await verifyActivationAsync(ct);
+                    }
+                    return status;
+                },
+                activated => persistActivatedAccount(activated, storageRevisionAtCheck),
+                cancellationToken);
+        }
+
         private async Task ValidateStartupSessionsAsync()
         {
             SteamGuardAccount[] accounts = allAccounts ?? Array.Empty<SteamGuardAccount>();
@@ -767,37 +821,15 @@ namespace Steam_Desktop_Authenticator
 
                     try
                     {
-                        await RunSteamAccountOperationAsync(account, async () =>
-                        {
-                            bool refreshedAccessToken = false;
-                            if (pendingSessionAtStart.IsAccessTokenExpired())
-                            {
-                                if (pendingSessionAtStart.IsRefreshTokenExpired())
-                                    return false;
-                                await RefreshAndPersistAccessTokenAsync(account, lifetimeCancellationSource.Token);
-                                refreshedAccessToken = true;
-                            }
-
-                            long storageRevisionAtCheck = manifest?.GetAccountStorageRevision(pendingSessionAtStart.SteamID) ?? 0;
-                            return await TryRecoverPendingAccountActivationAsync(
-                                account,
-                                async ct =>
-                                {
-                                    AuthenticatorActivationStatus status = await account.VerifyAuthenticatorActivationAsync(ct);
-                                    if (status == AuthenticatorActivationStatus.SessionInvalid &&
-                                        !refreshedAccessToken &&
-                                        !pendingSessionAtStart.IsRefreshTokenExpired())
-                                    {
-                                        await RefreshAndPersistAccessTokenAsync(account, ct);
-                                        refreshedAccessToken = true;
-                                        storageRevisionAtCheck = manifest?.GetAccountStorageRevision(pendingSessionAtStart.SteamID) ?? 0;
-                                        status = await account.VerifyAuthenticatorActivationAsync(ct);
-                                    }
-                                    return status;
-                                },
-                                activated => PersistLoginSession(activated, pendingSessionAtStart, storageRevisionAtCheck),
-                                lifetimeCancellationSource.Token);
-                        }, lifetimeCancellationSource.Token);
+                        await RunSteamAccountOperationAsync(account, () => RecoverPendingAccountOnStartupAsync(
+                            account,
+                            () => pendingSessionAtStart.IsAccessTokenExpired(),
+                            () => pendingSessionAtStart.IsRefreshTokenExpired(),
+                            ct => RefreshAndPersistAccessTokenAsync(account, ct),
+                            () => manifest?.GetAccountStorageRevision(pendingSessionAtStart.SteamID) ?? 0,
+                            ct => account.VerifyAuthenticatorActivationAsync(ct),
+                            (activated, storageRevisionAtCheck) => PersistRecoveredPendingActivation(activated, pendingSessionAtStart, storageRevisionAtCheck),
+                            lifetimeCancellationSource.Token), lifetimeCancellationSource.Token);
                     }
                     catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
                     {
@@ -2292,6 +2324,110 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private static bool HasSameAuthenticatorSecrets(SteamGuardAccount left, SteamGuardAccount right)
+        {
+            if (left == null || right == null)
+                return false;
+
+            return String.Equals(left.SharedSecret, right.SharedSecret, StringComparison.Ordinal) &&
+                String.Equals(left.TokenGID, right.TokenGID, StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(left.DeviceID, right.DeviceID, StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal bool PersistRecoveredPendingActivation(
+            SteamGuardAccount originalAccount,
+            SessionData expectedSession,
+            long expectedStorageRevision)
+        {
+            if (manifest == null || originalAccount == null || expectedSession == null || expectedSession.SteamID == 0)
+                return false;
+
+            StorageResult saveResult;
+            SteamGuardAccount targetAccount = null;
+            lock (accountGenerationLock)
+            {
+                ulong steamId = expectedSession.SteamID;
+                if (CanPersistAccountGeneration(originalAccount, expectedSession, allAccounts))
+                {
+                    targetAccount = originalAccount;
+                }
+                else if (manifest.GetAccountStorageRevision(steamId) == expectedStorageRevision)
+                {
+                    // A UI-only WebView2 reload (NavigationCompleted -> loadAccountsList) replaces
+                    // in-memory SteamGuardAccount instances without changing the on-disk record.
+                    // Promote the current loaded instance only when the storage revision is unchanged
+                    // and the authenticator secrets still match.
+                    SteamGuardAccount reloadedMatch = FindLoadedAccountBySteamId(allAccounts, steamId);
+                    if (reloadedMatch != null &&
+                        !reloadedMatch.FullyEnrolled &&
+                        HasSameAuthenticatorSecrets(originalAccount, reloadedMatch))
+                    {
+                        targetAccount = reloadedMatch;
+                    }
+                }
+
+                if (targetAccount == null)
+                    throw new StaleAccountGenerationException(originalAccount.AccountName);
+
+                bool previousTargetEnrolled = targetAccount.FullyEnrolled;
+                targetAccount.FullyEnrolled = true;
+                saveResult = manifest.SaveAccount(
+                    targetAccount,
+                    manifest.Encrypted,
+                    passKey,
+                    expectedStorageRevision,
+                    allowCreate: false);
+                if (!saveResult.Succeeded)
+                {
+                    targetAccount.FullyEnrolled = previousTargetEnrolled;
+                }
+            }
+
+            if (!saveResult.Succeeded)
+                DiagnosticErrorLogger.Log("Authenticator storage", saveResult.Exception, "The verified authenticator activation could not be saved.");
+            else if (targetAccount.Session != null && !targetAccount.Session.IsRefreshTokenExpired())
+                ClearSessionRecoveryState(targetAccount);
+            return saveResult.Succeeded;
+        }
+
+        internal SteamGuardAccount ResolveQueuedAccountForOperation(
+            SteamGuardAccount queuedAccount,
+            SessionData expectedSessionAtQueue,
+            long? expectedStorageRevisionAtQueue)
+        {
+            if (queuedAccount == null)
+                return null;
+
+            lock (accountGenerationLock)
+            {
+                if (expectedSessionAtQueue == null || expectedSessionAtQueue.SteamID == 0)
+                    return IsCurrentAccountGeneration(queuedAccount, allAccounts) ? queuedAccount : null;
+
+                ulong steamId = expectedSessionAtQueue.SteamID;
+                if (expectedStorageRevisionAtQueue.HasValue && manifest != null &&
+                    manifest.GetAccountStorageRevision(steamId) != expectedStorageRevisionAtQueue.Value)
+                {
+                    return null;
+                }
+
+                if (CanUseAccountGeneration(queuedAccount, expectedSessionAtQueue, allAccounts))
+                    return queuedAccount;
+
+                if (expectedStorageRevisionAtQueue.HasValue && manifest != null)
+                {
+                    SteamGuardAccount reloadedMatch = FindLoadedAccountBySteamId(allAccounts, steamId);
+                    if (reloadedMatch != null &&
+                        reloadedMatch.FullyEnrolled == queuedAccount.FullyEnrolled &&
+                        HasSameAuthenticatorSecrets(queuedAccount, reloadedMatch))
+                    {
+                        return reloadedMatch;
+                    }
+                }
+
+                return null;
+            }
+        }
+
         internal bool PersistLoginSession(SteamGuardAccount account, SessionData expectedSession = null, long? expectedStorageRevision = null)
         {
             if (manifest == null)
@@ -3280,17 +3416,30 @@ namespace Steam_Desktop_Authenticator
                 return false;
             }
 
+            SessionData expectedSessionAtQueue = account.Session;
+            ulong steamIdAtQueue = expectedSessionAtQueue?.SteamID ?? 0;
+            long? expectedStorageRevisionAtQueue = (manifest != null && steamIdAtQueue != 0)
+                ? manifest.GetAccountStorageRevision(steamIdAtQueue)
+                : (long?)null;
+
             return await RunSteamAccountOperationAsync(account, () =>
             {
-                (bool succeeded, string resolvedPassKey) = showRefreshLoginDialog(account, passKey);
+                SteamGuardAccount currentTarget = ResolveQueuedAccountForOperation(
+                    account,
+                    expectedSessionAtQueue,
+                    expectedStorageRevisionAtQueue);
+                if (currentTarget == null)
+                    return Task.FromResult(false);
+
+                (bool succeeded, string resolvedPassKey) = showRefreshLoginDialog(currentTarget, passKey, expectedStorageRevisionAtQueue);
                 if (succeeded)
                 {
                     AdoptResolvedPassKey(resolvedPassKey);
                 }
-                if (succeeded && account.Session != null)
+                if (succeeded && currentTarget.Session != null)
                 {
-                    ClearSessionRecoveryState(account);
-                    InvalidateTradeConfirmationCache(account);
+                    ClearSessionRecoveryState(currentTarget);
+                    InvalidateTradeConfirmationCache(currentTarget);
                 }
                 return Task.FromResult(succeeded);
             });

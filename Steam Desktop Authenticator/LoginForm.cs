@@ -27,13 +27,26 @@ namespace Steam_Desktop_Authenticator
         internal const string SetupPassKeyPromptLabel = "Please enter an encryption passkey. Leave blank or hit cancel to not encrypt (VERY INSECURE).";
 
         private readonly string suppliedPassKey;
+        private readonly long? expectedStorageRevision;
 
-        public LoginForm(LoginType loginReason = LoginType.Initial, SteamGuardAccount account = null, string passKey = null)
+        internal static string GetRefreshLoginExplanation(SteamGuardAccount targetAccount)
+        {
+            return targetAccount != null && !targetAccount.FullyEnrolled
+                ? "Sign in to Steam to verify whether this pending authenticator is active."
+                : "Your Steam credentials have expired. For trade and market confirmations to work properly, please login again.";
+        }
+
+        public LoginForm(
+            LoginType loginReason = LoginType.Initial,
+            SteamGuardAccount account = null,
+            string passKey = null,
+            long? expectedStorageRevision = null)
         {
             InitializeComponent();
             this.LoginReason = loginReason;
             this.account = account;
             this.suppliedPassKey = passKey;
+            this.expectedStorageRevision = expectedStorageRevision;
 
             try
             {
@@ -45,7 +58,7 @@ namespace Steam_Desktop_Authenticator
 
                 if (this.LoginReason == LoginType.Refresh)
                 {
-                    labelLoginExplanation.Text = "Your Steam credentials have expired. For trade and market confirmations to work properly, please login again.";
+                    labelLoginExplanation.Text = GetRefreshLoginExplanation(account);
                 }
                 else if (this.LoginReason == LoginType.Import)
                 {
@@ -478,7 +491,8 @@ namespace Steam_Desktop_Authenticator
                             sessionData,
                             resolvedKey,
                             (candidate, ct) => candidate.VerifyAuthenticatorActivationAsync(ct),
-                            cancellationToken);
+                            cancellationToken,
+                            expectedStorageRevision);
                     }
                     catch (OperationCanceledException)
                     {
@@ -535,7 +549,7 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
-                if (!ApplyRefreshedSession(account, sessionData, () => SaveRefreshedSession(man, suppliedPassKey)))
+                if (!ApplyRefreshedSession(account, sessionData, () => SaveRefreshedSession(man, suppliedPassKey, expectedStorageRevision)))
                 {
                     ResetLoginButton(cancellationToken);
                     return;
@@ -1159,7 +1173,8 @@ namespace Steam_Desktop_Authenticator
             SessionData freshSession,
             string passKey,
             Func<SteamGuardAccount, CancellationToken, Task<AuthenticatorActivationStatus>> verifyActivationAsync,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            long? expectedStorageRevision = null)
         {
             if (manifest == null || pendingAccount == null || pendingAccount.FullyEnrolled ||
                 freshSession == null || freshSession.SteamID == 0 || verifyActivationAsync == null)
@@ -1167,7 +1182,7 @@ namespace Steam_Desktop_Authenticator
                 return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.NotApplicable);
             }
 
-            long expectedStorageRevision = manifest.GetAccountStorageRevision(freshSession.SteamID);
+            long revisionToCheck = expectedStorageRevision ?? manifest.GetAccountStorageRevision(freshSession.SteamID);
             SessionData previousSession = pendingAccount.Session;
             pendingAccount.Session = freshSession;
             AuthenticatorActivationStatus activationStatus;
@@ -1204,7 +1219,7 @@ namespace Steam_Desktop_Authenticator
                 pendingAccount,
                 encrypt,
                 passKey,
-                expectedStorageRevision,
+                revisionToCheck,
                 allowCreate: false);
             if (!saveResult.Succeeded)
             {
@@ -1289,7 +1304,7 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
-        private bool SaveRefreshedSession(Manifest man, string suppliedPassKey = null)
+        private bool SaveRefreshedSession(Manifest man, string suppliedPassKey = null, long? expectedRevision = null)
         {
             if (!TryResolveManifestPassKey(man, suppliedPassKey, out string passKey))
             {
@@ -1297,7 +1312,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             bool encrypt = (man.Entries.Count > 0 && man.Encrypted) || passKey != null;
-            StorageResult saveResult = man.SaveAccount(account, encrypt, passKey);
+            StorageResult saveResult = man.SaveAccount(account, encrypt, passKey, expectedRevision, allowCreate: false);
             if (!saveResult.Succeeded)
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", saveResult.Exception, "The refreshed Steam session could not be saved.");

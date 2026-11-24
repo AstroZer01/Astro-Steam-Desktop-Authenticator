@@ -495,6 +495,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 }))
             {
                 form.SetEncryptionKey(stalePassKey);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, new[] { account });
                 bool succeeded = await InvokePrivateAsyncMethod<bool>(form, "PromptRefreshLoginAsync", account);
 
                 Assert.True(succeeded);
@@ -527,6 +528,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 }))
             {
                 form.SetEncryptionKey(activePassKey);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, new[] { account });
                 bool succeeded = await InvokePrivateAsyncMethod<bool>(form, "PromptRefreshLoginAsync", account);
 
                 Assert.False(succeeded);
@@ -1719,6 +1721,230 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.False(string.IsNullOrWhiteSpace(deviceCode));
                 Assert.Equal(5, deviceCode.Length);
             }
+        }
+
+        [Fact]
+        public async Task VerifyAuthenticatorActivationAsync_TreatsMissingProtobufStateAsUnverified()
+        {
+            SteamGuardAccount account = CreateAccount(76561198000001018UL, "empty-status-user");
+            account.TokenGID = "gid-empty-state";
+            account.FullyEnrolled = false;
+
+            // Empty protobuf payload (HasState == false, State defaults to 0) must NOT be treated as NotActive.
+            var emptyPayload = new SteamAuth.Protocol.CTwoFactor_Status_Response();
+            Assert.False(emptyPayload.HasState);
+            var emptyStatusTransport = new FakeStatusTransport((_, _, _) =>
+                new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+                {
+                    Result = 1,
+                    Body = emptyPayload
+                });
+
+            Assert.Equal(
+                AuthenticatorActivationStatus.Unverified,
+                await account.VerifyAuthenticatorActivationAsync(emptyStatusTransport));
+        }
+
+        [Fact]
+        public async Task PersistRecoveredPendingActivation_SucceedsAcrossUiOnlyReloadWhenStorageRevisionUnchanged()
+        {
+            const string passKey = "ui-reload-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount originalAccount = CreateAccount(76561198000001019UL, "ui-reload-pending-user");
+            originalAccount.TokenGID = "gid-ui-reload";
+            originalAccount.FullyEnrolled = false;
+            Assert.True(manifest.SaveAccount(originalAccount, encrypt: true, passKey: passKey).Succeeded);
+
+            SessionData originalSession = originalAccount.Session;
+            long revisionAtCheck = manifest.GetAccountStorageRevision(originalSession.SteamID);
+
+            using (MainForm form = new MainForm(manifest, null, null, null))
+            {
+                form.SetEncryptionKey(passKey);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, new[] { originalAccount });
+
+                // Simulate WebView2 NavigationCompleted -> loadAccountsList() replacing the in-memory object
+                // while the on-disk storage revision remains unchanged.
+                bool recovered = await MainForm.TryRecoverPendingAccountActivationAsync(
+                    originalAccount,
+                    _ =>
+                    {
+                        SteamGuardAccount[] reloadedInstances = manifest.GetAllAccounts(passKey);
+                        Assert.NotSame(originalAccount, reloadedInstances[0]);
+                        typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, reloadedInstances);
+                        return Task.FromResult(AuthenticatorActivationStatus.ActiveForThisRecord);
+                    },
+                    activated => form.PersistRecoveredPendingActivation(activated, originalSession, revisionAtCheck),
+                    CancellationToken.None);
+
+                Assert.True(recovered);
+                SteamGuardAccount currentInMemory = Assert.Single(GetPrivateField<SteamGuardAccount[]>(form, "allAccounts"));
+                Assert.True(currentInMemory.FullyEnrolled);
+                SteamGuardAccount persisted = Assert.Single(manifest.GetAllAccounts(passKey));
+                Assert.True(persisted.FullyEnrolled);
+            }
+        }
+
+        [Fact]
+        public async Task QueuedPendingVerification_RejectsStaleDialogAndSaveWhenReplacementMaFileImported()
+        {
+            const string passKey = "queued-replacement-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount oldPending = CreateAccount(76561198000001020UL, "queued-user");
+            oldPending.SharedSecret = Convert.ToBase64String(new byte[20]);
+            oldPending.TokenGID = "gid-old-pending";
+            oldPending.FullyEnrolled = false;
+            Assert.True(manifest.SaveAccount(oldPending, encrypt: true, passKey: passKey).Succeeded);
+
+            long revisionAtQueue = manifest.GetAccountStorageRevision(oldPending.Session.SteamID);
+            int dialogCalls = 0;
+
+            // Create a replacement imported record with distinct SharedSecret and TokenGID for the same SteamID.
+            SteamGuardAccount importedReplacement = CreateAccount(76561198000001020UL, "queued-user");
+            byte[] replacementSecret = new byte[20];
+            replacementSecret[0] = 0x5A;
+            importedReplacement.SharedSecret = Convert.ToBase64String(replacementSecret);
+            importedReplacement.TokenGID = "gid-imported-replacement";
+            importedReplacement.FullyEnrolled = true;
+
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                showRefreshLoginDialog: (_, _) =>
+                {
+                    dialogCalls++;
+                    return (true, passKey);
+                }))
+            {
+                form.SetEncryptionKey(passKey);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, new[] { oldPending });
+
+                // Hold the per-account operation while simulating a concurrent import of a replacement maFile.
+                TaskCompletionSource<bool> releaseGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                TaskCompletionSource<bool> lockAcquired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                MethodInfo runOperation = typeof(MainForm).GetMethod("RunSteamAccountOperationAsync", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.NotNull(runOperation);
+                MethodInfo closedRunOperation = runOperation.MakeGenericMethod(typeof(bool));
+
+                Func<Task<bool>> holdLock = async () =>
+                {
+                    lockAcquired.SetResult(true);
+                    await releaseGate.Task;
+                    return true;
+                };
+                Task<bool> activeStartupTask = (Task<bool>)closedRunOperation.Invoke(form, new object[] { oldPending, holdLock, CancellationToken.None, null });
+                await lockAcquired.Task;
+
+                Task<bool> queuedVerificationTask = InvokePrivateAsyncMethod<bool>(form, "PromptRefreshLoginAsync", oldPending);
+
+                // While queued, import the replacement account (bumps storage revision and updates allAccounts).
+                Assert.True(manifest.SaveAccount(importedReplacement, encrypt: true, passKey: passKey).Succeeded);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, manifest.GetAllAccounts(passKey));
+                releaseGate.SetResult(true);
+
+                await activeStartupTask;
+                bool queuedResult = await queuedVerificationTask;
+
+                Assert.False(queuedResult);
+                Assert.Equal(0, dialogCalls);
+
+                // Even if LoginForm's recovery helper runs directly with the revision bound before queueing,
+                // it refuses to overwrite the imported replacement record.
+                SessionData freshSession = new SessionData
+                {
+                    SteamID = 76561198000001020UL,
+                    AccessToken = "fresh-access",
+                    RefreshToken = "fresh-refresh"
+                };
+                LoginForm.PendingAuthenticatorRecoveryResult staleSaveResult = await LoginForm.TryRecoverPendingAccountWithFreshSessionAsync(
+                    manifest,
+                    oldPending,
+                    freshSession,
+                    passKey,
+                    (_, _) => Task.FromResult(AuthenticatorActivationStatus.ActiveForThisRecord),
+                    CancellationToken.None,
+                    expectedStorageRevision: revisionAtQueue);
+
+                Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.SaveFailed, staleSaveResult.Status);
+                SteamGuardAccount preserved = Assert.Single(manifest.GetAllAccounts(passKey));
+                Assert.Equal("gid-imported-replacement", preserved.TokenGID);
+                Assert.Equal(importedReplacement.SharedSecret, preserved.SharedSecret);
+            }
+        }
+
+        [Fact]
+        public async Task RecoverPendingAccountOnStartupAsync_HandlesExpiredRefreshWithValidAccessAndSingleSessionInvalidRetry()
+        {
+            // Case 1: Access token is still valid even though refresh token expired -> verifies without refreshing.
+            SteamGuardAccount validAccessAccount = CreateAccount(76561198000001021UL, "valid-access-only");
+            validAccessAccount.FullyEnrolled = false;
+            int refreshCalls = 0;
+            int verifyCalls = 0;
+            long persistedRevision = -1;
+
+            bool recoveredValidAccess = await MainForm.RecoverPendingAccountOnStartupAsync(
+                validAccessAccount,
+                isAccessTokenExpired: () => false,
+                isRefreshTokenExpired: () => true,
+                refreshAccessTokenAsync: _ => { refreshCalls++; return Task.CompletedTask; },
+                getCurrentStorageRevision: () => 4L,
+                verifyActivationAsync: _ => { verifyCalls++; return Task.FromResult(AuthenticatorActivationStatus.ActiveForThisRecord); },
+                persistActivatedAccount: (_, rev) => { persistedRevision = rev; return true; },
+                CancellationToken.None);
+
+            Assert.True(recoveredValidAccess);
+            Assert.Equal(0, refreshCalls);
+            Assert.Equal(1, verifyCalls);
+            Assert.Equal(4L, persistedRevision);
+            Assert.True(validAccessAccount.FullyEnrolled);
+
+            // Case 2: Initial QueryStatus returns SessionInvalid while refresh token is valid -> refreshes once, updates revision, and retries.
+            SteamGuardAccount retryAccount = CreateAccount(76561198000001022UL, "retry-session-invalid");
+            retryAccount.FullyEnrolled = false;
+            long currentRevision = 7L;
+            int retryRefreshCalls = 0;
+            int retryVerifyCalls = 0;
+            long retryPersistedRevision = -1;
+
+            bool recoveredAfterRetry = await MainForm.RecoverPendingAccountOnStartupAsync(
+                retryAccount,
+                isAccessTokenExpired: () => false,
+                isRefreshTokenExpired: () => false,
+                refreshAccessTokenAsync: _ =>
+                {
+                    retryRefreshCalls++;
+                    currentRevision++;
+                    return Task.CompletedTask;
+                },
+                getCurrentStorageRevision: () => currentRevision,
+                verifyActivationAsync: _ =>
+                {
+                    retryVerifyCalls++;
+                    return Task.FromResult(retryVerifyCalls == 1
+                        ? AuthenticatorActivationStatus.SessionInvalid
+                        : AuthenticatorActivationStatus.ActiveForThisRecord);
+                },
+                persistActivatedAccount: (_, rev) => { retryPersistedRevision = rev; return true; },
+                CancellationToken.None);
+
+            Assert.True(recoveredAfterRetry);
+            Assert.Equal(1, retryRefreshCalls);
+            Assert.Equal(2, retryVerifyCalls);
+            Assert.Equal(8L, retryPersistedRevision);
+            Assert.True(retryAccount.FullyEnrolled);
+        }
+
+        [Fact]
+        public void GetRefreshLoginExplanation_TailorsCopyForPendingVsEnrolledAccounts()
+        {
+            SteamGuardAccount pending = CreateAccount(76561198000001023UL, "pending-explanation-user");
+            pending.FullyEnrolled = false;
+            Assert.Contains("verify whether this pending authenticator is active", LoginForm.GetRefreshLoginExplanation(pending));
+
+            pending.FullyEnrolled = true;
+            Assert.Contains("credentials have expired", LoginForm.GetRefreshLoginExplanation(pending));
         }
 
         [Fact]

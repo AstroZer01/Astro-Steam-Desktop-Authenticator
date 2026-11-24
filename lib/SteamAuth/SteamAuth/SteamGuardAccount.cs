@@ -210,7 +210,7 @@ namespace SteamAuth
                         : AuthenticatorActivationStatus.Unverified;
                 }
 
-                if (response.Body == null)
+                if (response.Body == null || !response.Body.HasState)
                     return AuthenticatorActivationStatus.Unverified;
 
                 if (response.Body.State == 0)
