@@ -190,15 +190,39 @@ namespace Steam_Desktop_Authenticator
             });
         }
 
-        private async Task RefreshAndPersistAccessTokenAsync(SteamGuardAccount account, CancellationToken cancellationToken)
+        private Task RefreshAndPersistAccessTokenAsync(
+            SteamGuardAccount account,
+            CancellationToken cancellationToken,
+            long? expectedStorageRevision = null)
         {
+            return RefreshAndPersistAccessTokenAsync(
+                account,
+                (session, ct) => session.RefreshAccessToken(false, ct),
+                cancellationToken,
+                expectedStorageRevision);
+        }
+
+        internal async Task RefreshAndPersistAccessTokenAsync(
+            SteamGuardAccount account,
+            Func<SessionData, CancellationToken, Task> refreshSessionAsync,
+            CancellationToken cancellationToken,
+            long? expectedStorageRevision = null)
+        {
+            if (refreshSessionAsync == null)
+                throw new ArgumentNullException(nameof(refreshSessionAsync));
             SessionData session = account?.Session ?? throw new SessionUnavailableException(account?.AccountName);
+            long accountStorageRevisionAtStart = expectedStorageRevision ?? (manifest?.GetAccountStorageRevision(session.SteamID) ?? 0);
+            if (expectedStorageRevision.HasValue && manifest != null &&
+                manifest.GetAccountStorageRevision(session.SteamID) != expectedStorageRevision.Value)
+            {
+                throw new StaleAccountGenerationException(account.AccountName);
+            }
+
             string previousAccessToken = session.AccessToken;
             string previousRefreshToken = session.RefreshToken;
-            long accountStorageRevisionAtStart = manifest?.GetAccountStorageRevision(session.SteamID) ?? 0;
             try
             {
-                await session.RefreshAccessToken(false, cancellationToken);
+                await refreshSessionAsync(session, cancellationToken);
                 if (!PersistLoginSession(account, session, accountStorageRevisionAtStart))
                     throw new IOException("Steam refreshed the session, but Astro SDA could not save it securely.");
             }
@@ -810,8 +834,22 @@ namespace Steam_Desktop_Authenticator
                 cancellationToken);
         }
 
-        private async Task ValidateStartupSessionsAsync()
+        private Task ValidateStartupSessionsAsync()
         {
+            return ValidateStartupSessionsAsync(
+                (account, ct) => account.VerifyAuthenticatorActivationAsync(ct),
+                (account, expectedRevision, ct) => RefreshAndPersistAccessTokenAsync(account, ct, expectedRevision));
+        }
+
+        internal async Task ValidateStartupSessionsAsync(
+            Func<SteamGuardAccount, CancellationToken, Task<AuthenticatorActivationStatus>> verifyPendingActivationAsync,
+            Func<SteamGuardAccount, long, CancellationToken, Task> refreshEnrolledAccountAsync)
+        {
+            if (verifyPendingActivationAsync == null)
+                throw new ArgumentNullException(nameof(verifyPendingActivationAsync));
+            if (refreshEnrolledAccountAsync == null)
+                throw new ArgumentNullException(nameof(refreshEnrolledAccountAsync));
+
             (SteamGuardAccount Account, long StorageRevision)[] startupSnapshot;
             lock (accountGenerationLock)
             {
@@ -843,7 +881,7 @@ namespace Steam_Desktop_Authenticator
                             () => pendingSessionAtStart.IsRefreshTokenExpired(),
                             (expectedRevision, ct) => RefreshAndPersistPendingAccessTokenAsync(account, expectedRevision, ct),
                             () => manifest?.GetAccountStorageRevision(pendingSessionAtStart.SteamID) ?? 0,
-                            ct => account.VerifyAuthenticatorActivationAsync(ct),
+                            ct => verifyPendingActivationAsync(account, ct),
                             (activated, expectedRevision) => PersistRecoveredPendingActivation(activated, pendingSessionAtStart, expectedRevision),
                             lifetimeCancellationSource.Token), lifetimeCancellationSource.Token);
                     }
@@ -863,6 +901,11 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 SessionData sessionAtValidationStart = account.Session;
+                if (manifest != null && sessionAtValidationStart.SteamID != 0 &&
+                    manifest.GetAccountStorageRevision(sessionAtValidationStart.SteamID) != snapshotStorageRevision)
+                {
+                    continue;
+                }
                 if (sessionAtValidationStart.IsRefreshTokenExpired())
                 {
                     MarkSessionRenewalRequired(account, "The refresh token is expired or malformed.", sessionAtValidationStart);
@@ -873,7 +916,7 @@ namespace Steam_Desktop_Authenticator
                 {
                     await RunSteamAccountOperationAsync(account, async () =>
                     {
-                        await RefreshAndPersistAccessTokenAsync(account, lifetimeCancellationSource.Token);
+                        await refreshEnrolledAccountAsync(account, snapshotStorageRevision, lifetimeCancellationSource.Token);
                         return true;
                     }, lifetimeCancellationSource.Token, exception =>
                     {
@@ -884,6 +927,10 @@ namespace Steam_Desktop_Authenticator
                 catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
                 {
                     return;
+                }
+                catch (StaleAccountGenerationException)
+                {
+                    // The enrolled account was removed or replaced while startup awaited an earlier entry.
                 }
                 catch (Exception ex)
                 {
@@ -2356,22 +2403,22 @@ namespace Steam_Desktop_Authenticator
             long expectedStorageRevision)
         {
             ulong steamId = expectedSession.SteamID;
+            if (manifest.GetAccountStorageRevision(steamId) != expectedStorageRevision)
+                return null;
+
             if (CanPersistAccountGeneration(originalAccount, expectedSession, allAccounts))
                 return originalAccount;
 
-            if (manifest.GetAccountStorageRevision(steamId) == expectedStorageRevision)
+            // A UI-only WebView2 reload (NavigationCompleted -> loadAccountsList) replaces
+            // in-memory SteamGuardAccount instances without changing the on-disk record.
+            // Promote or update the current loaded instance only when the storage revision
+            // is unchanged and the authenticator secrets still match.
+            SteamGuardAccount reloadedMatch = FindLoadedAccountBySteamId(allAccounts, steamId);
+            if (reloadedMatch != null &&
+                !reloadedMatch.FullyEnrolled &&
+                HasSameAuthenticatorSecrets(originalAccount, reloadedMatch))
             {
-                // A UI-only WebView2 reload (NavigationCompleted -> loadAccountsList) replaces
-                // in-memory SteamGuardAccount instances without changing the on-disk record.
-                // Promote or update the current loaded instance only when the storage revision
-                // is unchanged and the authenticator secrets still match.
-                SteamGuardAccount reloadedMatch = FindLoadedAccountBySteamId(allAccounts, steamId);
-                if (reloadedMatch != null &&
-                    !reloadedMatch.FullyEnrolled &&
-                    HasSameAuthenticatorSecrets(originalAccount, reloadedMatch))
-                {
-                    return reloadedMatch;
-                }
+                return reloadedMatch;
             }
 
             return null;

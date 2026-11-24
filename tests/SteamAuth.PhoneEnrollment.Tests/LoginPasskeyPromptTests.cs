@@ -2038,7 +2038,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
                 // Case 1: Backup with identical SteamID & secrets is imported while first QueryStatus is in flight,
                 // then first QueryStatus returns SessionInvalid. Bound snapshotRevision rejects the retry save.
-                await Assert.ThrowsAnyAsync<Exception>(() => MainForm.RecoverPendingAccountOnStartupAsync(
+                Exception staleException = await Assert.ThrowsAnyAsync<Exception>(() => MainForm.RecoverPendingAccountOnStartupAsync(
                     originalPending,
                     snapshotRevision,
                     isAccessTokenExpired: () => false,
@@ -2066,6 +2066,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                         form.PersistRecoveredPendingActivation(activated, originalSession, expectedRevision),
                     CancellationToken.None));
 
+                Assert.Equal("StaleAccountGenerationException", staleException.GetType().Name);
                 Assert.Equal(1, verifyCalls);
                 Assert.Equal(0, refreshAttempts);
                 SteamGuardAccount preservedAfterFirstRace = Assert.Single(manifest.GetAllAccounts(passKey));
@@ -2217,6 +2218,105 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 CancellationToken.None);
 
             Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.Inconclusive, result.Status);
+        }
+
+        [Fact]
+        public async Task ValidateStartupSessionsAsync_SkipsEnrolledAccountReplacedWhileEarlierPendingAccountAwaitsQueryStatus()
+        {
+            const string passKey = "two-account-startup-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+
+            // Account 1: pending with valid access token (valid non-expired JWT) and expired refresh token.
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001029UL, "startup-pending-first");
+            pendingAccount.TokenGID = "gid-first-pending";
+            pendingAccount.FullyEnrolled = false;
+            pendingAccount.Session.AccessToken = CreateJwtWithExpiry(DateTimeOffset.UtcNow.AddHours(2));
+            pendingAccount.Session.RefreshToken = "expired-refresh-token";
+
+            // Account 2: enrolled with valid refresh token in the same startup snapshot.
+            SteamGuardAccount enrolledAccount = CreateAccount(76561198000001030UL, "startup-enrolled-second");
+            enrolledAccount.TokenGID = "gid-second-old";
+            enrolledAccount.FullyEnrolled = true;
+            enrolledAccount.Session.AccessToken = CreateJwtWithExpiry(DateTimeOffset.UtcNow.AddMinutes(-5));
+            enrolledAccount.Session.RefreshToken = CreateJwtWithExpiry(DateTimeOffset.UtcNow.AddDays(30));
+
+            Assert.True(manifest.SaveAccount(pendingAccount, encrypt: true, passKey: passKey).Succeeded);
+            Assert.True(manifest.SaveAccount(enrolledAccount, encrypt: true, passKey: passKey).Succeeded);
+
+            // Replacement backup imported for Account 2 while Account 1 is awaiting QueryStatus
+            // (and before ImportAccountForm's dialog closes to trigger loadAccountsList).
+            SteamGuardAccount importedEnrolledBackup = CreateAccount(76561198000001030UL, "startup-enrolled-second");
+            importedEnrolledBackup.TokenGID = "gid-second-imported";
+            importedEnrolledBackup.FullyEnrolled = true;
+            importedEnrolledBackup.Session.AccessToken = CreateJwtWithExpiry(DateTimeOffset.UtcNow.AddHours(4));
+            importedEnrolledBackup.Session.RefreshToken = CreateJwtWithExpiry(DateTimeOffset.UtcNow.AddDays(60));
+            string expectedImportedAccessToken = importedEnrolledBackup.Session.AccessToken;
+
+            using (MainForm form = new MainForm(manifest, null, null, null))
+            {
+                form.SetEncryptionKey(passKey);
+                SteamGuardAccount[] initialLoaded = manifest.GetAllAccounts(passKey);
+                Assert.Equal(2, initialLoaded.Length);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, initialLoaded);
+
+                int enrolledRefreshCalls = 0;
+                await form.ValidateStartupSessionsAsync(
+                    verifyPendingActivationAsync: (candidate, _) =>
+                    {
+                        Assert.Equal(76561198000001029UL, candidate.Session.SteamID);
+                        // Simulate ImportAccountForm saving replacement backup for Account 2 BEFORE allAccounts reloads.
+                        Assert.True(manifest.SaveAccount(importedEnrolledBackup, encrypt: true, passKey: passKey).Succeeded);
+                        return Task.FromResult(AuthenticatorActivationStatus.ActiveForThisRecord);
+                    },
+                    refreshEnrolledAccountAsync: (candidate, expectedRevision, ct) =>
+                    {
+                        enrolledRefreshCalls++;
+                        return form.RefreshAndPersistAccessTokenAsync(
+                            candidate,
+                            (session, _) =>
+                            {
+                                session.AccessToken = "stale-overwriting-token";
+                                return Task.CompletedTask;
+                            },
+                            ct,
+                            expectedRevision);
+                    });
+
+                Assert.Equal(0, enrolledRefreshCalls);
+                SteamGuardAccount[] persisted = manifest.GetAllAccounts(passKey);
+                SteamGuardAccount persistedPending = Assert.Single(persisted, a => a.Session.SteamID == 76561198000001029UL);
+                SteamGuardAccount persistedEnrolled = Assert.Single(persisted, a => a.Session.SteamID == 76561198000001030UL);
+                Assert.True(persistedPending.FullyEnrolled);
+                Assert.Equal("gid-second-imported", persistedEnrolled.TokenGID);
+                Assert.Equal(expectedImportedAccessToken, persistedEnrolled.Session.AccessToken);
+
+                // Even if RefreshAndPersistAccessTokenAsync is called directly with the stale snapshot revision,
+                // it throws StaleAccountGenerationException before calling Steam.
+                SteamGuardAccount staleEnrolled = Assert.Single(initialLoaded, a => a.Session.SteamID == 76561198000001030UL);
+                int directSteamCalls = 0;
+                Exception directEx = await Assert.ThrowsAnyAsync<Exception>(() => form.RefreshAndPersistAccessTokenAsync(
+                    staleEnrolled,
+                    (_, _) => { directSteamCalls++; return Task.CompletedTask; },
+                    CancellationToken.None,
+                    expectedStorageRevision: manifest.GetAccountStorageRevision(76561198000001030UL) - 1));
+                Assert.Equal("StaleAccountGenerationException", directEx.GetType().Name);
+                Assert.Equal(0, directSteamCalls);
+            }
+        }
+
+        private static string CreateJwtWithExpiry(DateTimeOffset expiresAt)
+        {
+            string header = Base64UrlEncode("{\"alg\":\"none\",\"typ\":\"JWT\"}");
+            string payload = Base64UrlEncode("{\"exp\":" + expiresAt.ToUnixTimeSeconds() + "}");
+            return header + "." + payload + ".sig";
+        }
+
+        private static string Base64UrlEncode(string value)
+        {
+            return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value))
+                .TrimEnd('=')
+                .Replace('+', '-')
+                .Replace('/', '_');
         }
 
         [Fact]
