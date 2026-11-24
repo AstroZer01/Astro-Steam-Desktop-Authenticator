@@ -1948,6 +1948,188 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public async Task PersistRefreshedPendingSession_SucceedsAcrossUiOnlyReloadDuringTokenRefreshAndCompletesStartupRecovery()
+        {
+            const string passKey = "refresh-reload-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount originalAccount = CreateAccount(76561198000001024UL, "refresh-reload-pending");
+            originalAccount.TokenGID = "gid-refresh-reload";
+            originalAccount.FullyEnrolled = false;
+            Assert.True(manifest.SaveAccount(originalAccount, encrypt: true, passKey: passKey).Succeeded);
+
+            SessionData originalSession = originalAccount.Session;
+            using (MainForm form = new MainForm(manifest, null, null, null))
+            {
+                form.SetEncryptionKey(passKey);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, new[] { originalAccount });
+
+                int verifyCalls = 0;
+                bool recovered = await MainForm.RecoverPendingAccountOnStartupAsync(
+                    originalAccount,
+                    isAccessTokenExpired: () => false,
+                    isRefreshTokenExpired: () => false,
+                    refreshAccessTokenAsync: _ =>
+                    {
+                        long revisionBeforeRefresh = manifest.GetAccountStorageRevision(originalSession.SteamID);
+                        // Simulate WebView2 NavigationCompleted -> loadAccountsList() replacing allAccounts
+                        // while RefreshAccessToken is awaiting Steam.
+                        SteamGuardAccount[] reloadedInstances = manifest.GetAllAccounts(passKey);
+                        Assert.NotSame(originalAccount, reloadedInstances[0]);
+                        typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, reloadedInstances);
+
+                        originalSession.AccessToken = "refreshed-access-after-ui-reload";
+                        Assert.True(form.PersistRefreshedPendingSession(originalAccount, originalSession, revisionBeforeRefresh));
+                        return Task.CompletedTask;
+                    },
+                    getCurrentStorageRevision: () => manifest.GetAccountStorageRevision(originalSession.SteamID),
+                    verifyActivationAsync: _ =>
+                    {
+                        verifyCalls++;
+                        return Task.FromResult(verifyCalls == 1
+                            ? AuthenticatorActivationStatus.SessionInvalid
+                            : AuthenticatorActivationStatus.ActiveForThisRecord);
+                    },
+                    persistActivatedAccount: (activated, revisionAtCheck) =>
+                        form.PersistRecoveredPendingActivation(activated, originalSession, revisionAtCheck),
+                    CancellationToken.None);
+
+                Assert.True(recovered);
+                Assert.Equal(2, verifyCalls);
+                SteamGuardAccount persisted = Assert.Single(manifest.GetAllAccounts(passKey));
+                Assert.True(persisted.FullyEnrolled);
+                Assert.Equal("refreshed-access-after-ui-reload", persisted.Session.AccessToken);
+            }
+        }
+
+        [Fact]
+        public async Task AccountStorageRevision_StaysMonotonicAcrossRemoveAndReimportAndBlocksStaleOverwrite()
+        {
+            const string passKey = "monotonic-aba-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount originalPending = CreateAccount(76561198000001025UL, "aba-pending-user");
+            originalPending.TokenGID = "gid-aba-same";
+            originalPending.FullyEnrolled = false;
+            Assert.True(manifest.SaveAccount(originalPending, encrypt: true, passKey: passKey).Succeeded);
+
+            long revisionBeforeRemove = manifest.GetAccountStorageRevision(originalPending.Session.SteamID);
+            Assert.True(revisionBeforeRemove > 0);
+
+            // Remove the account and re-import a backup with the same SteamID and identical secrets.
+            Assert.True(manifest.RemoveAccount(originalPending, passKey));
+            long revisionAfterRemove = manifest.GetAccountStorageRevision(originalPending.Session.SteamID);
+            Assert.True(revisionAfterRemove > revisionBeforeRemove);
+
+            SteamGuardAccount reimportedBackup = CreateAccount(76561198000001025UL, "aba-pending-user");
+            reimportedBackup.TokenGID = "gid-aba-same";
+            reimportedBackup.FullyEnrolled = false;
+            reimportedBackup.Session.AccessToken = "reimported-backup-token";
+            Assert.True(manifest.SaveAccount(reimportedBackup, encrypt: true, passKey: passKey).Succeeded);
+
+            long revisionAfterReimport = manifest.GetAccountStorageRevision(originalPending.Session.SteamID);
+            Assert.True(revisionAfterReimport > revisionAfterRemove);
+            Assert.NotEqual(revisionBeforeRemove, revisionAfterReimport);
+
+            // Both ResolveQueuedAccountForOperation and TryRecoverPendingAccountWithFreshSessionAsync reject the stale revision.
+            using (MainForm form = new MainForm(manifest, null, null, null))
+            {
+                form.SetEncryptionKey(passKey);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, manifest.GetAllAccounts(passKey));
+                Assert.Null(form.ResolveQueuedAccountForOperation(originalPending, originalPending.Session, revisionBeforeRemove));
+            }
+
+            LoginForm.PendingAuthenticatorRecoveryResult staleRecovery = await LoginForm.TryRecoverPendingAccountWithFreshSessionAsync(
+                manifest,
+                originalPending,
+                new SessionData { SteamID = 76561198000001025UL, AccessToken = "stale-new-token", RefreshToken = "stale-refresh" },
+                passKey,
+                (_, _) => Task.FromResult(AuthenticatorActivationStatus.ActiveForThisRecord),
+                CancellationToken.None,
+                expectedStorageRevision: revisionBeforeRemove);
+
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.SaveFailed, staleRecovery.Status);
+            SteamGuardAccount preserved = Assert.Single(manifest.GetAllAccounts(passKey));
+            Assert.Equal("reimported-backup-token", preserved.Session.AccessToken);
+            Assert.False(preserved.FullyEnrolled);
+        }
+
+        [Fact]
+        public async Task SetSessionNeedsRenewal_DoesNotInvalidateBoundRefreshRevisionDuringOpenRefreshDialog()
+        {
+            const string passKey = "renewal-metadata-passkey";
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount enrolledAccount = CreateAccount(76561198000001026UL, "renewal-metadata-user");
+            enrolledAccount.FullyEnrolled = true;
+            Assert.True(manifest.SaveAccount(enrolledAccount, encrypt: true, passKey: passKey).Succeeded);
+
+            long revisionAtQueue = manifest.GetAccountStorageRevision(enrolledAccount.Session.SteamID);
+            long? forwardedRevision = null;
+
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                showRefreshLoginDialogWithRevision: (targetAccount, _, expectedRev) =>
+                {
+                    forwardedRevision = expectedRev;
+                    // Simulate background timer calling SetSessionNeedsRenewal while modal LoginForm is open.
+                    Assert.True(manifest.SetSessionNeedsRenewal(targetAccount.Session.SteamID, true).Succeeded);
+                    targetAccount.Session = new SessionData
+                    {
+                        SteamID = targetAccount.Session.SteamID,
+                        AccessToken = "renewed-after-flag-flip",
+                        RefreshToken = "renewed-refresh-token"
+                    };
+                    StorageResult saveResult = manifest.SaveAccount(
+                        targetAccount,
+                        encrypt: true,
+                        passKey: passKey,
+                        expectedStorageRevision: expectedRev,
+                        allowCreate: false);
+                    Assert.True(saveResult.Succeeded, saveResult.UserMessage);
+                    return (true, passKey);
+                }))
+            {
+                form.SetEncryptionKey(passKey);
+                typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(form, new[] { enrolledAccount });
+
+                // Also verify a SessionNeedsRenewal flip before dequeue does not break ResolveQueuedAccountForOperation.
+                Assert.True(manifest.SetSessionNeedsRenewal(enrolledAccount.Session.SteamID, true).Succeeded);
+                Assert.Equal(revisionAtQueue, manifest.GetAccountStorageRevision(enrolledAccount.Session.SteamID));
+                Assert.True(manifest.SetSessionNeedsRenewal(enrolledAccount.Session.SteamID, false).Succeeded);
+                Assert.Equal(revisionAtQueue, manifest.GetAccountStorageRevision(enrolledAccount.Session.SteamID));
+
+                bool succeeded = await InvokePrivateAsyncMethod<bool>(form, "PromptRefreshLoginAsync", enrolledAccount);
+                Assert.True(succeeded);
+                Assert.Equal(revisionAtQueue, forwardedRevision);
+                Assert.Equal("renewed-after-flag-flip", Assert.Single(manifest.GetAllAccounts(passKey)).Session.AccessToken);
+            }
+        }
+
+        [Fact]
+        public async Task TryRecoverExistingPendingAuthenticatorAsync_ReturnsInconclusiveWhenManifestEntryIsUnreadable()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount pendingAccount = CreateAccount(76561198000001027UL, "unreadable-pending-user");
+            pendingAccount.FullyEnrolled = false;
+            Assert.True(manifest.SaveAccount(pendingAccount, encrypt: false, passKey: null).Succeeded);
+
+            // Corrupt the unencrypted maFile on disk so GetAllAccounts skips it while manifest.Entries still lists this SteamID.
+            string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+            string maFilePath = Path.Combine(maDir, Assert.Single(manifest.Entries).Filename);
+            File.WriteAllText(maFilePath, "{corrupt-json");
+
+            LoginForm.PendingAuthenticatorRecoveryResult result = await LoginForm.TryRecoverExistingPendingAuthenticatorAsync(
+                manifest,
+                new SessionData { SteamID = 76561198000001027UL, AccessToken = "fresh-token", RefreshToken = "fresh-refresh" },
+                passKey: null,
+                (_, _) => throw new InvalidOperationException("QueryStatus should not run when local file could not be loaded."),
+                CancellationToken.None);
+
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.Inconclusive, result.Status);
+        }
+
+        [Fact]
         public void PendingAccountWithExpiredRefreshToken_DoesNotRequireSessionRenewalOrPersistRenewalFlag()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);

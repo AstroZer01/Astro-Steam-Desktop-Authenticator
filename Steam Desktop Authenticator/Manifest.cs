@@ -1255,10 +1255,9 @@ namespace Steam_Desktop_Authenticator
                 if (AreManifestEntriesEquivalent(previousEntry, nextEntry))
                     continue;
 
-                if (nextEntry == null)
-                    accountStorageRevisions.Remove(steamId);
-                else
-                    accountStorageRevisions[steamId] = GetAccountStorageRevisionLocked(steamId) + 1;
+                // Keep per-account storage revisions strictly monotonic across removal and reimport
+                // so a delete + reimport sequence can never collide with a previously captured revision.
+                accountStorageRevisions[steamId] = GetAccountStorageRevisionLocked(steamId) + 1;
             }
 
             Entries = source.Entries;
@@ -1284,13 +1283,14 @@ namespace Steam_Desktop_Authenticator
 
         private static bool AreManifestEntriesEquivalent(ManifestEntry first, ManifestEntry second)
         {
+            // Compare the backing storage record identity (excluding SessionNeedsRenewal metadata
+            // flips, which do not modify the .maFile and are recomputed on SaveAccount).
             return first == null
                 ? second == null
                 : second != null && first.SteamID == second.SteamID &&
                     String.Equals(first.IV, second.IV, StringComparison.Ordinal) &&
                     String.Equals(first.Salt, second.Salt, StringComparison.Ordinal) &&
-                    String.Equals(first.Filename, second.Filename, StringComparison.Ordinal) &&
-                    first.SessionNeedsRenewal == second.SessionNeedsRenewal;
+                    String.Equals(first.Filename, second.Filename, StringComparison.Ordinal);
         }
 
         private void CopySettingsInto(Manifest destination)

@@ -1265,7 +1265,17 @@ namespace Steam_Desktop_Authenticator
                     candidate.Session != null &&
                     candidate.Session.SteamID == freshSession.SteamID);
             if (pendingAccount == null)
+            {
+                bool hasManifestEntry = manifest.Entries != null &&
+                    manifest.Entries.Exists(entry => entry != null && entry.SteamID == freshSession.SteamID);
+                bool hasLoadedAccountForSteamId = Array.Exists(
+                    existingAccounts,
+                    candidate => candidate?.Session != null && candidate.Session.SteamID == freshSession.SteamID);
+                if (hasManifestEntry && !hasLoadedAccountForSteamId)
+                    return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.Inconclusive);
+
                 return new PendingAuthenticatorRecoveryResult(PendingAuthenticatorRecoveryStatus.NotApplicable);
+            }
 
             return await TryRecoverPendingAccountWithFreshSessionAsync(
                 manifest,
