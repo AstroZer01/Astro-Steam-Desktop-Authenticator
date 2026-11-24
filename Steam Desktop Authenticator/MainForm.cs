@@ -760,9 +760,10 @@ namespace Steam_Desktop_Authenticator
 
         internal static async Task<bool> RecoverPendingAccountOnStartupAsync(
             SteamGuardAccount pendingAccount,
+            long initialStorageRevision,
             Func<bool> isAccessTokenExpired,
             Func<bool> isRefreshTokenExpired,
-            Func<CancellationToken, Task> refreshAccessTokenAsync,
+            Func<long, CancellationToken, Task<long>> refreshAccessTokenAsync,
             Func<long> getCurrentStorageRevision,
             Func<CancellationToken, Task<AuthenticatorActivationStatus>> verifyActivationAsync,
             Func<SteamGuardAccount, long, bool> persistActivatedAccount,
@@ -779,14 +780,17 @@ namespace Steam_Desktop_Authenticator
             if (isAccessTokenExpired() && isRefreshTokenExpired())
                 return false;
 
+            long boundStorageRevision = initialStorageRevision;
+            if (getCurrentStorageRevision() != boundStorageRevision)
+                return false;
+
             bool refreshedAccessToken = false;
             if (isAccessTokenExpired())
             {
-                await refreshAccessTokenAsync(cancellationToken);
+                boundStorageRevision = await refreshAccessTokenAsync(boundStorageRevision, cancellationToken);
                 refreshedAccessToken = true;
             }
 
-            long storageRevisionAtCheck = getCurrentStorageRevision();
             return await TryRecoverPendingAccountActivationAsync(
                 pendingAccount,
                 async ct =>
@@ -796,21 +800,30 @@ namespace Steam_Desktop_Authenticator
                         !refreshedAccessToken &&
                         !isRefreshTokenExpired())
                     {
-                        await refreshAccessTokenAsync(ct);
+                        boundStorageRevision = await refreshAccessTokenAsync(boundStorageRevision, ct);
                         refreshedAccessToken = true;
-                        storageRevisionAtCheck = getCurrentStorageRevision();
                         status = await verifyActivationAsync(ct);
                     }
                     return status;
                 },
-                activated => persistActivatedAccount(activated, storageRevisionAtCheck),
+                activated => persistActivatedAccount(activated, boundStorageRevision),
                 cancellationToken);
         }
 
         private async Task ValidateStartupSessionsAsync()
         {
-            SteamGuardAccount[] accounts = allAccounts ?? Array.Empty<SteamGuardAccount>();
-            foreach (SteamGuardAccount account in accounts)
+            (SteamGuardAccount Account, long StorageRevision)[] startupSnapshot;
+            lock (accountGenerationLock)
+            {
+                SteamGuardAccount[] accounts = allAccounts ?? Array.Empty<SteamGuardAccount>();
+                startupSnapshot = accounts.Select(candidate => (
+                    Account: candidate,
+                    StorageRevision: (manifest != null && candidate?.Session != null && candidate.Session.SteamID != 0)
+                        ? manifest.GetAccountStorageRevision(candidate.Session.SteamID)
+                        : 0L)).ToArray();
+            }
+
+            foreach ((SteamGuardAccount account, long snapshotStorageRevision) in startupSnapshot)
             {
                 if (account?.Session == null)
                     continue;
@@ -825,12 +838,13 @@ namespace Steam_Desktop_Authenticator
                     {
                         await RunSteamAccountOperationAsync(account, () => RecoverPendingAccountOnStartupAsync(
                             account,
+                            snapshotStorageRevision,
                             () => pendingSessionAtStart.IsAccessTokenExpired(),
                             () => pendingSessionAtStart.IsRefreshTokenExpired(),
-                            ct => RefreshAndPersistPendingAccessTokenAsync(account, ct),
+                            (expectedRevision, ct) => RefreshAndPersistPendingAccessTokenAsync(account, expectedRevision, ct),
                             () => manifest?.GetAccountStorageRevision(pendingSessionAtStart.SteamID) ?? 0,
                             ct => account.VerifyAuthenticatorActivationAsync(ct),
-                            (activated, storageRevisionAtCheck) => PersistRecoveredPendingActivation(activated, pendingSessionAtStart, storageRevisionAtCheck),
+                            (activated, expectedRevision) => PersistRecoveredPendingActivation(activated, pendingSessionAtStart, expectedRevision),
                             lifetimeCancellationSource.Token), lifetimeCancellationSource.Token);
                     }
                     catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
@@ -2363,17 +2377,38 @@ namespace Steam_Desktop_Authenticator
             return null;
         }
 
-        private async Task RefreshAndPersistPendingAccessTokenAsync(SteamGuardAccount account, CancellationToken cancellationToken)
+        internal async Task<long> RefreshAndPersistPendingAccessTokenAsync(
+            SteamGuardAccount account,
+            long expectedStorageRevision,
+            CancellationToken cancellationToken)
         {
+            return await RefreshAndPersistPendingAccessTokenAsync(
+                account,
+                expectedStorageRevision,
+                (session, ct) => session.RefreshAccessToken(false, ct),
+                cancellationToken);
+        }
+
+        internal async Task<long> RefreshAndPersistPendingAccessTokenAsync(
+            SteamGuardAccount account,
+            long expectedStorageRevision,
+            Func<SessionData, CancellationToken, Task> refreshSessionAsync,
+            CancellationToken cancellationToken)
+        {
+            if (refreshSessionAsync == null)
+                throw new ArgumentNullException(nameof(refreshSessionAsync));
             SessionData session = account?.Session ?? throw new SessionUnavailableException(account?.AccountName);
+            if (manifest != null && manifest.GetAccountStorageRevision(session.SteamID) != expectedStorageRevision)
+                throw new StaleAccountGenerationException(account.AccountName);
+
             string previousAccessToken = session.AccessToken;
             string previousRefreshToken = session.RefreshToken;
-            long accountStorageRevisionAtStart = manifest?.GetAccountStorageRevision(session.SteamID) ?? 0;
             try
             {
-                await session.RefreshAccessToken(false, cancellationToken);
-                if (!PersistRefreshedPendingSession(account, session, accountStorageRevisionAtStart))
+                await refreshSessionAsync(session, cancellationToken);
+                if (!PersistRefreshedPendingSession(account, session, expectedStorageRevision, out long updatedStorageRevision))
                     throw new IOException("Steam refreshed the session, but Astro SDA could not save it securely.");
+                return updatedStorageRevision;
             }
             catch
             {
@@ -2387,8 +2422,10 @@ namespace Steam_Desktop_Authenticator
         internal bool PersistRefreshedPendingSession(
             SteamGuardAccount originalAccount,
             SessionData expectedSession,
-            long expectedStorageRevision)
+            long expectedStorageRevision,
+            out long updatedStorageRevision)
         {
+            updatedStorageRevision = expectedStorageRevision;
             if (manifest == null || originalAccount == null || expectedSession == null || expectedSession.SteamID == 0)
                 return false;
 
@@ -2418,7 +2455,11 @@ namespace Steam_Desktop_Authenticator
                     passKey,
                     expectedStorageRevision,
                     allowCreate: false);
-                if (!saveResult.Succeeded && copiedToReloadedInstance)
+                if (saveResult.Succeeded)
+                {
+                    updatedStorageRevision = manifest.GetAccountStorageRevision(expectedSession.SteamID);
+                }
+                else if (copiedToReloadedInstance)
                 {
                     targetAccount.Session.AccessToken = previousTargetAccessToken;
                     targetAccount.Session.RefreshToken = previousTargetRefreshToken;
