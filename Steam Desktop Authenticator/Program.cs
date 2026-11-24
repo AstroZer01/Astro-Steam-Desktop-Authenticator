@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Windows.Forms;
 using System.Diagnostics;
+using System.IO;
 using CommandLine;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -41,15 +43,22 @@ namespace Steam_Desktop_Authenticator
         {
             try
             {
-                Process curr = Process.GetCurrentProcess();
-                Process[] procs = Process.GetProcessesByName(curr.ProcessName);
-                foreach (Process p in procs)
+                using (Process curr = Process.GetCurrentProcess())
                 {
-                    if ((p.Id != curr.Id) &&
-                        (p.MainModule.FileName == curr.MainModule.FileName))
-                        return p;
+                    string currentPath = Environment.ProcessPath;
+                    if (String.IsNullOrWhiteSpace(currentPath))
+                        currentPath = curr.MainModule?.FileName;
+                    if (String.IsNullOrWhiteSpace(currentPath))
+                        return null;
+
+                    Process[] procs = Process.GetProcessesByName(curr.ProcessName);
+                    return FindPriorProcess(
+                        curr.Id,
+                        currentPath,
+                        procs,
+                        process => process.Id,
+                        process => process.MainModule?.FileName);
                 }
-                return null;
             }
             catch (Exception)
             {
@@ -57,40 +66,136 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        internal static TProcess FindPriorProcess<TProcess>(
+            int currentProcessId,
+            string currentExecutablePath,
+            IReadOnlyList<TProcess> candidates,
+            Func<TProcess, int> getProcessId,
+            Func<TProcess, string> getExecutablePath)
+            where TProcess : class, IDisposable
+        {
+            if (candidates == null || candidates.Count == 0)
+                return null;
+
+            string normalizedCurrentPath = NormalizeProcessPath(currentExecutablePath);
+            TProcess match = null;
+            try
+            {
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    TProcess candidate = candidates[i];
+                    if (candidate == null)
+                        continue;
+
+                    bool isMatch = false;
+                    if (match == null && normalizedCurrentPath != null)
+                    {
+                        try
+                        {
+                            if (getProcessId(candidate) != currentProcessId)
+                            {
+                                string candidatePath = NormalizeProcessPath(getExecutablePath(candidate));
+                                if (candidatePath != null &&
+                                    String.Equals(candidatePath, normalizedCurrentPath, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    match = candidate;
+                                    isMatch = true;
+                                }
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Inaccessible (e.g., elevated) or exited processes must not abort lookup.
+                        }
+                    }
+
+                    if (!isMatch)
+                    {
+                        try
+                        {
+                            candidate.Dispose();
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+                }
+
+                return match;
+            }
+            catch (Exception)
+            {
+                if (match != null)
+                {
+                    try
+                    {
+                        match.Dispose();
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+                throw;
+            }
+        }
+
+        private static string NormalizeProcessPath(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+                return null;
+
+            string trimmed = path.Trim();
+            if (trimmed.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                trimmed = @"\\" + trimmed.Substring(8);
+            else if (trimmed.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+                trimmed = trimmed.Substring(4);
+
+            try
+            {
+                return Path.GetFullPath(trimmed);
+            }
+            catch (Exception)
+            {
+                return trimmed;
+            }
+        }
+
         private static void RestoreExistingInstance()
         {
-            Process existing = PriorProcess();
-            if (existing == null)
-                return;
-
-            // A pinned-taskbar launch can arrive while the first process is still
-            // constructing its window, so wait briefly for a usable top-level handle.
-            for (int attempt = 0; attempt < 20; attempt++)
+            using (Process existing = PriorProcess())
             {
-                try
-                {
-                    existing.Refresh();
-                    if (existing.HasExited)
-                        return;
+                if (existing == null)
+                    return;
 
-                    IntPtr handle = existing.MainWindowHandle;
-                    if (handle != IntPtr.Zero)
+                // A pinned-taskbar launch can arrive while the first process is still
+                // constructing its window, so wait briefly for a usable top-level handle.
+                for (int attempt = 0; attempt < 20; attempt++)
+                {
+                    try
                     {
-                        PostMessage(handle, RestoreExistingInstanceMessage, IntPtr.Zero, IntPtr.Zero);
-                        ShowWindowAsync(handle, SW_RESTORE);
-                        SetForegroundWindow(handle);
+                        existing.Refresh();
+                        if (existing.HasExited)
+                            return;
+
+                        IntPtr handle = existing.MainWindowHandle;
+                        if (handle != IntPtr.Zero)
+                        {
+                            PostMessage(handle, RestoreExistingInstanceMessage, IntPtr.Zero, IntPtr.Zero);
+                            ShowWindowAsync(handle, SW_RESTORE);
+                            SetForegroundWindow(handle);
+                            return;
+                        }
+
+                        if (PostRestoreMessageToHiddenWindow(existing.Id))
+                            return;
+                    }
+                    catch (Exception)
+                    {
                         return;
                     }
 
-                    if (PostRestoreMessageToHiddenWindow(existing.Id))
-                        return;
+                    Thread.Sleep(100);
                 }
-                catch (Exception)
-                {
-                    return;
-                }
-
-                Thread.Sleep(100);
             }
         }
 
@@ -123,7 +228,15 @@ namespace Steam_Desktop_Authenticator
             instanceMutex = new Mutex(true, InstanceMutexName, out createdNew);
             if (!createdNew)
             {
-                RestoreExistingInstance();
+                try
+                {
+                    RestoreExistingInstance();
+                }
+                finally
+                {
+                    instanceMutex.Dispose();
+                    instanceMutex = null;
+                }
                 return;
             }
 
@@ -230,6 +343,7 @@ namespace Steam_Desktop_Authenticator
             {
                 instanceMutex.ReleaseMutex();
                 instanceMutex.Dispose();
+                instanceMutex = null;
             }
         }
     }
