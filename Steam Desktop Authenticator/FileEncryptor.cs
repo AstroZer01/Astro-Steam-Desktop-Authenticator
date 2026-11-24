@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace Steam_Desktop_Authenticator
 {
@@ -37,16 +38,6 @@ namespace Steam_Desktop_Authenticator
             return Convert.ToBase64String(RandomNumberGenerator.GetBytes(IV_LENGTH));
         }
 
-        private static byte[] DecodeSalt(string salt)
-        {
-            byte[] saltBytes = Convert.FromBase64String(salt);
-            if (saltBytes.Length < SALT_LENGTH)
-            {
-                throw new ArgumentException("Salt is not at least eight bytes.", nameof(salt));
-            }
-            return saltBytes;
-        }
-
         private static byte[] DecodeInitializationVector(string iv)
         {
             byte[] ivBytes = Convert.FromBase64String(iv);
@@ -62,7 +53,17 @@ namespace Steam_Desktop_Authenticator
         /// </summary>
         private static byte[] DeriveKey(string password, byte[] saltBytes)
         {
-            return Rfc2898DeriveBytes.Pbkdf2(password, saltBytes, PBKDF2_ITERATIONS, HashAlgorithmName.SHA1, KEY_SIZE_BYTES);
+            // Match legacy Rfc2898DeriveBytes(string, ...) Encoding.UTF8 replacement-fallback behavior
+            // (including unpaired UTF-16 surrogates) and wipe temporary password bytes immediately.
+            byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+            try
+            {
+                return Rfc2898DeriveBytes.Pbkdf2(passwordBytes, saltBytes, PBKDF2_ITERATIONS, HashAlgorithmName.SHA1, KEY_SIZE_BYTES);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(passwordBytes);
+            }
         }
 
         /// <summary>
@@ -132,7 +133,7 @@ namespace Steam_Desktop_Authenticator
             if (!TryDecodeCiphertext(encryptedData, out byte[] cipherText))
                 return null;
 
-            byte[] saltBytes = DecodeSalt(passwordSalt);
+            byte[] saltBytes = Convert.FromBase64String(passwordSalt);
             byte[] ivBytes = DecodeInitializationVector(IV);
             byte[] key = DeriveKey(password, saltBytes);
             try
@@ -201,7 +202,7 @@ namespace Steam_Desktop_Authenticator
                 throw new ArgumentException("Plaintext data is empty");
             }
 
-            byte[] saltBytes = DecodeSalt(passwordSalt);
+            byte[] saltBytes = Convert.FromBase64String(passwordSalt);
             byte[] ivBytes = DecodeInitializationVector(IV);
             byte[] key = DeriveKey(password, saltBytes);
             try
