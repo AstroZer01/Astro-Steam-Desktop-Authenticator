@@ -1568,8 +1568,8 @@ namespace Steam_Desktop_Authenticator
                         SteamGuardAccount existingCommitted = FindLoadedAccountBySteamId(allAccounts, resolvedStaged.SteamId);
                         if (existingCommitted != null && PendingTransferMarker.IsSameAuthenticatorReplacement(existingCommitted, resolvedStaged.Account))
                         {
-                            PendingTransferMarker.DeleteStagedRecoveryBestEffort(resolvedStaged.FilePath);
-                            PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId, resolvedStaged.TransferAttemptId);
+                            if (PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId, resolvedStaged.TransferAttemptId))
+                                PendingTransferMarker.DeleteStagedRecoveryBestEffort(resolvedStaged.FilePath);
                             continue;
                         }
                     }

@@ -1196,9 +1196,11 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(PendingTransferMarker.TryWriteMarker(steamId, "locked_marker", "android:lk", "attempt-lk1"));
             string markerPath = PendingTransferMarker.GetMarkerPath(steamId);
 
-            // Hold an exclusive lock on the marker file to simulate a Windows sharing violation
-            using (var lockStream = new FileStream(markerPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            // Hold a read-shared handle (no FILE_SHARE_DELETE) so TryReadMarker succeeds and parses the
+            // matching TransferAttemptId while Windows still blocks File.Delete with a sharing violation.
+            using (var lockStream = new FileStream(markerPath, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
+                Assert.Equal("attempt-lk1", PendingTransferMarker.TryReadMarker(steamId)?.TransferAttemptId);
                 Assert.False(PendingTransferMarker.DeleteMarkerBestEffort(steamId, "attempt-lk1"));
                 Assert.True(PendingTransferMarker.HasMarker(steamId));
             }

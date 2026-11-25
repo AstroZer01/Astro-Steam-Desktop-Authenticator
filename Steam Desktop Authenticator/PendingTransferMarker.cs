@@ -495,13 +495,13 @@ namespace Steam_Desktop_Authenticator
                         continue;
                     }
 
-                    // 1. This exact transfer attempt already committed -> silently clean up redundant staged copy & matching marker.
+                    // 1. This exact transfer attempt already committed -> silently clean up matching marker before redundant staged copy.
                     if (!String.IsNullOrWhiteSpace(loaded.TransferAttemptId) &&
                         !String.IsNullOrWhiteSpace(committedAttemptId) &&
                         String.Equals(committedAttemptId, loaded.TransferAttemptId, StringComparison.Ordinal))
                     {
-                        DeleteFileBestEffort(filePath);
-                        DeleteMarkerBestEffort(loaded.SteamId, loaded.TransferAttemptId);
+                        if (DeleteMarkerBestEffort(loaded.SteamId, loaded.TransferAttemptId))
+                            DeleteFileBestEffort(filePath);
                         continue;
                     }
 
@@ -519,9 +519,9 @@ namespace Steam_Desktop_Authenticator
                         IsSameAuthenticatorReplacement(committed, loaded.Account))
                     {
                         // Crash happened AFTER SaveAccount committed but before cleanup!
-                        // Silently clean up the redundant staged recovery and matching pending marker.
-                        DeleteFileBestEffort(filePath);
-                        DeleteMarkerBestEffort(loaded.SteamId, loaded.TransferAttemptId);
+                        // Verify matching pending marker is removed before deleting the redundant staged recovery.
+                        if (DeleteMarkerBestEffort(loaded.SteamId, loaded.TransferAttemptId))
+                            DeleteFileBestEffort(filePath);
                         continue;
                     }
 
