@@ -75,16 +75,33 @@ namespace Steam_Desktop_Authenticator
         private const int MaximumLoginTextLength = 256;
         private const int MaximumGeolocationLength = 512;
         private readonly Func<SteamGuardAccount, bool> persistAccount;
+        private readonly Func<SteamGuardAccount, long> getStorageRevision;
+        private readonly Func<SteamGuardAccount, SessionData, long?, bool> persistAccountWithRevision;
         private readonly IAuthenticatorProtocolTransport protocolTransport;
 
         public LoginApprovalService(Func<SteamGuardAccount, bool> persistAccount)
-            : this(persistAccount, new SteamProtobufAuthenticatorTransport())
+            : this(persistAccount, new SteamProtobufAuthenticatorTransport(), null, null)
         {
         }
 
-        internal LoginApprovalService(Func<SteamGuardAccount, bool> persistAccount, IAuthenticatorProtocolTransport protocolTransport)
+        public LoginApprovalService(
+            Func<SteamGuardAccount, long> getStorageRevision,
+            Func<SteamGuardAccount, SessionData, long?, bool> persistAccountWithRevision)
+            : this(null, new SteamProtobufAuthenticatorTransport(), getStorageRevision, persistAccountWithRevision)
         {
-            this.persistAccount = persistAccount ?? throw new ArgumentNullException(nameof(persistAccount));
+        }
+
+        internal LoginApprovalService(
+            Func<SteamGuardAccount, bool> persistAccount,
+            IAuthenticatorProtocolTransport protocolTransport,
+            Func<SteamGuardAccount, long> getStorageRevision = null,
+            Func<SteamGuardAccount, SessionData, long?, bool> persistAccountWithRevision = null)
+        {
+            if (persistAccount == null && persistAccountWithRevision == null)
+                throw new ArgumentNullException(nameof(persistAccount));
+            this.persistAccount = persistAccount;
+            this.getStorageRevision = getStorageRevision;
+            this.persistAccountWithRevision = persistAccountWithRevision;
             this.protocolTransport = protocolTransport ?? throw new ArgumentNullException(nameof(protocolTransport));
         }
 
@@ -332,10 +349,15 @@ namespace Steam_Desktop_Authenticator
             {
                 string previousAccessToken = account.Session.AccessToken;
                 string previousRefreshToken = account.Session.RefreshToken;
+                SessionData sessionAtStart = account.Session;
+                long? revisionAtStart = getStorageRevision != null ? getStorageRevision(account) : (long?)null;
                 try
                 {
                     await account.Session.RefreshAccessToken(false, cancellationToken);
-                    if (!persistAccount(account))
+                    bool persisted = persistAccountWithRevision != null
+                        ? persistAccountWithRevision(account, sessionAtStart, revisionAtStart)
+                        : persistAccount(account);
+                    if (!persisted)
                     {
                         RestoreSessionTokens(account.Session, previousAccessToken, previousRefreshToken);
                         throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam refreshed the session, but Astro SDA could not save it securely.");

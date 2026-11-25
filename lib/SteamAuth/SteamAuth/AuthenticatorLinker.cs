@@ -355,6 +355,243 @@ namespace SteamAuth
             return FinalizeResult.Success;
         }
 
+        public async Task<TransferStartStatus> StartAuthenticatorTransferAsync(CancellationToken cancellationToken = default)
+        {
+            LastErrorMessage = null;
+            SteamProtocolResponse<CPhone_AccountPhoneStatus_Response> phoneStatus = await SendAsync(
+                "IPhoneService",
+                "AccountPhoneStatus",
+                new CPhone_AccountPhoneStatus_Request(),
+                CPhone_AccountPhoneStatus_Response.Parser,
+                cancellationToken);
+
+            if (IsRateLimited(phoneStatus))
+            {
+                LastErrorMessage = "Steam is rate limiting authenticator transfer checks. Wait a while before trying again.";
+                return TransferStartStatus.RateLimited;
+            }
+            if (!HasResult(phoneStatus, EResultOK))
+            {
+                LastErrorMessage = DescribeFailure(phoneStatus, "check phone eligibility for authenticator transfer");
+                return TransferStartStatus.GeneralFailure;
+            }
+            if (!phoneStatus.Body.HasPhone)
+            {
+                LastErrorMessage = "Steam requires a verified phone number on this account before transferring an authenticator via SMS.";
+                return TransferStartStatus.PhoneNumberRequired;
+            }
+
+            SteamProtocolResponse<CTwoFactor_RemoveAuthenticatorViaChallengeStart_Response> startResponse = await SendAsync(
+                "ITwoFactorService",
+                "RemoveAuthenticatorViaChallengeStart",
+                new CTwoFactor_RemoveAuthenticatorViaChallengeStart_Request(),
+                CTwoFactor_RemoveAuthenticatorViaChallengeStart_Response.Parser,
+                cancellationToken);
+
+            if (IsRateLimited(startResponse))
+            {
+                LastErrorMessage = "Steam is rate limiting authenticator transfer SMS requests. Wait a while before trying again.";
+                return TransferStartStatus.RateLimited;
+            }
+            if (!HasResultCode(startResponse, EResultOK))
+            {
+                LastErrorMessage = DescribeFailure(startResponse, "start the authenticator transfer SMS challenge");
+                return TransferStartStatus.GeneralFailure;
+            }
+            if (startResponse.Body != null && startResponse.Body.HasSuccess && !startResponse.Body.Success)
+            {
+                LastErrorMessage = "Steam rejected starting the authenticator transfer challenge for this account.";
+                return TransferStartStatus.Rejected;
+            }
+
+            return TransferStartStatus.SmsSent;
+        }
+
+        public async Task<TransferFinishStatus> FinishAuthenticatorTransferAsync(
+            string smsCode,
+            CancellationToken cancellationToken = default)
+        {
+            LastErrorMessage = null;
+            if (cancellationToken.IsCancellationRequested)
+            {
+                LastErrorMessage = "Authenticator transfer was canceled before sending the SMS code.";
+                return TransferFinishStatus.CanceledBeforeDispatch;
+            }
+
+            string trimmedCode = smsCode?.Trim();
+            if (String.IsNullOrEmpty(trimmedCode))
+            {
+                LastErrorMessage = "Enter the SMS verification code sent by Steam.";
+                return TransferFinishStatus.BadSmsCode;
+            }
+
+            bool requestDispatched = false;
+            SteamProtocolResponse<CTwoFactor_RemoveAuthenticatorViaChallengeContinue_Response> response;
+            try
+            {
+                requestDispatched = true;
+                response = await SendAsync(
+                    "ITwoFactorService",
+                    "RemoveAuthenticatorViaChallengeContinue",
+                    new CTwoFactor_RemoveAuthenticatorViaChallengeContinue_Request
+                    {
+                        SmsCode = trimmedCode,
+                        GenerateNewToken = true,
+                        Version = 2
+                    },
+                    CTwoFactor_RemoveAuthenticatorViaChallengeContinue_Response.Parser,
+                    cancellationToken);
+            }
+            catch (Exception ex) when (requestDispatched)
+            {
+                SteamAuthDiagnostics.Log(ex, "Authenticator transfer Continue failed after dispatch; remote outcome is unknown.");
+                LastErrorMessage = "The connection was interrupted after sending the SMS code. Steam may have already replaced your previous authenticator. Do not resend the code blindly; check your account and recovery options.";
+                return TransferFinishStatus.OutcomeUnknown;
+            }
+
+            if (response == null)
+            {
+                LastErrorMessage = "Steam did not return a parseable response after sending the SMS code. The remote outcome is unknown.";
+                return TransferFinishStatus.OutcomeUnknown;
+            }
+            if (HasResultCode(response, EResultActivationCodeMismatch))
+            {
+                LastErrorMessage = "Steam did not accept that SMS verification code. Check the code and try again.";
+                return TransferFinishStatus.BadSmsCode;
+            }
+            if (IsRateLimited(response))
+            {
+                LastErrorMessage = "Steam is rate limiting authenticator transfer attempts. Wait a while before trying again.";
+                return TransferFinishStatus.RateLimited;
+            }
+            if (!HasResultCode(response, EResultOK))
+            {
+                if (IsDefinitiveTransferNonReplacementResult(response.Result))
+                {
+                    LastErrorMessage = DescribeFailure(response, "complete the authenticator transfer");
+                    return TransferFinishStatus.Rejected;
+                }
+
+                LastErrorMessage = DescribeFailure(response, "confirm whether Steam completed the authenticator transfer") +
+                    " The remote outcome is unknown; check your Steam account before retrying.";
+                return TransferFinishStatus.OutcomeUnknown;
+            }
+            if (response.Body == null)
+            {
+                LastErrorMessage = "Steam returned an empty transfer response after accepting the request. The remote outcome is unknown.";
+                return TransferFinishStatus.OutcomeUnknown;
+            }
+            if (response.Body.HasSuccess && !response.Body.Success)
+            {
+                LastErrorMessage = "Steam rejected the authenticator transfer request.";
+                return TransferFinishStatus.Rejected;
+            }
+
+            CRemoveAuthenticatorViaChallengeContinue_Replacement_Token token = response.Body.ReplacementToken;
+            if (!IsValidReplacementToken(token))
+            {
+                LastErrorMessage = "Steam accepted the transfer request, but the replacement authenticator token was incomplete or invalid. Check your account recovery status before retrying.";
+                return TransferFinishStatus.IncompleteReplacement;
+            }
+
+            LinkedAccount = new SteamGuardAccount
+            {
+                SharedSecret = Convert.ToBase64String(token.SharedSecret.ToByteArray()),
+                SerialNumber = token.SerialNumber.ToString(),
+                RevocationCode = token.RevocationCode,
+                URI = token.Uri,
+                ServerTime = (long)token.ServerTime,
+                AccountName = token.AccountName,
+                TokenGID = token.TokenGid,
+                IdentitySecret = Convert.ToBase64String(token.IdentitySecret.ToByteArray()),
+                Secret1 = token.Secret1 != null && token.Secret1.Length > 0
+                    ? Convert.ToBase64String(token.Secret1.ToByteArray())
+                    : String.Empty,
+                Status = token.Status,
+                DeviceID = DeviceID,
+                FullyEnrolled = true,
+                Session = session
+            };
+            Finalized = true;
+            return TransferFinishStatus.Success;
+        }
+
+        public async Task<bool> TryEnrichTransferredDeviceIdAsync(
+            SteamGuardAccount account,
+            CancellationToken cancellationToken = default)
+        {
+            if (account == null || session == null || session.SteamID == 0)
+                return false;
+
+            using (CancellationTokenSource timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                try
+                {
+                    SteamProtocolResponse<CTwoFactor_Status_Response> status = await SendAsync(
+                        "ITwoFactorService",
+                        "QueryStatus",
+                        new CTwoFactor_Status_Request { Steamid = session.SteamID },
+                        CTwoFactor_Status_Response.Parser,
+                        timeoutCts.Token);
+
+                    if (!HasResult(status, EResultOK))
+                        return false;
+
+                    string reportedDeviceId = status.Body.DeviceIdentifier?.Trim();
+                    if (String.IsNullOrWhiteSpace(reportedDeviceId) || reportedDeviceId.Length > 256)
+                        return false;
+
+                    if (String.Equals(account.DeviceID, reportedDeviceId, StringComparison.Ordinal))
+                        return false;
+
+                    account.DeviceID = reportedDeviceId;
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    SteamAuthDiagnostics.Log(ex, "Optional post-transfer QueryStatus device enrichment did not complete.");
+                    return false;
+                }
+            }
+        }
+
+        private static bool IsDefinitiveTransferNonReplacementResult(int steamResult)
+        {
+            switch (steamResult)
+            {
+                case 8:  // InvalidParam
+                case 11: // InvalidState
+                case 15: // AccessDenied
+                case 21: // NotLoggedOn
+                case 27: // Expired
+                case 42: // NoMatch
+                case 43: // AccountDisabled
+                case 65: // InvalidLoginAuthCode
+                case 88: // TwoFactorCodeMismatch
+                case 96: // AccountActivityLimitExceeded
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private bool IsValidReplacementToken(CRemoveAuthenticatorViaChallengeContinue_Replacement_Token token)
+        {
+            if (token == null)
+                return false;
+            if (token.SharedSecret == null || token.SharedSecret.Length < 1 || token.SharedSecret.Length > 64)
+                return false;
+            if (token.IdentitySecret == null || token.IdentitySecret.Length < 1 || token.IdentitySecret.Length > 64)
+                return false;
+            if (String.IsNullOrWhiteSpace(token.RevocationCode))
+                return false;
+            if (token.Steamid != 0 && token.Steamid != session.SteamID)
+                return false;
+
+            return true;
+        }
+
         private async Task<PhoneLinkResult> SubmitPhoneNumber(CancellationToken cancellationToken)
         {
             if (String.IsNullOrWhiteSpace(PhoneCountryCode))
@@ -515,6 +752,26 @@ namespace SteamAuth
             Unknown,
             SMS,
             Email
+        }
+
+        public enum TransferStartStatus
+        {
+            SmsSent,
+            PhoneNumberRequired,
+            RateLimited,
+            Rejected,
+            GeneralFailure
+        }
+
+        public enum TransferFinishStatus
+        {
+            Success,
+            CanceledBeforeDispatch,
+            BadSmsCode,
+            RateLimited,
+            Rejected,
+            IncompleteReplacement,
+            OutcomeUnknown
         }
 
         private enum PhoneLinkStep
