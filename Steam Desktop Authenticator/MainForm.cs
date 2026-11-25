@@ -1166,9 +1166,25 @@ namespace Steam_Desktop_Authenticator
             startupAccountMaintenanceFinished = true;
         }
 
-        internal static async Task<bool> TryRecoverPendingAccountActivationAsync(
+        internal static Task<bool> TryRecoverPendingAccountActivationAsync(
             SteamGuardAccount pendingAccount,
             Func<CancellationToken, Task<AuthenticatorActivationStatus>> verifyActivationAsync,
+            Func<SteamGuardAccount, bool> persistActivatedAccount,
+            CancellationToken cancellationToken)
+        {
+            if (verifyActivationAsync == null)
+                return Task.FromResult(false);
+
+            return TryRecoverPendingAccountActivationAsync(
+                pendingAccount,
+                async ct => new AuthenticatorActivationVerificationResult(await verifyActivationAsync(ct)),
+                persistActivatedAccount,
+                cancellationToken);
+        }
+
+        internal static async Task<bool> TryRecoverPendingAccountActivationAsync(
+            SteamGuardAccount pendingAccount,
+            Func<CancellationToken, Task<AuthenticatorActivationVerificationResult>> verifyActivationAsync,
             Func<SteamGuardAccount, bool> persistActivatedAccount,
             CancellationToken cancellationToken)
         {
@@ -1176,9 +1192,30 @@ namespace Steam_Desktop_Authenticator
                 verifyActivationAsync == null || persistActivatedAccount == null)
                 return false;
 
-            AuthenticatorActivationStatus status = await verifyActivationAsync(cancellationToken);
-            if (status != AuthenticatorActivationStatus.ActiveForThisRecord)
+            AuthenticatorActivationVerificationResult verification = await verifyActivationAsync(cancellationToken);
+            if (verification.Status != AuthenticatorActivationStatus.ActiveForThisRecord)
                 return false;
+
+            string previousTokenGid = pendingAccount.TokenGID;
+            string previousDeviceId = pendingAccount.DeviceID;
+            if (String.IsNullOrWhiteSpace(pendingAccount.TokenGID) &&
+                !String.IsNullOrWhiteSpace(verification.RemoteTokenGid))
+            {
+                pendingAccount.TokenGID = verification.RemoteTokenGid.Trim();
+            }
+
+            if (String.IsNullOrWhiteSpace(pendingAccount.DeviceID) &&
+                !String.IsNullOrWhiteSpace(verification.RemoteDeviceIdentifier))
+            {
+                pendingAccount.DeviceID = verification.RemoteDeviceIdentifier.Trim();
+            }
+
+            if (String.IsNullOrWhiteSpace(pendingAccount.DeviceID))
+            {
+                pendingAccount.TokenGID = previousTokenGid;
+                pendingAccount.DeviceID = previousDeviceId;
+                return false;
+            }
 
             pendingAccount.FullyEnrolled = true;
             try
@@ -1186,21 +1223,53 @@ namespace Steam_Desktop_Authenticator
                 if (!persistActivatedAccount(pendingAccount))
                 {
                     pendingAccount.FullyEnrolled = false;
+                    pendingAccount.TokenGID = previousTokenGid;
+                    pendingAccount.DeviceID = previousDeviceId;
                     return false;
                 }
             }
             catch (StaleAccountGenerationException)
             {
                 pendingAccount.FullyEnrolled = false;
+                pendingAccount.TokenGID = previousTokenGid;
+                pendingAccount.DeviceID = previousDeviceId;
                 return false;
             }
             catch
             {
                 pendingAccount.FullyEnrolled = false;
+                pendingAccount.TokenGID = previousTokenGid;
+                pendingAccount.DeviceID = previousDeviceId;
                 throw;
             }
 
             return true;
+        }
+
+        internal static Task<bool> RecoverPendingAccountOnStartupAsync(
+            SteamGuardAccount pendingAccount,
+            long initialStorageRevision,
+            Func<bool> isAccessTokenExpired,
+            Func<bool> isRefreshTokenExpired,
+            Func<long, CancellationToken, Task<long>> refreshAccessTokenAsync,
+            Func<long> getCurrentStorageRevision,
+            Func<CancellationToken, Task<AuthenticatorActivationStatus>> verifyActivationAsync,
+            Func<SteamGuardAccount, long, bool> persistActivatedAccount,
+            CancellationToken cancellationToken)
+        {
+            if (verifyActivationAsync == null)
+                return Task.FromResult(false);
+
+            return RecoverPendingAccountOnStartupAsync(
+                pendingAccount,
+                initialStorageRevision,
+                isAccessTokenExpired,
+                isRefreshTokenExpired,
+                refreshAccessTokenAsync,
+                getCurrentStorageRevision,
+                async ct => new AuthenticatorActivationVerificationResult(await verifyActivationAsync(ct)),
+                persistActivatedAccount,
+                cancellationToken);
         }
 
         internal static async Task<bool> RecoverPendingAccountOnStartupAsync(
@@ -1210,7 +1279,7 @@ namespace Steam_Desktop_Authenticator
             Func<bool> isRefreshTokenExpired,
             Func<long, CancellationToken, Task<long>> refreshAccessTokenAsync,
             Func<long> getCurrentStorageRevision,
-            Func<CancellationToken, Task<AuthenticatorActivationStatus>> verifyActivationAsync,
+            Func<CancellationToken, Task<AuthenticatorActivationVerificationResult>> verifyActivationAsync,
             Func<SteamGuardAccount, long, bool> persistActivatedAccount,
             CancellationToken cancellationToken)
         {
@@ -1240,16 +1309,16 @@ namespace Steam_Desktop_Authenticator
                 pendingAccount,
                 async ct =>
                 {
-                    AuthenticatorActivationStatus status = await verifyActivationAsync(ct);
-                    if (status == AuthenticatorActivationStatus.SessionInvalid &&
+                    AuthenticatorActivationVerificationResult verification = await verifyActivationAsync(ct);
+                    if (verification.Status == AuthenticatorActivationStatus.SessionInvalid &&
                         !refreshedAccessToken &&
                         !isRefreshTokenExpired())
                     {
                         boundStorageRevision = await refreshAccessTokenAsync(boundStorageRevision, ct);
                         refreshedAccessToken = true;
-                        status = await verifyActivationAsync(ct);
+                        verification = await verifyActivationAsync(ct);
                     }
-                    return status;
+                    return verification;
                 },
                 activated => persistActivatedAccount(activated, boundStorageRevision),
                 cancellationToken);
@@ -1258,12 +1327,24 @@ namespace Steam_Desktop_Authenticator
         private Task ValidateStartupSessionsAsync()
         {
             return ValidateStartupSessionsAsync(
-                (account, ct) => account.VerifyAuthenticatorActivationAsync(ct),
+                (account, ct) => account.VerifyAuthenticatorActivationDetailsAsync(ct),
                 (account, expectedRevision, ct) => RefreshAndPersistAccessTokenAsync(account, ct, expectedRevision));
         }
 
-        internal async Task ValidateStartupSessionsAsync(
+        internal Task ValidateStartupSessionsAsync(
             Func<SteamGuardAccount, CancellationToken, Task<AuthenticatorActivationStatus>> verifyPendingActivationAsync,
+            Func<SteamGuardAccount, long, CancellationToken, Task> refreshEnrolledAccountAsync)
+        {
+            if (verifyPendingActivationAsync == null)
+                throw new ArgumentNullException(nameof(verifyPendingActivationAsync));
+
+            return ValidateStartupSessionsAsync(
+                async (account, ct) => new AuthenticatorActivationVerificationResult(await verifyPendingActivationAsync(account, ct)),
+                refreshEnrolledAccountAsync);
+        }
+
+        internal async Task ValidateStartupSessionsAsync(
+            Func<SteamGuardAccount, CancellationToken, Task<AuthenticatorActivationVerificationResult>> verifyPendingActivationAsync,
             Func<SteamGuardAccount, long, CancellationToken, Task> refreshEnrolledAccountAsync)
         {
             if (verifyPendingActivationAsync == null)
@@ -2371,7 +2452,7 @@ namespace Steam_Desktop_Authenticator
                 using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", accountAtStart.AccountName, confCode)))
                 {
                     confirmationDialog.ShowInputDialog(this);
-                    if (confirmationDialog.Canceled)
+                    if (confirmationDialog.Canceled || !confirmationDialog.UiReady || confirmationDialog.LoadFailed)
                         return;
 
                     enteredCode = confirmationDialog.txtBox.Text.ToUpperInvariant();
@@ -2547,7 +2628,7 @@ namespace Steam_Desktop_Authenticator
                 using (InputForm confirmationDialog = new InputForm(String.Format("Removing Steam Guard from {0}. Enter this confirmation code: {1}", account.AccountName, confirmationCode)))
                 {
                     confirmationDialog.ShowInputDialog(this);
-                    if (confirmationDialog.Canceled)
+                    if (confirmationDialog.Canceled || !confirmationDialog.UiReady || confirmationDialog.LoadFailed)
                         return;
 
                     enteredConfirmationCode = confirmationDialog.txtBox.Text;

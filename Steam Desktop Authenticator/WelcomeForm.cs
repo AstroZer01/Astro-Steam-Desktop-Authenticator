@@ -282,7 +282,7 @@ namespace Steam_Desktop_Authenticator
                     (entry["encryption_iv"] != null && entry["encryption_iv"].Type != JTokenType.Null))
                     throw new InvalidDataException("The imported unencrypted manifest contains encryption metadata.");
 
-                SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(
+                SteamGuardAccount account = Manifest.DeserializeAccountJson(
                     ReadTextWithLimit(accountPath, MaxImportFileSizeBytes),
                     ImportJsonSettings);
                 if (account?.Session == null || account.Session.SteamID == 0 || account.Session.SteamID != steamId)

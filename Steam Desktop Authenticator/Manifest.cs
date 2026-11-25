@@ -310,6 +310,11 @@ namespace Steam_Desktop_Authenticator
 
         public static Manifest GenerateNewManifest(bool scanDir = false)
         {
+            return GenerateNewManifest(scanDir, promptForEncryption: true);
+        }
+
+        internal static Manifest GenerateNewManifest(bool scanDir, bool promptForEncryption)
+        {
             // No directory means no manifest file anyways.
             Manifest newManifest = new Manifest();
             newManifest.Encrypted = false;
@@ -359,7 +364,7 @@ namespace Steam_Desktop_Authenticator
                 string contents = StoragePathGuard.ReadTextWithLimit(file.FullName, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                 try
                 {
-                    SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
+                    SteamGuardAccount account = DeserializeAccountJson(contents, storageJsonSettings);
                     if (account?.Session == null || account.Session.SteamID == 0 ||
                         newManifest.Entries.Any(entry => entry.SteamID == account.Session.SteamID))
                         throw new InvalidDataException("The account file identity is invalid or duplicated.");
@@ -380,7 +385,10 @@ namespace Steam_Desktop_Authenticator
             if (newManifest.Entries.Count > 0)
             {
                 newManifest.Save();
-                newManifest.PromptSetupPassKey("This version of SDA has encryption. Please enter a passkey below, or hit cancel to remain unencrypted");
+                if (promptForEncryption)
+                {
+                    newManifest.PromptSetupPassKey("This version of SDA has encryption. Please enter a passkey below, or hit cancel to remain unencrypted");
+                }
             }
 
             if (newManifest.Save())
@@ -578,6 +586,11 @@ namespace Steam_Desktop_Authenticator
             })
             {
                 root = JObject.Load(jsonReader);
+                while (jsonReader.Read())
+                {
+                    if (jsonReader.TokenType != JsonToken.Comment)
+                        throw new JsonReaderException("Additional text encountered after finished reading JSON content.");
+                }
             }
 
             // Remove any null `fully_enrolled` property before converting to non-nullable bool,
@@ -1118,7 +1131,7 @@ namespace Steam_Desktop_Authenticator
                             return StorageResult.Failure(StorageFailureKind.Encryption, "The existing authenticator files could not be decrypted. Encryption settings were not changed.");
                         }
                     }
-                    SteamGuardAccount existingAccount = JsonConvert.DeserializeObject<SteamGuardAccount>(fileContents, storageJsonSettings);
+                    SteamGuardAccount existingAccount = DeserializeAccountJson(fileContents, storageJsonSettings);
                     if (existingAccount?.Session == null || existingAccount.Session.SteamID != existingEntry.SteamID)
                     {
                         return StorageResult.Failure(StorageFailureKind.Validation, "One of the local authenticator files is invalid. Encryption settings were not changed.");
@@ -1316,7 +1329,7 @@ namespace Steam_Desktop_Authenticator
 
                 try
                 {
-                    SteamGuardAccount parsed = JsonConvert.DeserializeObject<SteamGuardAccount>(decrypted, storageJsonSettings);
+                    SteamGuardAccount parsed = DeserializeAccountJson(decrypted, storageJsonSettings);
                     if (parsed?.Session != null && parsed.Session.SteamID == entry.SteamID)
                     {
                         RecordVerifiedPasskeyProofLocked(passKey);
@@ -1607,7 +1620,7 @@ namespace Steam_Desktop_Authenticator
                 string salt = null;
                 string iV = null;
                 string jsonAccount = JsonConvert.SerializeObject(account, storageJsonSettings);
-                SteamGuardAccount validatedAccount = JsonConvert.DeserializeObject<SteamGuardAccount>(jsonAccount, storageJsonSettings);
+                SteamGuardAccount validatedAccount = DeserializeAccountJson(jsonAccount, storageJsonSettings);
                 if (validatedAccount?.Session == null || validatedAccount.Session.SteamID != account.Session.SteamID)
                     return StorageResult.Failure(StorageFailureKind.Serialization, "The account data could not be validated before saving.");
                 if (encrypt)

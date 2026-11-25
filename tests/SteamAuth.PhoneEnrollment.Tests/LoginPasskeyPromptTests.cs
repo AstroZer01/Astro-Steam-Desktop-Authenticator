@@ -2214,7 +2214,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 manifest,
                 new SessionData { SteamID = 76561198000001027UL, AccessToken = "fresh-token", RefreshToken = "fresh-refresh" },
                 passKey: null,
-                (_, _) => throw new InvalidOperationException("QueryStatus should not run when local file could not be loaded."),
+                (Func<SteamGuardAccount, CancellationToken, Task<AuthenticatorActivationVerificationResult>>)((_, _) => throw new InvalidOperationException("QueryStatus should not run when local file could not be loaded.")),
                 CancellationToken.None);
 
             Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.Inconclusive, result.Status);

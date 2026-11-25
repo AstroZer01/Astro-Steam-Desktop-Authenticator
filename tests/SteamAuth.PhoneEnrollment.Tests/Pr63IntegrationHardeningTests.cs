@@ -2,7 +2,10 @@ using Newtonsoft.Json;
 using Steam_Desktop_Authenticator;
 using SteamAuth;
 using System;
+using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.IO;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
@@ -390,36 +393,66 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 SteamGuardAccount.EvaluateActivationStatusResponse(pendingWithIdentity, activeStatus, allowUncorroboratedActiveWhenDeviceCodeVerified: true));
         }
 
-        [Fact]
-        public async Task TryVerifyLegacyDeviceCodeAcceptanceAsync_RequiresAffirmativeOkAndRejectsDuplicateRequest()
+        private static SteamKit2.Authentication.AuthPollResult CreateAuthPollResult(string accessToken, string refreshToken)
         {
-            SteamGuardAccount legacyUpgraded = CreateAccount(76561198000009015UL, "upgraded-legacy-dup", fullyEnrolled: false);
-            legacyUpgraded.TokenGID = null;
-            legacyUpgraded.DeviceID = null;
+            var proto = new SteamKit2.Internal.CAuthentication_PollAuthSessionStatus_Response
+            {
+                access_token = accessToken,
+                refresh_token = refreshToken
+            };
+            return (SteamKit2.Authentication.AuthPollResult)Activator.CreateInstance(
+                typeof(SteamKit2.Authentication.AuthPollResult),
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                null,
+                new object[] { proto },
+                null);
+        }
 
-            Assert.True(LoginForm.RequiresLegacyDeviceCodeProof(LoginForm.LoginType.Refresh, legacyUpgraded));
-            Assert.False(LoginForm.RequiresLegacyDeviceCodeProof(LoginForm.LoginType.Initial, legacyUpgraded));
+        [Fact]
+        public async Task CompleteLegacyDeviceCodeLoginAsync_MismatchThenOk_RecoversLegacyAccountAndBackfillsDeviceIdForConfirmations()
+        {
+            const ulong steamId = 76561198000009015UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount legacyPending = CreateAccount(steamId, "upgraded-legacy-retry", fullyEnrolled: false);
+            legacyPending.TokenGID = null;
+            legacyPending.DeviceID = null;
+            Assert.True(manifest.SaveAccount(legacyPending, encrypt: false, passKey: null).Succeeded);
+            long expectedRevision = manifest.GetAccountStorageRevision(steamId);
 
-            // Affirmative EResult.OK proves Steam accepted this local record's TOTP code.
-            bool okAccepted = await LoginForm.TryVerifyLegacyDeviceCodeAcceptanceAsync(
-                _ => Task.FromResult("ABCDE"),
-                (_, _) => Task.FromResult(SteamKit2.EResult.OK),
-                CancellationToken.None);
-            Assert.True(okAccepted);
+            Assert.True(LoginForm.RequiresLegacyDeviceCodeProof(LoginForm.LoginType.Refresh, legacyPending));
+            Assert.False(LoginForm.RequiresLegacyDeviceCodeProof(LoginForm.LoginType.Initial, legacyPending));
 
-            // EResult.DuplicateRequest (e.g., mobile approval completing sign-in ahead of local code)
-            // must NOT count as affirmative code acceptance and must leave legacy recovery Unverified.
-            bool duplicateAccepted = await LoginForm.TryVerifyLegacyDeviceCodeAcceptanceAsync(
-                _ => Task.FromResult("ABCDE"),
-                (_, _) => Task.FromResult(SteamKit2.EResult.DuplicateRequest),
-                CancellationToken.None);
-            Assert.False(duplicateAccepted);
+            var generatedCodes = new Queue<string>(new[] { "OLD01", "NEW02" });
+            var submittedCodes = new List<string>();
+            int pollCalls = 0;
+            string freshAccess = CreateJwt(DateTimeOffset.UtcNow.AddHours(3).ToUnixTimeSeconds());
+            string freshRefresh = CreateJwt(DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds());
 
-            bool mismatchAccepted = await LoginForm.TryVerifyLegacyDeviceCodeAcceptanceAsync(
-                _ => Task.FromResult("ABCDE"),
-                (_, _) => Task.FromResult(SteamKit2.EResult.TwoFactorCodeMismatch),
-                CancellationToken.None);
-            Assert.False(mismatchAccepted);
+            LoginForm.LegacyDeviceCodeLoginResult loginResult = await LoginForm.CompleteLegacyDeviceCodeLoginAsync(
+                _ => Task.FromResult(generatedCodes.Dequeue()),
+                (code, _) =>
+                {
+                    submittedCodes.Add(code);
+                    return Task.FromResult(code == "OLD01"
+                        ? SteamKit2.EResult.TwoFactorCodeMismatch
+                        : SteamKit2.EResult.OK);
+                },
+                _ =>
+                {
+                    pollCalls++;
+                    // First poll happens right after mismatch (mobile has not approved); second poll completes after OK.
+                    return Task.FromResult(pollCalls >= 2
+                        ? CreateAuthPollResult(freshAccess, freshRefresh)
+                        : null);
+                },
+                TimeSpan.FromMilliseconds(5),
+                CancellationToken.None,
+                deadline: TimeSpan.FromSeconds(5),
+                delayAsync: (_, _) => Task.CompletedTask);
+
+            Assert.NotNull(loginResult.PollResult);
+            Assert.True(loginResult.DeviceCodeAffirmativelyAccepted);
+            Assert.Equal(new[] { "OLD01", "NEW02" }, submittedCodes);
 
             var activeStatus = new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
             {
@@ -431,18 +464,293 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     DeviceIdentifier = "android:from-steam"
                 }
             };
-            Assert.Equal(
-                AuthenticatorActivationStatus.Unverified,
-                SteamGuardAccount.EvaluateActivationStatusResponse(
-                    legacyUpgraded,
+
+            SessionData freshSession = new SessionData
+            {
+                SteamID = steamId,
+                AccessToken = loginResult.PollResult.AccessToken,
+                RefreshToken = loginResult.PollResult.RefreshToken
+            };
+
+            LoginForm.PendingAuthenticatorRecoveryResult recovery = await LoginForm.TryRecoverPendingAccountWithFreshSessionAsync(
+                manifest,
+                legacyPending,
+                freshSession,
+                passKey: null,
+                (candidate, _) => Task.FromResult(SteamGuardAccount.EvaluateActivationStatusDetails(
+                    candidate,
                     activeStatus,
-                    allowUncorroboratedActiveWhenDeviceCodeVerified: duplicateAccepted));
-            Assert.Equal(
-                AuthenticatorActivationStatus.ActiveForThisRecord,
-                SteamGuardAccount.EvaluateActivationStatusResponse(
-                    legacyUpgraded,
+                    allowUncorroboratedActiveWhenDeviceCodeVerified: loginResult.DeviceCodeAffirmativelyAccepted)),
+                CancellationToken.None,
+                expectedStorageRevision: expectedRevision);
+
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.Recovered, recovery.Status);
+
+            SteamGuardAccount reloaded = Assert.Single(Manifest.GetManifest(true).GetAllAccounts());
+            Assert.True(reloaded.FullyEnrolled);
+            Assert.Equal("android:from-steam", reloaded.DeviceID);
+            Assert.Equal("gid-from-steam", reloaded.TokenGID);
+
+            // Trade confirmation request construction must succeed on the reloaded record without throwing "Device ID is not present".
+            NameValueCollection queryParams = reloaded.GenerateConfirmationQueryParamsAsNVC("conf");
+            Assert.Equal("android:from-steam", queryParams["p"]);
+            Assert.Equal(steamId.ToString(), queryParams["a"]);
+        }
+
+        [Fact]
+        public async Task CompleteLegacyDeviceCodeLoginAsync_DuplicateRequest_PollsWithoutResubmittingAndNeverPromotesLegacyRecord()
+        {
+            const ulong steamId = 76561198000009016UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount legacyPending = CreateAccount(steamId, "upgraded-legacy-dup", fullyEnrolled: false);
+            legacyPending.TokenGID = null;
+            legacyPending.DeviceID = null;
+            Assert.True(manifest.SaveAccount(legacyPending, encrypt: false, passKey: null).Succeeded);
+
+            int submitCalls = 0;
+            int pollCalls = 0;
+            string freshAccess = CreateJwt(DateTimeOffset.UtcNow.AddHours(3).ToUnixTimeSeconds());
+            string freshRefresh = CreateJwt(DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds());
+
+            // EResult.DuplicateRequest (mobile approval racing ahead) must poll directly without resubmitting
+            // and keep DeviceCodeAffirmativelyAccepted == false.
+            LoginForm.LegacyDeviceCodeLoginResult loginResult = await LoginForm.CompleteLegacyDeviceCodeLoginAsync(
+                _ => Task.FromResult("ABCDE"),
+                (_, _) =>
+                {
+                    submitCalls++;
+                    return Task.FromResult(SteamKit2.EResult.DuplicateRequest);
+                },
+                _ =>
+                {
+                    pollCalls++;
+                    return Task.FromResult(pollCalls == 2 ? CreateAuthPollResult(freshAccess, freshRefresh) : null);
+                },
+                TimeSpan.FromMilliseconds(5),
+                CancellationToken.None,
+                deadline: TimeSpan.FromSeconds(5),
+                delayAsync: (_, _) => Task.CompletedTask);
+
+            Assert.NotNull(loginResult.PollResult);
+            Assert.False(loginResult.DeviceCodeAffirmativelyAccepted);
+            Assert.Equal(1, submitCalls);
+            Assert.Equal(2, pollCalls);
+
+            var activeStatus = new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+            {
+                Result = 1,
+                Body = new SteamAuth.Protocol.CTwoFactor_Status_Response
+                {
+                    State = 1,
+                    TokenGid = "gid-from-steam",
+                    DeviceIdentifier = "android:from-steam"
+                }
+            };
+
+            LoginForm.PendingAuthenticatorRecoveryResult recovery = await LoginForm.TryRecoverPendingAccountWithFreshSessionAsync(
+                manifest,
+                legacyPending,
+                new SessionData { SteamID = steamId, AccessToken = freshAccess, RefreshToken = freshRefresh },
+                passKey: null,
+                (candidate, _) => Task.FromResult(SteamGuardAccount.EvaluateActivationStatusDetails(
+                    candidate,
                     activeStatus,
-                    allowUncorroboratedActiveWhenDeviceCodeVerified: okAccepted));
+                    allowUncorroboratedActiveWhenDeviceCodeVerified: loginResult.DeviceCodeAffirmativelyAccepted)),
+                CancellationToken.None);
+
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.Inconclusive, recovery.Status);
+            Assert.False(legacyPending.FullyEnrolled);
+            Assert.False(Assert.Single(Manifest.GetManifest(true).GetAllAccounts()).FullyEnrolled);
+        }
+
+        [Fact]
+        public async Task CompleteLegacyDeviceCodeLoginAsync_EnforcesLinkedDeadlineAndPreservesNonCallerCancellation()
+        {
+            // 1. Linked deadline cancels waiting delay/poll and throws TimeoutException (not OperationCanceledException).
+            await Assert.ThrowsAsync<TimeoutException>(() => LoginForm.CompleteLegacyDeviceCodeLoginAsync(
+                _ => Task.FromResult("ABCDE"),
+                (_, _) => Task.FromResult(SteamKit2.EResult.OK),
+                async ct =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                    return null;
+                },
+                TimeSpan.FromSeconds(5),
+                CancellationToken.None,
+                deadline: TimeSpan.FromMilliseconds(60)));
+
+            // 2. Caller cancellation throws OperationCanceledException with the caller token.
+            using (var callerCts = new CancellationTokenSource())
+            {
+                callerCts.Cancel();
+                OperationCanceledException canceledEx = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                    LoginForm.CompleteLegacyDeviceCodeLoginAsync(
+                        _ => Task.FromResult("ABCDE"),
+                        (_, _) => Task.FromResult(SteamKit2.EResult.OK),
+                        _ => Task.FromResult<SteamKit2.Authentication.AuthPollResult>(null),
+                        TimeSpan.FromMilliseconds(5),
+                        callerCts.Token,
+                        deadline: TimeSpan.FromSeconds(5)));
+                Assert.True(callerCts.IsCancellationRequested);
+                Assert.NotNull(canceledEx);
+            }
+
+            // 3. Non-caller TaskCanceledException (e.g., SteamKit2 AsyncJob or TimeAligner HTTP timeout)
+            // propagates untouched instead of being converted to a silent caller cancel or swallowed.
+            await Assert.ThrowsAsync<TaskCanceledException>(() => LoginForm.CompleteLegacyDeviceCodeLoginAsync(
+                _ => Task.FromException<string>(new TaskCanceledException("Simulated SteamKit/TimeAligner timeout")),
+                (_, _) => Task.FromResult(SteamKit2.EResult.OK),
+                _ => Task.FromResult<SteamKit2.Authentication.AuthPollResult>(null),
+                TimeSpan.FromMilliseconds(5),
+                CancellationToken.None,
+                deadline: TimeSpan.FromSeconds(5)));
+
+            // 4. Mobile approval arriving while polling after a mismatch returns without local device-code proof.
+            string freshAccess = CreateJwt(DateTimeOffset.UtcNow.AddHours(2).ToUnixTimeSeconds());
+            string freshRefresh = CreateJwt(DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds());
+            LoginForm.LegacyDeviceCodeLoginResult racedAfterMismatch = await LoginForm.CompleteLegacyDeviceCodeLoginAsync(
+                _ => Task.FromResult("WRONG"),
+                (_, _) => Task.FromResult(SteamKit2.EResult.TwoFactorCodeMismatch),
+                _ => Task.FromResult(CreateAuthPollResult(freshAccess, freshRefresh)),
+                TimeSpan.FromMilliseconds(5),
+                CancellationToken.None,
+                deadline: TimeSpan.FromSeconds(5),
+                delayAsync: (_, _) => Task.CompletedTask);
+            Assert.NotNull(racedAfterMismatch.PollResult);
+            Assert.False(racedAfterMismatch.DeviceCodeAffirmativelyAccepted);
+        }
+
+        [Fact]
+        public async Task LegacyRecovery_KeepsAccountPendingWhenSteamOmitsDeviceId_AndRollsBackBackfillOnRevisionConflict()
+        {
+            const ulong steamId = 76561198000009017UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount legacyPending = CreateAccount(steamId, "legacy-no-device-id", fullyEnrolled: false);
+            legacyPending.TokenGID = null;
+            legacyPending.DeviceID = null;
+            Assert.True(manifest.SaveAccount(legacyPending, encrypt: false, passKey: null).Succeeded);
+
+            SessionData freshSession = new SessionData
+            {
+                SteamID = steamId,
+                AccessToken = CreateJwt(DateTimeOffset.UtcNow.AddHours(3).ToUnixTimeSeconds()),
+                RefreshToken = CreateJwt(DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds())
+            };
+
+            // If Steam omits DeviceIdentifier and the local record has no DeviceID, keep pending instead of promoting an unusable record.
+            var statusWithoutDeviceId = new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+            {
+                Result = 1,
+                Body = new SteamAuth.Protocol.CTwoFactor_Status_Response
+                {
+                    State = 1,
+                    TokenGid = "gid-only"
+                }
+            };
+            LoginForm.PendingAuthenticatorRecoveryResult omittedDeviceResult = await LoginForm.TryRecoverPendingAccountWithFreshSessionAsync(
+                manifest,
+                legacyPending,
+                freshSession,
+                passKey: null,
+                (candidate, _) => Task.FromResult(SteamGuardAccount.EvaluateActivationStatusDetails(
+                    candidate,
+                    statusWithoutDeviceId,
+                    allowUncorroboratedActiveWhenDeviceCodeVerified: true)),
+                CancellationToken.None);
+
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.Inconclusive, omittedDeviceResult.Status);
+            Assert.False(legacyPending.FullyEnrolled);
+            Assert.Null(legacyPending.DeviceID);
+            Assert.Null(legacyPending.TokenGID);
+
+            // If SaveAccount fails due to a concurrent storage revision change, roll back backfilled DeviceID and TokenGID too.
+            long staleRevision = manifest.GetAccountStorageRevision(steamId);
+            var statusWithDeviceId = new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+            {
+                Result = 1,
+                Body = new SteamAuth.Protocol.CTwoFactor_Status_Response
+                {
+                    State = 1,
+                    TokenGid = "gid-rollback",
+                    DeviceIdentifier = "android:rollback"
+                }
+            };
+            LoginForm.PendingAuthenticatorRecoveryResult conflictResult = await LoginForm.TryRecoverPendingAccountWithFreshSessionAsync(
+                manifest,
+                legacyPending,
+                freshSession,
+                passKey: null,
+                (candidate, _) =>
+                {
+                    // Simulate concurrent modification while QueryStatus was in flight.
+                    SteamGuardAccount concurrent = CreateAccount(steamId, "legacy-no-device-id", fullyEnrolled: false);
+                    Assert.True(manifest.SaveAccount(concurrent, encrypt: false, passKey: null).Succeeded);
+                    return Task.FromResult(SteamGuardAccount.EvaluateActivationStatusDetails(
+                        candidate,
+                        statusWithDeviceId,
+                        allowUncorroboratedActiveWhenDeviceCodeVerified: true));
+                },
+                CancellationToken.None,
+                expectedStorageRevision: staleRevision);
+
+            Assert.Equal(LoginForm.PendingAuthenticatorRecoveryStatus.SaveFailed, conflictResult.Status);
+            Assert.False(legacyPending.FullyEnrolled);
+            Assert.Null(legacyPending.DeviceID);
+            Assert.Null(legacyPending.TokenGID);
+        }
+
+        [Fact]
+        public void LegacyNullFullyEnrolledVault_SupportsManifestScanEncryptionChangeAndColdEncryptedWrite()
+        {
+            const ulong steamId = 76561198000009018UL;
+            const string initialPassKey = "InitialPasskey!123";
+            const string rotatedPassKey = "RotatedPasskey!456";
+
+            string maDir = Path.Combine(tempDir, "maFiles");
+            Directory.CreateDirectory(maDir);
+            string maFilePath = Path.Combine(maDir, steamId + ".maFile");
+
+            SteamGuardAccount seed = CreateAccount(steamId, "legacy-null-vault", fullyEnrolled: true);
+            string legacyJson = JsonConvert.SerializeObject(seed)
+                .Replace("\"fully_enrolled\":true", "\"fully_enrolled\":null");
+            Assert.Contains("\"fully_enrolled\":null", legacyJson);
+            File.WriteAllText(maFilePath, legacyJson);
+
+            // 1. Pre-manifest reconstruction (GenerateNewManifest(scanDir: true)) accepts legacy `"fully_enrolled": null`.
+            Manifest scanned = Manifest.GenerateNewManifest(scanDir: true, promptForEncryption: false);
+            Assert.NotNull(scanned);
+            Assert.Single(scanned.Entries);
+            Assert.True(Assert.Single(scanned.GetAllAccounts()).FullyEnrolled);
+
+            // 2. Enabling encryption via ChangeEncryptionKey succeeds on the legacy `"fully_enrolled": null` file.
+            StorageResult enableResult = scanned.ChangeEncryptionKey(null, initialPassKey);
+            Assert.True(enableResult.Succeeded, enableResult.UserMessage);
+            Assert.True(scanned.Encrypted);
+
+            // 3. Rotating the encryption passkey via ChangeEncryptionKey also succeeds.
+            StorageResult rotateResult = scanned.ChangeEncryptionKey(initialPassKey, rotatedPassKey);
+            Assert.True(rotateResult.Succeeded, rotateResult.UserMessage);
+
+            // 4. Cold-start encrypted write (fresh Manifest without calling VerifyPasskey first)
+            // exercises IsPasskeyValidForEncryptedWriteLocked on the encrypted `"fully_enrolled": null` file.
+            Manifest coldManifest = Manifest.GetManifest(true);
+            SteamGuardAccount secondAccount = CreateAccount(76561198000009019UL, "second-after-cold-start", fullyEnrolled: true);
+            StorageResult coldSave = coldManifest.SaveAccount(secondAccount, encrypt: true, passKey: rotatedPassKey);
+            Assert.True(coldSave.Succeeded, coldSave.UserMessage);
+
+            SteamGuardAccount[] reloaded = Manifest.GetManifest(true).GetAllAccounts(rotatedPassKey);
+            Assert.Equal(2, reloaded.Length);
+            Assert.All(reloaded, account => Assert.True(account.FullyEnrolled));
+        }
+
+        [Fact]
+        public void DeserializeAccountJson_RejectsTrailingJsonTokens()
+        {
+            SteamGuardAccount seed = CreateAccount(76561198000009020UL, "trailing-json-user", fullyEnrolled: true);
+            string validJson = JsonConvert.SerializeObject(seed);
+
+            Assert.Throws<JsonReaderException>(() => Manifest.DeserializeAccountJson(validJson + " {\"extra\":true}", null));
+            Assert.Throws<JsonReaderException>(() => Manifest.DeserializeAccountJson(validJson + " trailing", null));
         }
 
         [Fact]
