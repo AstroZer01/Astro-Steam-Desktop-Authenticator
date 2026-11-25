@@ -563,9 +563,9 @@ namespace SteamAuth.PhoneEnrollment.Tests
             string html = File.ReadAllText(inputHtmlPath);
 
             Assert.Contains("<input type=\"password\" id=\"input-box\"", html);
-            Assert.Contains("id=\"input-box\" aria-labelledby=\"label-text\" placeholder=\"...\" disabled", html);
-            Assert.Contains("id=\"btn-cancel\" class=\"btn-secondary flex-1 shadow-lg\" disabled", html);
-            Assert.Contains("id=\"btn-accept\" class=\"btn-primary flex-1 shadow-lg shadow-[#00E5FF]/20\" disabled", html);
+            Assert.Matches("<input[^>]*id=\"input-box\"[^>]*aria-labelledby=\"label-text\"[^>]*\\bdisabled\\b", html);
+            Assert.Matches("<button[^>]*id=\"btn-cancel\"[^>]*\\bdisabled\\b", html);
+            Assert.Matches("<button[^>]*id=\"btn-accept\"[^>]*\\bdisabled\\b", html);
 
             int observeIndex = html.IndexOf("resizeObserver.observe(panel);", StringComparison.Ordinal);
             int inputEnableIndex = html.IndexOf("input.disabled = false;", StringComparison.Ordinal);

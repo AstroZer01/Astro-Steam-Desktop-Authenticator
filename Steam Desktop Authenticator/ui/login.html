@@ -1,106 +1,210 @@
 <!DOCTYPE html><html class="dark" lang="en"><head>
 <meta charset="utf-8">
 <meta content="width=device-width, initial-scale=1.0" name="viewport">
-<title>Astro SDA - Login</title>
+<title>Astro SDA — Steam Login</title>
 <link href="assets/css/app.css" rel="stylesheet">
 <style>
-body { background-color: #0b1326; color: #dae2fd; font-family: 'Inter', sans-serif; overflow: hidden; }
-.glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
-input { background: #131B2E !important; color: white !important; border: 1px solid rgba(255, 255, 255, 0.2) !important; border-radius: 8px !important; padding: 12px !important; width: 100%; outline: none; transition: border-color 0.2s; }
-input:focus { border-color: #00daf3 !important; }
-.password-field { position: relative; }
-.password-field input { padding-right: 48px !important; }
-.password-toggle { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: #ffffff; padding: 6px; line-height: 0; cursor: pointer; }
-.password-toggle:hover, .password-toggle:focus { color: #c3f5ff; }
-.password-toggle:focus-visible { outline: 2px solid #00daf3; outline-offset: 2px; }
-.password-toggle svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-input::-ms-reveal { display: none; }
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: linear-gradient(180deg, #101727 0%, #0d1320 34%);
+    color: #e4eaf4;
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  .login-shell {
+    min-height: 100%;
+    padding: 24px 26px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .ctx-pill {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 9999px;
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 1;
+    color: #85d6e6;
+    background: rgba(76, 195, 217, 0.10);
+    border: 1px solid rgba(76, 195, 217, 0.26);
+  }
+  .field-input {
+    width: 100%;
+    background: #090e19 !important;
+    color: #e4eaf4 !important;
+    border: 1px solid rgba(255, 255, 255, 0.13) !important;
+    border-radius: 8px !important;
+    padding: 10px 13px !important;
+    font-size: 13px !important;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .field-input:focus {
+    border-color: #4cc3d9 !important;
+    box-shadow: 0 0 0 2px rgba(76, 195, 217, 0.14) !important;
+  }
+  .password-field { position: relative; }
+  .password-field .field-input { padding-right: 44px !important; }
+  .password-toggle {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 0;
+    background: transparent;
+    color: #96a4b8;
+    padding: 6px;
+    line-height: 0;
+    cursor: pointer;
+    border-radius: 6px;
+  }
+  .password-toggle:hover, .password-toggle:focus { color: #85d6e6; }
+  .password-toggle:focus-visible { outline: 2px solid #4cc3d9; outline-offset: 2px; }
+  .password-toggle svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  input::-ms-reveal { display: none; }
+  .save-pw-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 11px 13px;
+    background: #121a2b;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8.5px;
+    font-size: 11.5px;
+    color: #96a4b8;
+    line-height: 1.45;
+    cursor: pointer;
+    user-select: none;
+  }
+  .save-pw-card.hidden { display: none !important; }
+  .save-pw-card input[type="checkbox"] {
+    width: 16px !important;
+    height: 16px !important;
+    margin-top: 2px;
+    flex-shrink: 0;
+    border-radius: 4px !important;
+    background-color: #090e19 !important;
+    border: 1px solid rgba(255, 255, 255, 0.22) !important;
+  }
+  .save-pw-card input[type="checkbox"]:checked {
+    background-color: #28829c !important;
+    border-color: #4cc3d9 !important;
+  }
+  .login-foot {
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.075);
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
 </style>
 </head>
-<body class="min-h-screen flex items-center justify-center p-4">
-<div class="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] bg-[#00E5FF]/5 rounded-full blur-[120px] pointer-events-none"></div>
+<body>
+<div class="login-shell">
+  <span id="context-pill" class="ctx-pill">Setup New Account</span>
 
-<div class="glass-panel w-full max-w-sm p-8 rounded-2xl flex flex-col gap-5 shadow-2xl relative z-10">
-    <div class="flex flex-col items-center mb-2">
-        <h1 class="text-2xl font-bold text-[#c3f5ff] text-center">Steam Login</h1>
-        <p id="explanation-text" class="text-sm text-[#bac9cc] text-center mt-2 leading-relaxed">This will activate Astro Steam Desktop Assistant on your Steam account.</p>
-    </div>
-    
-    <div class="flex flex-col gap-2">
-        <label class="text-sm text-[#849396] font-medium" for="username">Username</label>
-        <input type="text" id="username" placeholder="Steam Username" />
-    </div>
-    
-    <div class="flex flex-col gap-2">
-        <label class="text-sm text-[#849396] font-medium" for="password">Password</label>
-        <div class="password-field">
-            <input type="password" id="password" placeholder="Steam Password" />
-            <button id="password-toggle" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
-            </button>
-        </div>
-    </div>
+  <div>
+    <h1 class="text-xl font-bold text-[#f3f6fb] tracking-tight">Sign In to Steam</h1>
+    <p id="explanation-text" class="text-[12.5px] text-[#96a4b8] mt-1.5 leading-relaxed">Authenticate your Steam account to activate Astro Steam Desktop Authenticator.</p>
+  </div>
 
-    <label id="save-password-row" class="hidden flex items-start gap-2.5 text-xs text-[#bac9cc] cursor-pointer select-none">
-        <input id="save-password" type="checkbox" style="width:16px !important;height:16px !important;padding:0 !important;margin-top:2px;flex-shrink:0;" />
-        <span>Save password for silent session renewal (encrypted with your manifest passkey)</span>
-    </label>
+  <div class="flex flex-col gap-1.5">
+    <label class="text-xs font-semibold text-[#96a4b8]" for="username">Steam Username</label>
+    <input type="text" id="username" class="field-input" placeholder="Steam Username" autocomplete="username" />
+  </div>
 
-    <button id="btn-login" class="mt-4 bg-[#00E5FF] hover:bg-[#9cf0ff] text-[#00363D] font-bold py-3 rounded-lg w-full transition-colors shadow-lg shadow-[#00E5FF]/20">LOGIN</button>
+  <div class="flex flex-col gap-1.5">
+    <label class="text-xs font-semibold text-[#96a4b8]" for="password">Steam Password</label>
+    <div class="password-field">
+      <input type="password" id="password" class="field-input" placeholder="Steam Password" autocomplete="current-password" />
+      <button id="password-toggle" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <label id="save-password-row" class="save-pw-card hidden">
+    <input id="save-password" type="checkbox" />
+    <span><strong class="text-[#e4eaf4] font-semibold">Save password for silent session renewal</strong><br>Encrypted separately with your manifest passkey (AES-256-GCM). Never exported.</span>
+  </label>
+
+  <div class="login-foot">
+    <button id="btn-cancel" type="button" class="btn-ghost rounded-lg px-4 py-2.5 text-xs">Cancel</button>
+    <button id="btn-login" type="button" class="btn-primary rounded-lg px-5 py-2.5 text-xs">Sign In to Steam</button>
+  </div>
 </div>
+
 <script>
-    function submitLogin() {
-        let btn = document.getElementById('btn-login');
-        if (btn && btn.disabled) return;
-        let u = document.getElementById('username').value;
-        let p = document.getElementById('password').value;
-        let saveRow = document.getElementById('save-password-row');
-        let saveCheckbox = document.getElementById('save-password');
-        let savePassword = !!(saveRow && !saveRow.classList.contains('hidden') && saveCheckbox && saveCheckbox.checked);
-        window.chrome.webview.postMessage({ action: 'login', user: u, pass: p, savePassword: savePassword });
-    }
+  function submitLogin() {
+    let btn = document.getElementById('btn-login');
+    if (btn && btn.disabled) return;
+    let u = document.getElementById('username').value;
+    let p = document.getElementById('password').value;
+    let saveRow = document.getElementById('save-password-row');
+    let saveCheckbox = document.getElementById('save-password');
+    let savePassword = !!(saveRow && !saveRow.classList.contains('hidden') && saveCheckbox && saveCheckbox.checked);
+    window.chrome.webview.postMessage({ action: 'login', user: u, pass: p, savePassword: savePassword });
+  }
 
-    document.getElementById('btn-login').addEventListener('click', submitLogin);
-    document.getElementById('password-toggle').addEventListener('click', () => {
-        const password = document.getElementById('password');
-        const toggle = document.getElementById('password-toggle');
-        const visible = password.type === 'password';
-        password.type = visible ? 'text' : 'password';
-        toggle.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
-        toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
-        password.focus();
-    });
-    document.getElementById('password').addEventListener('keydown', event => {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            submitLogin();
-        }
-    });
-    
-    function setExplanation(text) {
-        document.getElementById('explanation-text').innerText = text;
+  document.getElementById('btn-login').addEventListener('click', submitLogin);
+  document.getElementById('btn-cancel').addEventListener('click', () => {
+    window.chrome.webview.postMessage({ action: 'cancel' });
+  });
+  document.getElementById('password-toggle').addEventListener('click', () => {
+    const password = document.getElementById('password');
+    const toggle = document.getElementById('password-toggle');
+    const visible = password.type === 'password';
+    password.type = visible ? 'text' : 'password';
+    toggle.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
+    toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
+    password.focus();
+  });
+  document.getElementById('password').addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitLogin();
     }
-    
-    function setUsername(text, disable) {
-        let u = document.getElementById('username');
-        u.value = text;
-        u.disabled = !!disable;
-        u.style.opacity = disable ? '0.5' : '1';
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      window.chrome.webview.postMessage({ action: 'cancel' });
     }
-    
-    function setButtonState(text, disabled) {
-        let b = document.getElementById('btn-login');
-        b.innerText = text;
-        b.disabled = disabled;
-        b.style.opacity = disabled ? '0.5' : '1';
-    }
+  });
 
-    function setSavePasswordOption(visible) {
-        let row = document.getElementById('save-password-row');
-        let cb = document.getElementById('save-password');
-        if (!row || !cb) return;
-        row.classList.toggle('hidden', !visible);
-        if (!visible) cb.checked = false;
-    }
+  function setContextLabel(text) {
+    const el = document.getElementById('context-pill');
+    if (el && text) el.innerText = text;
+  }
+
+  function setExplanation(text) {
+    document.getElementById('explanation-text').innerText = text;
+  }
+
+  function setUsername(text, disable) {
+    let u = document.getElementById('username');
+    u.value = text;
+    u.disabled = !!disable;
+    u.style.opacity = disable ? '0.55' : '1';
+  }
+
+  function setButtonState(text, disabled) {
+    let b = document.getElementById('btn-login');
+    b.innerText = text;
+    b.disabled = disabled;
+  }
+
+  function setSavePasswordOption(visible) {
+    let row = document.getElementById('save-password-row');
+    let cb = document.getElementById('save-password');
+    if (!row || !cb) return;
+    row.classList.toggle('hidden', !visible);
+    if (!visible) cb.checked = false;
+  }
 </script>
 </body></html>

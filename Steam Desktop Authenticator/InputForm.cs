@@ -390,18 +390,18 @@ namespace Steam_Desktop_Authenticator
         private async void SetupModernUI(string label, bool isPassword)
         {
             DisableNativeFallbackControls();
-            this.Size = new Size(400, 300);
-            this.MinimumSize = new Size(400, 100);
-            this.MaximumSize = new Size(400, 1000);
+            this.Size = new Size(424, 280);
+            this.MinimumSize = new Size(424, 140);
+            this.MaximumSize = new Size(424, 1000);
             this.MaximizeBox = false;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
-            this.BackColor = Color.FromArgb(11, 19, 38);
-            this.Text = "Astro SDA - Input";
+            this.BackColor = AstroTheme.Background;
+            this.Text = isPassword ? "Astro SDA — Unlock Vault" : "Astro SDA — Input Required";
 
             Panel loadingPanel = new Panel();
             loadingPanel.Dock = DockStyle.Fill;
-            loadingPanel.BackColor = Color.FromArgb(11, 19, 38);
-            Label lblLoading = new Label() { Text = "Loading...", ForeColor = Color.White, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+            loadingPanel.BackColor = AstroTheme.Background;
+            Label lblLoading = new Label() { Text = "Loading...", ForeColor = AstroTheme.OnSurfaceVariant, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
             loadingPanel.Controls.Add(lblLoading);
             this.Controls.Add(loadingPanel);
             loadingPanel.BringToFront();

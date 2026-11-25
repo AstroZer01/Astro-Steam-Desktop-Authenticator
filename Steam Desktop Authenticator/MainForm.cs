@@ -149,10 +149,12 @@ namespace Steam_Desktop_Authenticator
 
         // Forms
         private ToolStripMenuItem trayLoginActions;
-        private ToolStripMenuItem trayAccountHeading;
+        private ToolStripMenuItem trayActiveAccountMenu;
         private QrScanOverlayForm qrScanOverlay;
         private System.Windows.Forms.Timer loadingTimer;
         private bool qrScanInProgress;
+        private volatile bool qrScanCancelRequested;
+        private readonly SteamAvatarService steamAvatarService = new SteamAvatarService();
 
         private sealed class RecentLoginAttempt
         {
@@ -1581,9 +1583,6 @@ namespace Steam_Desktop_Authenticator
             // Style the tray context menu
             AstroTheme.StyleContextMenuStrip(menuStripTray);
             ConfigureTrayContextMenu();
-            trayAccountList.BackColor = AstroTheme.SurfaceContainer;
-            trayAccountList.ForeColor = AstroTheme.OnSurface;
-            trayAccountList.FlatStyle = FlatStyle.Flat;
 
             // Handle left click on tray icon to restore
             trayIcon.MouseClick += (s, ev) =>
@@ -1642,11 +1641,114 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private const int WmSizing = 0x0214;
+        private const int WmszLeft = 1;
+        private const int WmszRight = 2;
+        private const int WmszTop = 3;
+        private const int WmszTopLeft = 4;
+        private const int WmszTopRight = 5;
+        private const int WmszBottom = 6;
+        private const int WmszBottomLeft = 7;
+        private const int WmszBottomRight = 8;
+        private const int DefaultModernWindowWidth = 920;
+        private const int DefaultModernWindowHeight = 660;
+        private const double ModernWindowAspectRatio = (double)DefaultModernWindowWidth / DefaultModernWindowHeight;
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct ResizeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        internal static void AdjustResizeRectForAspectRatio(ref ResizeRect rect, int edge, double aspectRatio, int minWidth, int minHeight)
+        {
+            if (aspectRatio <= 0)
+                return;
+
+            int effectiveMinWidth = Math.Max(1, minWidth);
+            int effectiveMinHeight = Math.Max(1, minHeight);
+            int width = rect.Right - rect.Left;
+            int height = rect.Bottom - rect.Top;
+
+            switch (edge)
+            {
+                case WmszLeft:
+                case WmszRight:
+                {
+                    int targetWidth = Math.Max(effectiveMinWidth, width);
+                    int targetHeight = Math.Max(effectiveMinHeight, (int)Math.Round(targetWidth / aspectRatio));
+                    targetWidth = Math.Max(effectiveMinWidth, (int)Math.Round(targetHeight * aspectRatio));
+                    if (edge == WmszLeft)
+                        rect.Left = rect.Right - targetWidth;
+                    else
+                        rect.Right = rect.Left + targetWidth;
+                    rect.Bottom = rect.Top + targetHeight;
+                    break;
+                }
+                case WmszTop:
+                case WmszBottom:
+                {
+                    int targetHeight = Math.Max(effectiveMinHeight, height);
+                    int targetWidth = Math.Max(effectiveMinWidth, (int)Math.Round(targetHeight * aspectRatio));
+                    targetHeight = Math.Max(effectiveMinHeight, (int)Math.Round(targetWidth / aspectRatio));
+                    if (edge == WmszTop)
+                        rect.Top = rect.Bottom - targetHeight;
+                    else
+                        rect.Bottom = rect.Top + targetHeight;
+                    rect.Right = rect.Left + targetWidth;
+                    break;
+                }
+                case WmszTopLeft:
+                case WmszTopRight:
+                case WmszBottomLeft:
+                case WmszBottomRight:
+                {
+                    // Orthogonal projection onto the aspect-ratio ray keeps corner dragging smooth
+                    // in both grow and shrink directions without sticking to one axis.
+                    double scale = (width * aspectRatio + height) / (aspectRatio * aspectRatio + 1.0);
+                    double minScale = Math.Max(effectiveMinWidth / aspectRatio, effectiveMinHeight);
+                    if (scale < minScale)
+                        scale = minScale;
+
+                    int targetHeight = Math.Max(effectiveMinHeight, (int)Math.Round(scale));
+                    int targetWidth = Math.Max(effectiveMinWidth, (int)Math.Round(scale * aspectRatio));
+
+                    if (edge == WmszTopLeft || edge == WmszBottomLeft)
+                        rect.Left = rect.Right - targetWidth;
+                    else
+                        rect.Right = rect.Left + targetWidth;
+
+                    if (edge == WmszTopLeft || edge == WmszTopRight)
+                        rect.Top = rect.Bottom - targetHeight;
+                    else
+                        rect.Bottom = rect.Top + targetHeight;
+                    break;
+                }
+            }
+        }
+
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == Program.RestoreExistingInstanceMessage)
             {
                 TryBeginInvoke(() => RestoreWindowFromActivation(true));
+                return;
+            }
+
+            if (m.Msg == WmSizing && m.LParam != IntPtr.Zero && this.FormBorderStyle == FormBorderStyle.Sizable)
+            {
+                ResizeRect rect = Marshal.PtrToStructure<ResizeRect>(m.LParam);
+                AdjustResizeRectForAspectRatio(
+                    ref rect,
+                    unchecked((int)m.WParam.ToInt64()),
+                    ModernWindowAspectRatio,
+                    this.MinimumSize.Width,
+                    this.MinimumSize.Height);
+                Marshal.StructureToPtr(rect, m.LParam, false);
+                m.Result = (IntPtr)1;
                 return;
             }
 
@@ -2110,6 +2212,7 @@ namespace Steam_Desktop_Authenticator
             ulong steamIdAtScanStart = accountAtScanStart.Session.SteamID;
 
             qrScanInProgress = true;
+            qrScanCancelRequested = false;
             try
             {
                 this.btnLoginViaQr.Enabled = false;
@@ -2120,15 +2223,15 @@ namespace Steam_Desktop_Authenticator
                 bool cancelled = false;
                 for (int i = 300; i > 0; i--)
                 {
-                    if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
+                    if (qrScanCancelRequested || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0)
                     {
-                        keyPressed = true;
+                        cancelled = true;
                         break;
                     }
 
-                    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0)
+                    if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
                     {
-                        cancelled = true;
+                        keyPressed = true;
                         break;
                     }
 
@@ -2148,13 +2251,13 @@ namespace Steam_Desktop_Authenticator
                 if (!keyPressed)
                 {
                     string cancellationReason = cancelled ? "QR Code scan cancelled." : "QR Code scan cancelled (timeout).";
-                    AstroMessageBox.Show(cancellationReason, "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    AstroMessageBox.Show(cancellationReason, "QR Login Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
                 GetCursorPos(out Point cursorPos);
-                int scanWidth = 500;
-                int scanHeight = 500;
+                int scanWidth = QrScanOverlayForm.CaptureSize;
+                int scanHeight = QrScanOverlayForm.CaptureSize;
 
                 using (Bitmap bitmap = new Bitmap(scanWidth, scanHeight))
                 {
@@ -2174,7 +2277,7 @@ namespace Steam_Desktop_Authenticator
                 
                     if (!TryGetQrClientId(result.Text, out ulong clientId))
                     {
-                        AstroMessageBox.Show("Can't get ID of QR code. Steam might have changed their QR format.", "Wrong QR code.", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        AstroMessageBox.Show("Can't get ID of QR code. Steam might have changed their QR format.", "Invalid QR Code", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
 
@@ -2768,40 +2871,80 @@ namespace Steam_Desktop_Authenticator
             OpenTradeConfirmationsFromNotification();
         }
 
+        private bool isSynchronizingAccountSelection;
+
+        private static string EscapeMenuItemText(string text)
+        {
+            return String.IsNullOrEmpty(text) ? String.Empty : text.Replace("&", "&&");
+        }
+
+        private void SelectAccount(SteamGuardAccount account)
+        {
+            if (account == null)
+                return;
+
+            currentAccount = account;
+            int idx = listAccounts.Items.IndexOf(account.AccountName);
+            if (idx >= 0 && listAccounts.SelectedIndex != idx)
+            {
+                isSynchronizingAccountSelection = true;
+                try
+                {
+                    listAccounts.SelectedIndex = idx;
+                }
+                finally
+                {
+                    isSynchronizingAccountSelection = false;
+                }
+            }
+
+            btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(account);
+            menuDeactivateAuthenticator.Enabled = IsSessionAvailableForAccountOperations(account);
+            btnCopy.Enabled = !IsPendingEnrollment(account);
+            loadAccountInfo();
+        }
+
         private void ConfigureTrayContextMenu()
         {
             trayRestore.Text = "Open Astro SDA";
-            trayRestore.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
-            trayTradeConfirmations.Text = "Trade confirmations";
-            trayCopySteamGuard.Text = "Copy Steam Guard code";
-            trayQuit.Text = "Exit Astro SDA";
+            trayRestore.Font = AstroTheme.FontButton;
+            trayTradeConfirmations.Text = "Confirmations";
+            trayCopySteamGuard.Text = "Copy Steam Guard Code";
+            trayQuit.Text = "Quit";
+            trayQuit.ForeColor = AstroTheme.Error;
 
             trayLoginActions = new ToolStripMenuItem("Login Actions");
             trayLoginActions.Click += (sender, args) => OpenLoginActionsFromTray();
-            trayAccountHeading = new ToolStripMenuItem("ACTIVE ACCOUNT")
-            {
-                Enabled = false,
-                Font = new Font("Segoe UI", 8F, FontStyle.Bold)
-            };
-            trayAccountList.AutoSize = false;
-            trayAccountList.Size = new Size(230, 24);
+
+            trayActiveAccountMenu = new ToolStripMenuItem("Active Account");
 
             menuStripTray.ShowImageMargin = false;
-            menuStripTray.Padding = new Padding(5, 5, 5, 5);
+            menuStripTray.Padding = new Padding(4, 5, 4, 5);
             menuStripTray.Items.Clear();
             menuStripTray.Items.AddRange(new ToolStripItem[]
             {
                 trayRestore,
-                trayLoginActions,
-                trayTradeConfirmations,
                 new ToolStripSeparator(),
-                trayAccountHeading,
-                trayAccountList,
+                trayActiveAccountMenu,
                 trayCopySteamGuard,
+                trayTradeConfirmations,
+                trayLoginActions,
                 new ToolStripSeparator(),
                 trayQuit
             });
             menuStripTray.Opening += trayMenuStripTray_Opening;
+        }
+
+        private void DisposeTrayActiveAccountItems()
+        {
+            if (trayActiveAccountMenu == null || trayActiveAccountMenu.DropDownItems.Count == 0)
+                return;
+
+            ToolStripItem[] existingItems = new ToolStripItem[trayActiveAccountMenu.DropDownItems.Count];
+            trayActiveAccountMenu.DropDownItems.CopyTo(existingItems, 0);
+            trayActiveAccountMenu.DropDownItems.Clear();
+            foreach (ToolStripItem existingItem in existingItems)
+                existingItem.Dispose();
         }
 
         private void trayMenuStripTray_Opening(object sender, System.ComponentModel.CancelEventArgs e)
@@ -2809,9 +2952,46 @@ namespace Steam_Desktop_Authenticator
             bool hasAccounts = allAccounts != null && allAccounts.Length > 0;
             trayLoginActions.Enabled = hasAccounts;
             trayTradeConfirmations.Enabled = hasAccounts;
-            trayAccountHeading.Enabled = hasAccounts;
-            trayAccountList.Enabled = hasAccounts;
-            trayCopySteamGuard.Enabled = hasAccounts && !String.IsNullOrWhiteSpace(txtLoginToken.Text);
+            trayActiveAccountMenu.Enabled = hasAccounts;
+            bool hasToken = hasAccounts && currentAccount != null && !IsPendingEnrollment(currentAccount);
+            trayCopySteamGuard.Enabled = hasToken;
+
+            string activeName = currentAccount?.AccountName;
+            trayActiveAccountMenu.Text = String.IsNullOrWhiteSpace(activeName)
+                ? "Active Account"
+                : "Active Account: " + EscapeMenuItemText(activeName);
+
+            DisposeTrayActiveAccountItems();
+            if (hasAccounts)
+            {
+                foreach (SteamGuardAccount account in allAccounts.OrderBy(a => a.AccountName, StringComparer.OrdinalIgnoreCase))
+                {
+                    SteamGuardAccount captured = account;
+                    bool isSelected = currentAccount != null &&
+                        ((captured.Session?.SteamID ?? 0) != 0
+                            ? captured.Session.SteamID == (currentAccount.Session?.SteamID ?? 0)
+                            : String.Equals(captured.AccountName, currentAccount.AccountName, StringComparison.Ordinal));
+                    string safeAccountLabel = EscapeMenuItemText(captured.AccountName);
+                    var item = new ToolStripMenuItem(isSelected ? "●  " + safeAccountLabel : "    " + safeAccountLabel)
+                    {
+                        Font = isSelected ? AstroTheme.FontButton : AstroTheme.FontBodyRegular9
+                    };
+                    item.Click += (s, args) => SelectAccount(captured);
+                    trayActiveAccountMenu.DropDownItems.Add(item);
+                }
+            }
+
+            trayCopySteamGuard.Text = "Copy Steam Guard Code";
+
+            int totalConfirmations = pendingTradeConfirmationCounts.Values.Sum();
+            trayTradeConfirmations.Text = totalConfirmations > 0
+                ? "Confirmations (" + totalConfirmations.ToString(CultureInfo.InvariantCulture) + ")"
+                : "Confirmations";
+
+            int totalLogins = pendingLoginRequests.Count;
+            trayLoginActions.Text = totalLogins > 0
+                ? "Login Actions (" + totalLogins.ToString(CultureInfo.InvariantCulture) + ")"
+                : "Login Actions";
         }
 
         private void trayCopySteamGuard_Click(object sender, EventArgs e)
@@ -2828,6 +3008,9 @@ namespace Steam_Desktop_Authenticator
         // Misc UI handlers
         private void listAccounts_SelectedValueChanged(object sender, EventArgs e)
         {
+            if (isSynchronizingAccountSelection)
+                return;
+
             for (int i = 0; i < allAccounts.Length; i++)
             {
                 // Check if index is out of bounds first
@@ -2837,12 +3020,7 @@ namespace Steam_Desktop_Authenticator
                 SteamGuardAccount account = allAccounts[i];
                 if (account.AccountName == (string)listAccounts.Items[listAccounts.SelectedIndex])
                 {
-                    trayAccountList.Text = account.AccountName;
-                    currentAccount = account;
-                    btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(account);
-                    menuDeactivateAuthenticator.Enabled = IsSessionAvailableForAccountOperations(account);
-                    btnCopy.Enabled = !IsPendingEnrollment(account);
-                    loadAccountInfo();
+                    SelectAccount(account);
                     break;
                 }
             }
@@ -2855,9 +3033,6 @@ namespace Steam_Desktop_Authenticator
 
             listAccounts.Items.Clear();
             listAccounts.Items.AddRange(names.ToArray());
-
-            trayAccountList.Items.Clear();
-            trayAccountList.Items.AddRange(names.ToArray());
         }
 
 
@@ -3599,7 +3774,16 @@ namespace Steam_Desktop_Authenticator
             if (IsDisposed || Disposing)
                 return;
 
-            _ = ExecuteScriptSafelyAsync("setTradePendingCount(" + Math.Max(0, count).ToString() + ");", "Trade confirmation badge");
+            _ = ExecuteScriptSafelyAsync("setTradePendingCount(" + Math.Max(0, count).ToString(CultureInfo.InvariantCulture) + ");", "Trade confirmation badge");
+
+            var perAccount = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (KeyValuePair<ulong, int> entry in pendingTradeConfirmationCounts)
+            {
+                if (entry.Key != 0 && entry.Value > 0)
+                    perAccount[entry.Key.ToString(CultureInfo.InvariantCulture)] = entry.Value;
+            }
+            string perAccountJson = JsonConvert.SerializeObject(perAccount);
+            _ = ExecuteScriptSafelyAsync($"if (typeof setAccountPendingConfirmations === 'function') setAccountPendingConfirmations({perAccountJson});", "Per-account confirmation counts");
         }
 
         private void CloseLoginNotificationPopups()
@@ -5105,9 +5289,11 @@ namespace Steam_Desktop_Authenticator
 
         private void CopyLoginToken()
         {
-            if (IsPendingEnrollment(currentAccount))
+            if (currentAccount == null || IsPendingEnrollment(currentAccount))
                 return;
-            string text = txtLoginToken.Text;
+            string text = GetDisplayLoginToken(currentAccount, steamTime, txtLoginToken.Text);
+            if (!String.IsNullOrEmpty(text))
+                txtLoginToken.Text = text;
             if (String.IsNullOrEmpty(text))
                 return;
             Clipboard.SetText(text);
@@ -5225,9 +5411,6 @@ namespace Steam_Desktop_Authenticator
             listAccounts.Items.Clear();
             listAccounts.SelectedIndex = -1;
 
-            trayAccountList.Items.Clear();
-            trayAccountList.SelectedIndex = -1;
-
             if (manifest != null && !manifest.Encrypted && !String.IsNullOrEmpty(passKey))
             {
                 passKey = null;
@@ -5264,11 +5447,9 @@ namespace Steam_Desktop_Authenticator
                 {
                     SteamGuardAccount account = allAccounts[i];
                     listAccounts.Items.Add(account.AccountName);
-                    trayAccountList.Items.Add(account.AccountName);
                 }
 
                 listAccounts.Sorted = true;
-                trayAccountList.Sorted = true;
 
                 string preferredName = previousSteamId.HasValue
                     ? allAccounts.FirstOrDefault(account => account.Session?.SteamID == previousSteamId.Value)?.AccountName
@@ -5279,7 +5460,6 @@ namespace Steam_Desktop_Authenticator
                 if (selectedIndex < 0)
                     selectedIndex = 0;
                 listAccounts.SelectedIndex = selectedIndex;
-                trayAccountList.SelectedIndex = Math.Min(selectedIndex, trayAccountList.Items.Count - 1);
             }
             bool hasAccounts = allAccounts.Length > 0;
             bool canCopyCurrentAccount = hasAccounts && !IsPendingEnrollment(currentAccount);
@@ -5313,7 +5493,88 @@ namespace Steam_Desktop_Authenticator
                 string jsonAccounts = JsonConvert.SerializeObject(accounts);
                 _ = ExecuteScriptSafelyAsync($"updateAccountList({jsonAccounts})", "Account list UI");
                 _ = ExecuteScriptSafelyAsync($"updateEncryptionState({manifest.Encrypted.ToString().ToLowerInvariant()}, {hasAccounts.ToString().ToLowerInvariant()})", "Encryption state UI");
+                PublishProxyStatusToWebView();
+                DispatchAvatarFetchesForAccounts(allAccounts);
             }
+        }
+
+        private void PublishProxyStatusToWebView()
+        {
+            if (manifest == null || GetCoreWebView2IfAvailable() == null)
+                return;
+
+            string scheme = String.Equals(manifest.ProxyScheme, "https", StringComparison.OrdinalIgnoreCase) ? "HTTPS" : "HTTP";
+            string jsScheme = JsonConvert.SerializeObject(scheme);
+            _ = ExecuteScriptSafelyAsync(
+                $"if (typeof updateProxyStatus === 'function') updateProxyStatus({manifest.ProxyEnabled.ToString().ToLowerInvariant()}, {jsScheme});",
+                "Proxy status UI");
+        }
+
+        private void DispatchAvatarFetchesForAccounts(SteamGuardAccount[] accounts)
+        {
+            if (accounts == null || accounts.Length == 0 || IsDisposed || Disposing)
+                return;
+
+            CancellationToken cancellationToken;
+            try
+            {
+                if (lifetimeCancellationSource.IsCancellationRequested)
+                    return;
+                cancellationToken = lifetimeCancellationSource.Token;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+
+            ulong[] steamIds = accounts
+                .Select(a => a?.Session?.SteamID ?? 0UL)
+                .Where(id => id != 0 && !steamAvatarService.IsCacheFresh(id))
+                .Distinct()
+                .ToArray();
+
+            if (steamIds.Length == 0)
+                return;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    foreach (ulong steamId in steamIds)
+                    {
+                        if (cancellationToken.IsCancellationRequested || IsDisposed || Disposing)
+                            return;
+
+                        string dataUrl = await steamAvatarService.GetOrFetchAvatarDataUrlAsync(steamId, cancellationToken).ConfigureAwait(false);
+                        if (String.IsNullOrEmpty(dataUrl) || cancellationToken.IsCancellationRequested || IsDisposed || Disposing)
+                            continue;
+
+                        string jsSteamId = JsonConvert.SerializeObject(steamId.ToString(CultureInfo.InvariantCulture));
+                        string jsDataUrl = JsonConvert.SerializeObject(dataUrl);
+                        TryBeginInvoke(() =>
+                        {
+                            if (!cancellationToken.IsCancellationRequested && !IsDisposed && !Disposing)
+                            {
+                                _ = ExecuteScriptSafelyAsync(
+                                    $"if (typeof updateAccountAvatar === 'function') updateAccountAvatar({jsSteamId}, {jsDataUrl});",
+                                    "Account avatar UI");
+                            }
+                        });
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Window is closing; cancellation is expected.
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Form or token source was disposed during shutdown.
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Account avatar fetch", ex, "Could not refresh Steam profile avatars.");
+                }
+            }, CancellationToken.None);
         }
 
         private object BuildWebAccountPayload(SteamGuardAccount account, IReadOnlyDictionary<ulong, SavedCredentialStatus> credentialStatuses = null)
@@ -5340,10 +5601,13 @@ namespace Steam_Desktop_Authenticator
                 (steamId != 0 && silentReloginService.IsGenerationRejectedInMemory(steamId, credStatus.CredentialGenerationId));
 
             bool pendingActivation = IsPendingEnrollment(account);
+            int pendingConfCount = steamId != 0 && pendingTradeConfirmationCounts.TryGetValue(steamId, out int countVal) ? countVal : 0;
             return new
             {
                 name = account?.AccountName,
                 steamId = steamId == 0 ? null : steamId.ToString(CultureInfo.InvariantCulture),
+                avatarUrl = steamId == 0 ? null : steamAvatarService.TryGetCachedAvatarDataUrl(steamId),
+                pendingConfirmations = pendingConfCount,
                 sessionExpired = IsSessionRenewalRequired(account),
                 needsRenewal = IsSessionRenewalRequired(account),
                 pendingActivation = pendingActivation,
@@ -5979,40 +6243,40 @@ namespace Steam_Desktop_Authenticator
 
         private async void SetupModernUI()
         {
-            this.Size = new Size(450, 750);
-            this.MinimumSize = new Size(450, 750);
-            this.MaximumSize = new Size(450, 750);
+            this.MinimumSize = new Size(600, 430);
+            this.MaximumSize = Size.Empty;
+            this.Size = new Size(DefaultModernWindowWidth, DefaultModernWindowHeight);
             this.MaximizeBox = false;
-            this.FormBorderStyle = FormBorderStyle.FixedSingle;
-            this.BackColor = Color.FromArgb(11, 19, 38); // Dark background
+            this.FormBorderStyle = FormBorderStyle.Sizable;
+            this.BackColor = AstroTheme.Background;
             this.Text = "Astro SDA";
 
             // Create loading screen
             Panel loadingPanel = new Panel();
             loadingPanel.Dock = DockStyle.Fill;
-            loadingPanel.BackColor = Color.FromArgb(11, 19, 38);
+            loadingPanel.BackColor = AstroTheme.Background;
             
             Label lblLoading = new Label();
             lblLoading.Text = "Loading Astro UI...";
-            lblLoading.ForeColor = Color.FromArgb(186, 201, 204);
+            lblLoading.ForeColor = AstroTheme.OnSurfaceVariant;
             lblLoading.AutoSize = false;
             lblLoading.Size = new Size(400, 30);
             lblLoading.TextAlign = ContentAlignment.MiddleCenter;
-            lblLoading.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
+            lblLoading.Font = AstroTheme.FontInput;
             loadingPanel.Controls.Add(lblLoading);
 
             int spinnerAngle = 0;
             loadingPanel.Paint += (s, e) => {
                 e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                int size = 44;
+                int size = 40;
                 int x = (loadingPanel.Width - size) / 2;
                 int y = (loadingPanel.Height - size) / 2 - 20;
                 
-                using (Pen bgPen = new Pen(Color.FromArgb(40, 255, 255, 255), 4))
+                using (Pen bgPen = new Pen(Color.FromArgb(32, 255, 255, 255), 3.5f))
                 {
                     e.Graphics.DrawEllipse(bgPen, x, y, size, size);
                 }
-                using (Pen fgPen = new Pen(Color.FromArgb(0, 229, 255), 4)) // Primary color
+                using (Pen fgPen = new Pen(AstroTheme.PrimaryAccent, 3.5f))
                 {
                     fgPen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
                     fgPen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
@@ -6176,6 +6440,7 @@ namespace Steam_Desktop_Authenticator
             settings["aesGcmSupported"] = EncryptedCredentialStore.IsSupported;
 
             _ = ExecuteScriptSafelyAsync($"loadSettings({settings.ToString(Newtonsoft.Json.Formatting.None)})", "Settings UI");
+            PublishProxyStatusToWebView();
         }
 
         private async Task PublishProxyTestResultAsync(ProxyTestResult result)
@@ -6896,7 +7161,7 @@ namespace Steam_Desktop_Authenticator
             {
                 DialogResult warn = AstroMessageBox.Show(
                     "Exporting a plain .maFile writes your unencrypted authenticator secrets (shared_secret, identity_secret, and revocation_code) to disk.\n\nSaved Steam passwords are never included. Continue?",
-                    "Plaintext Export Warning",
+                    "Unencrypted Backup",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Warning);
                 if (warn != DialogResult.Yes)
@@ -6970,7 +7235,7 @@ namespace Steam_Desktop_Authenticator
             {
                 DialogResult warn = AstroMessageBox.Show(
                     "Exporting an unencrypted ZIP writes plaintext authenticator secrets (shared_secret, identity_secret, and revocation_code) for all " + snapshot.Length + " account(s).\n\nSaved Steam passwords are never included. Continue?",
-                    "Plaintext Bulk Export Warning",
+                    "Unencrypted Bulk Backup",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Warning);
                 if (warn != DialogResult.Yes)
@@ -7106,6 +7371,10 @@ namespace Steam_Desktop_Authenticator
             {
                 TryBeginInvoke(() => btnLoginViaQr_Click(this, EventArgs.Empty));
             }
+            else if (action == "cancel_qr")
+            {
+                qrScanCancelRequested = true;
+            }
             else if (action == "switch_account")
             {
                 if (!TryGetWebMessageString(payload, "accountName", 256, out string accName) ||
@@ -7123,10 +7392,7 @@ namespace Steam_Desktop_Authenticator
 
                 if (selectedAccount != null)
                 {
-                    currentAccount = selectedAccount;
-                    btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(selectedAccount);
-                    menuDeactivateAuthenticator.Enabled = IsSessionAvailableForAccountOperations(selectedAccount);
-                    loadAccountInfo();
+                    SelectAccount(selectedAccount);
                 }
             }
             else if (action == "remove_account")

@@ -17,9 +17,12 @@ namespace Steam_Desktop_Authenticator
         private Button continueButton;
         private Label statusLabel;
         private Label recoveryCodeLabel;
+        private Panel recoveryCodeWell;
+        private Label recoveryCodeCaptionLabel;
         private Label recoveryCodeValueLabel;
-        private Label warningLabel;
-        private Label backupRequirementLabel;
+        private Panel warningCallout;
+        private Label warningBodyLabel;
+        private Panel footerDivider;
         private Button downloadButton;
         private bool continuationAllowed;
 
@@ -31,7 +34,8 @@ namespace Steam_Desktop_Authenticator
             this.requireBackupBeforeContinue = requireBackupBeforeContinue;
 
             Text = "Steam Guard Recovery Code";
-            MinimumSize = new Size(500, 330);
+            MinimumSize = new Size(504, 372);
+            ClientSize = new Size(504, 372);
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = false;
@@ -47,79 +51,131 @@ namespace Steam_Desktop_Authenticator
             {
                 Text = statusMessage,
                 AutoSize = true,
-                Location = new Point(20, 20),
-                MaximumSize = new Size(440, 0),
-                Font = new Font("Segoe UI", 10f),
-                ForeColor = AstroTheme.OnSurface
+                Location = new Point(22, 20),
+                MaximumSize = new Size(460, 0),
+                Font = AstroTheme.FontInputBold,
+                ForeColor = AstroTheme.OnSurface,
+                BackColor = Color.Transparent
             };
 
             recoveryCodeLabel = new Label
             {
-                Text = "Recovery code for " + account.AccountName + ":",
+                Text = "Account: " + account.AccountName,
                 AutoSize = true,
-                Location = new Point(20, 75),
-                Font = new Font("Segoe UI", 10f),
-                ForeColor = AstroTheme.OnSurfaceVariant
+                Location = new Point(22, 54),
+                Font = AstroTheme.FontBodyRegular9,
+                ForeColor = AstroTheme.OnSurfaceVariant,
+                BackColor = Color.Transparent
+            };
+
+            // Calm inset read-only display well (clearly non-editable, crisp white monospace)
+            recoveryCodeWell = new Panel
+            {
+                Location = new Point(22, 80),
+                Size = new Size(460, 74),
+                BackColor = Color.FromArgb(10, 16, 29)
+            };
+            recoveryCodeWell.Paint += (sender, e) =>
+            {
+                using (Pen borderPen = new Pen(AstroTheme.OutlineVariant, 1f))
+                {
+                    e.Graphics.DrawRectangle(borderPen, 0, 0, recoveryCodeWell.Width - 1, recoveryCodeWell.Height - 1);
+                }
+            };
+
+            recoveryCodeCaptionLabel = new Label
+            {
+                Text = "READ-ONLY REVOCATION CODE",
+                AutoSize = false,
+                Location = new Point(12, 10),
+                Size = new Size(436, 16),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = AstroTheme.FontCaptionBold,
+                ForeColor = AstroTheme.Outline,
+                BackColor = Color.Transparent
             };
 
             recoveryCodeValueLabel = new Label
             {
-                Text = account.RevocationCode,
+                Text = string.Join(" ", account.RevocationCode.Trim().ToCharArray()),
                 AutoSize = false,
-                Location = new Point(20, 101),
-                Size = new Size(440, 36),
+                Location = new Point(12, 28),
+                Size = new Size(436, 36),
                 TextAlign = ContentAlignment.MiddleCenter,
-                Font = new Font("Consolas", 16f, FontStyle.Bold),
-                BackColor = AstroTheme.SurfaceVariant,
-                ForeColor = AstroTheme.Primary
+                Font = AstroTheme.FontMonoHero,
+                ForeColor = Color.FromArgb(245, 248, 252),
+                BackColor = Color.Transparent
+            };
+            recoveryCodeWell.Controls.Add(recoveryCodeCaptionLabel);
+            recoveryCodeWell.Controls.Add(recoveryCodeValueLabel);
+
+            string calloutText = "Keep this code private. Steam may require it to recover your account or move Steam Guard to another device.\n\n" +
+                (requireBackupBeforeContinue
+                    ? "For safety, download the recovery code (.txt) to unlock Continue immediately, or wait 60 seconds."
+                    : "Store a backup in a secure offline location.");
+
+            warningCallout = new Panel
+            {
+                Location = new Point(22, 168),
+                Width = 460,
+                BackColor = AstroTheme.WarningSurface,
+                Padding = new Padding(14, 10, 12, 10)
+            };
+            Panel warningAccent = new Panel
+            {
+                BackColor = AstroTheme.Warning,
+                Dock = DockStyle.Left,
+                Width = 4
+            };
+            warningBodyLabel = new Label
+            {
+                Text = calloutText,
+                AutoSize = true,
+                MaximumSize = new Size(426, 0),
+                Font = AstroTheme.FontBodySmall,
+                ForeColor = AstroTheme.WarningSoft,
+                BackColor = Color.Transparent,
+                Location = new Point(14, 10)
+            };
+            warningCallout.Controls.Add(warningBodyLabel);
+            warningCallout.Controls.Add(warningAccent);
+            warningCallout.Paint += (sender, e) =>
+            {
+                using (Pen borderPen = new Pen(Color.FromArgb(62, 54, 42), 1f))
+                {
+                    e.Graphics.DrawRectangle(borderPen, 0, 0, warningCallout.Width - 1, warningCallout.Height - 1);
+                }
             };
 
-            warningLabel = new Label
-            {
-                Text = "Keep this code private. Steam may require it to recover your account or move Steam Guard to another device.",
-                AutoSize = true,
-                Location = new Point(20, 148),
-                MaximumSize = new Size(440, 0),
-                Font = new Font("Segoe UI", 9f),
-                ForeColor = AstroTheme.OnSurfaceVariant
-            };
-
-            backupRequirementLabel = new Label
-            {
-                Text = requireBackupBeforeContinue
-                    ? "For safety, download the recovery code to continue, or wait 60 seconds."
-                    : "Keep this code private and stored somewhere safe.",
-                AutoSize = true,
-                Location = new Point(20, 188),
-                MaximumSize = new Size(440, 0),
-                Font = new Font("Segoe UI", 9f),
-                ForeColor = AstroTheme.Primary
-            };
+            footerDivider = AstroTheme.CreateDivider(460);
 
             downloadButton = new Button
             {
-                Text = "Download recovery code",
-                Location = new Point(20, 222),
-                Size = new Size(230, 34)
+                Text = "Download Code (.txt)",
+                Location = new Point(22, 286),
+                Size = new Size(184, 34)
             };
-            AstroTheme.StylePrimaryButton(downloadButton);
+            AstroTheme.StyleOutlineAccentButton(downloadButton);
             downloadButton.Click += DownloadRecoveryCode_Click;
 
             continueButton = new Button
             {
-                Text = "Continue",
-                Location = new Point(275, 222),
-                Size = new Size(185, 34),
+                Text = requireBackupBeforeContinue ? $"Continue ({ContinueDelaySeconds}s)" : "Continue",
+                Location = new Point(312, 286),
+                Size = new Size(170, 34),
                 Enabled = !requireBackupBeforeContinue,
                 DialogResult = DialogResult.OK
             };
-            AstroTheme.StyleSecondaryButton(continueButton);
+            if (requireBackupBeforeContinue)
+                AstroTheme.StyleDisabledGlassButton(continueButton);
+            else
+                AstroTheme.StylePrimaryButton(continueButton);
 
             Controls.Add(statusLabel);
             Controls.Add(recoveryCodeLabel);
-            Controls.Add(recoveryCodeValueLabel);
-            Controls.Add(warningLabel);
-            Controls.Add(backupRequirementLabel);
+            Controls.Add(recoveryCodeWell);
+            Controls.Add(warningCallout);
+            Controls.Add(footerDivider);
             Controls.Add(downloadButton);
             Controls.Add(continueButton);
             AcceptButton = continueButton;
@@ -137,29 +193,38 @@ namespace Steam_Desktop_Authenticator
 
         private void LayoutRecoveryControls()
         {
-            int contentWidth = Math.Max(300, ClientSize.Width - 40);
+            int contentWidth = Math.Max(320, ClientSize.Width - 44);
             statusLabel.MaximumSize = new Size(contentWidth, 0);
-            warningLabel.MaximumSize = new Size(contentWidth, 0);
-            backupRequirementLabel.MaximumSize = new Size(contentWidth, 0);
+            warningBodyLabel.MaximumSize = new Size(Math.Max(260, contentWidth - 28), 0);
 
             int nextTop = 20;
-            statusLabel.Location = new Point(20, nextTop);
-            nextTop = statusLabel.Bottom + 12;
-            recoveryCodeLabel.Location = new Point(20, nextTop);
-            nextTop = recoveryCodeLabel.Bottom + 8;
-            recoveryCodeValueLabel.Location = new Point(20, nextTop);
-            recoveryCodeValueLabel.Size = new Size(contentWidth, 36);
-            nextTop = recoveryCodeValueLabel.Bottom + 11;
-            warningLabel.Location = new Point(20, nextTop);
-            nextTop = warningLabel.Bottom + 10;
-            backupRequirementLabel.Location = new Point(20, nextTop);
-            nextTop = backupRequirementLabel.Bottom + 14;
-            downloadButton.Location = new Point(20, nextTop);
-            continueButton.Location = new Point(Math.Max(20, ClientSize.Width - 20 - continueButton.Width), nextTop);
+            statusLabel.Location = new Point(22, nextTop);
+            nextTop = statusLabel.Bottom + 6;
+            recoveryCodeLabel.Location = new Point(22, nextTop);
+            nextTop = recoveryCodeLabel.Bottom + 12;
 
-            int requiredHeight = continueButton.Bottom + 50;
-            if (MinimumSize.Height < requiredHeight)
-                MinimumSize = new Size(MinimumSize.Width, requiredHeight);
+            recoveryCodeWell.Location = new Point(22, nextTop);
+            recoveryCodeWell.Size = new Size(contentWidth, 74);
+            recoveryCodeCaptionLabel.Size = new Size(Math.Max(100, contentWidth - 24), 16);
+            recoveryCodeValueLabel.Size = new Size(Math.Max(100, contentWidth - 24), 36);
+            nextTop = recoveryCodeWell.Bottom + 14;
+
+            warningCallout.Location = new Point(22, nextTop);
+            warningCallout.Width = contentWidth;
+            warningCallout.Height = warningBodyLabel.PreferredHeight + 20;
+            nextTop = warningCallout.Bottom + 16;
+
+            footerDivider.Location = new Point(22, nextTop);
+            footerDivider.Width = contentWidth;
+            nextTop = footerDivider.Bottom + 14;
+
+            downloadButton.Location = new Point(22, nextTop);
+            continueButton.Location = new Point(Math.Max(22, ClientSize.Width - 22 - continueButton.Width), nextTop);
+
+            int requiredClientHeight = continueButton.Bottom + 20;
+            int requiredFormHeight = SizeFromClientSize(new Size(ClientSize.Width, requiredClientHeight)).Height;
+            if (MinimumSize.Height < requiredFormHeight)
+                MinimumSize = new Size(MinimumSize.Width, requiredFormHeight);
         }
 
         private void DownloadRecoveryCode_Click(object sender, EventArgs e)
@@ -244,6 +309,7 @@ namespace Steam_Desktop_Authenticator
             continueTimer.Stop();
             continueButton.Text = "Continue";
             continueButton.Enabled = true;
+            AstroTheme.StylePrimaryButton(continueButton);
         }
 
         private void RecoveryCodeForm_FormClosing(object sender, FormClosingEventArgs e)
@@ -255,7 +321,15 @@ namespace Steam_Desktop_Authenticator
 
         private void RecoveryCodeForm_FormClosed(object sender, FormClosedEventArgs e)
         {
-            continueTimer.Dispose();
+            continueTimer?.Stop();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                continueTimer?.Dispose();
+
+            base.Dispose(disposing);
         }
 
         private string BuildRecoveryCodeText()

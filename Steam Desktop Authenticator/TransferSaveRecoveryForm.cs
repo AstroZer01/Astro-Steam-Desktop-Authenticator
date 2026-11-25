@@ -34,90 +34,170 @@ namespace Steam_Desktop_Authenticator
             this.stagedRecoveryPath = stagedRecoveryPath;
             this.transferAttemptId = transferAttemptId;
 
-            Text = "Authenticator Transfer - Save Recovery Required";
+            Text = "Authenticator Transfer — Save Recovery Required";
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(520, 390);
+            ClientSize = new Size(540, 444);
 
-            Label lblTitle = new Label
-            {
-                Text = "Steam replaced your old authenticator, but local save failed",
-                Font = new Font("Segoe UI", 11F, FontStyle.Bold),
-                AutoSize = false,
-                Location = new Point(20, 18),
-                Size = new Size(480, 28)
-            };
-
+            string errorDetail = String.IsNullOrWhiteSpace(initialErrorMessage)
+                ? "The transferred authenticator could not be written to maFiles."
+                : initialErrorMessage;
             string stagingNote = stagingFailed
                 ? "WARNING: Fallback recovery staging in LocalAppData also failed. Do NOT close this window until you retry local save or save an emergency backup."
                 : "A protected recovery copy was staged in LocalAppData so Astro SDA can recover it on restart, but saving now is strongly recommended.";
 
+            // Critical alert callout with 4px muted rose-crimson left bar
+            Panel alertBanner = new Panel
+            {
+                Location = new Point(22, 18),
+                Size = new Size(496, 134),
+                BackColor = AstroTheme.ErrorSurface
+            };
+            Panel alertBar = new Panel
+            {
+                BackColor = AstroTheme.ErrorAccent,
+                Dock = DockStyle.Left,
+                Width = 4
+            };
+            Label lblTitle = new Label
+            {
+                Text = "Steam replaced your old authenticator, but local save failed",
+                Font = AstroTheme.FontTitleMedium,
+                ForeColor = AstroTheme.Error,
+                BackColor = Color.Transparent,
+                AutoSize = false,
+                Location = new Point(16, 12),
+                Size = new Size(466, 24)
+            };
             Label lblBody = new Label
             {
-                Text = (String.IsNullOrWhiteSpace(initialErrorMessage) ? "The transferred authenticator could not be written to maFiles." : initialErrorMessage) +
-                    "\n\nRecovery Code: " + (replacementAccount.RevocationCode ?? "(none)") +
-                    "\n\n" + stagingNote,
+                Text = errorDetail + "\n\n" + stagingNote,
+                Font = AstroTheme.FontBodySmall,
+                ForeColor = Color.FromArgb(215, 200, 205),
+                BackColor = Color.Transparent,
                 AutoSize = false,
-                Location = new Point(20, 54),
-                Size = new Size(480, 130)
+                Location = new Point(16, 40),
+                Size = new Size(466, 84)
             };
+            alertBanner.Controls.Add(lblTitle);
+            alertBanner.Controls.Add(lblBody);
+            alertBanner.Controls.Add(alertBar);
+            alertBanner.Paint += (s, e) =>
+            {
+                using (Pen borderPen = new Pen(Color.FromArgb(95, 50, 56), 1f))
+                {
+                    e.Graphics.DrawRectangle(borderPen, 0, 0, alertBanner.Width - 1, alertBanner.Height - 1);
+                }
+            };
+
+            // Inset read-only revocation code strip
+            Panel codeWell = new Panel
+            {
+                Location = new Point(22, 166),
+                Size = new Size(496, 56),
+                BackColor = AstroTheme.SurfaceContainerLowest
+            };
+            codeWell.Paint += (s, e) =>
+            {
+                using (Pen borderPen = new Pen(AstroTheme.OutlineVariant, 1f))
+                {
+                    e.Graphics.DrawRectangle(borderPen, 0, 0, codeWell.Width - 1, codeWell.Height - 1);
+                }
+            };
+            Label lblCodeCaption = new Label
+            {
+                Text = "NEW REVOCATION CODE",
+                Font = AstroTheme.FontCaptionBold,
+                ForeColor = AstroTheme.Outline,
+                BackColor = Color.Transparent,
+                Location = new Point(14, 8),
+                AutoSize = true
+            };
+            Label lblCodeValue = new Label
+            {
+                Text = String.IsNullOrWhiteSpace(replacementAccount.RevocationCode)
+                    ? "(none)"
+                    : string.Join(" ", replacementAccount.RevocationCode.Trim().ToCharArray()),
+                Font = AstroTheme.FontMonoCode,
+                ForeColor = Color.FromArgb(245, 248, 252),
+                BackColor = Color.Transparent,
+                Location = new Point(14, 24),
+                Size = new Size(468, 26)
+            };
+            codeWell.Controls.Add(lblCodeCaption);
+            codeWell.Controls.Add(lblCodeValue);
 
             lblStatus = new Label
             {
                 Text = String.Empty,
                 AutoSize = false,
-                Location = new Point(20, 192),
-                Size = new Size(480, 44),
-                ForeColor = Color.FromArgb(255, 180, 171)
+                Location = new Point(22, 230),
+                Size = new Size(496, 36),
+                Font = AstroTheme.FontBodySmall,
+                ForeColor = AstroTheme.Error,
+                BackColor = Color.Transparent
             };
 
             Button btnRetrySave = new Button
             {
                 Text = "Retry Local Save",
-                Location = new Point(20, 246),
-                Size = new Size(480, 36)
+                Location = new Point(22, 274),
+                Size = new Size(496, 38)
             };
             btnRetrySave.Click += BtnRetrySave_Click;
 
             Button btnEmergencyZip = new Button
             {
-                Text = "Save Protected Emergency Backup (.zip)",
-                Location = new Point(20, 290),
-                Size = new Size(235, 36)
+                Text = "Emergency .zip Backup",
+                Location = new Point(22, 322),
+                Size = new Size(243, 36)
             };
             btnEmergencyZip.Click += BtnEmergencyZip_Click;
 
             Button btnPlainBackup = new Button
             {
-                Text = "Save Plain Backup (.maFile + Code)",
-                Location = new Point(265, 290),
-                Size = new Size(235, 36)
+                Text = "Plain .maFile + Code",
+                Location = new Point(275, 322),
+                Size = new Size(243, 36)
             };
             btnPlainBackup.Click += BtnPlainBackup_Click;
 
+            Panel footerDivider = AstroTheme.CreateDivider(496);
+            footerDivider.Location = new Point(22, 374);
+
             Button btnClose = new Button
             {
-                Text = "Close",
-                Location = new Point(380, 338),
-                Size = new Size(120, 32)
+                Text = "Close Without Saving",
+                Location = new Point(358, 390),
+                Size = new Size(160, 34)
             };
             btnClose.Click += (s, e) => Close();
 
-            Controls.Add(lblTitle);
-            Controls.Add(lblBody);
+            Controls.Add(alertBanner);
+            Controls.Add(codeWell);
             Controls.Add(lblStatus);
             Controls.Add(btnRetrySave);
             Controls.Add(btnEmergencyZip);
             Controls.Add(btnPlainBackup);
+            Controls.Add(footerDivider);
             Controls.Add(btnClose);
 
             AstroTheme.ApplyTheme(this);
+            alertBanner.BackColor = AstroTheme.ErrorSurface;
+            alertBar.BackColor = AstroTheme.ErrorAccent;
+            lblTitle.ForeColor = AstroTheme.Error;
+            lblBody.ForeColor = Color.FromArgb(215, 200, 205);
+            codeWell.BackColor = AstroTheme.SurfaceContainerLowest;
+            lblCodeCaption.ForeColor = AstroTheme.Outline;
+            lblCodeValue.ForeColor = Color.FromArgb(245, 248, 252);
+            lblStatus.ForeColor = AstroTheme.Error;
             AstroTheme.StylePrimaryButton(btnRetrySave);
             AstroTheme.StyleSurfaceButton(btnEmergencyZip);
             AstroTheme.StyleSurfaceButton(btnPlainBackup);
-            AstroTheme.StyleSurfaceButton(btnClose);
+            AstroTheme.StyleDenyButton(btnClose);
+            AcceptButton = btnRetrySave;
         }
 
         private void BtnRetrySave_Click(object sender, EventArgs e)
@@ -169,13 +249,13 @@ namespace Steam_Desktop_Authenticator
                 {
                     AccountExportService.ExportEncryptedZip(new[] { replacementAccount }, sfd.FileName, exportPassKey, includeSession: true);
                     savedOrBackedUp = true;
-                    lblStatus.ForeColor = Color.FromArgb(78, 222, 163);
+                    lblStatus.ForeColor = AstroTheme.Secondary;
                     lblStatus.Text = "Encrypted emergency backup saved. You can import its .maFile + manifest.json after extracting.";
                 }
                 catch (Exception ex)
                 {
                     DiagnosticErrorLogger.Log("Transfer emergency backup", ex, "Could not save encrypted emergency backup.");
-                    lblStatus.ForeColor = Color.FromArgb(255, 180, 171);
+                    lblStatus.ForeColor = AstroTheme.Error;
                     lblStatus.Text = ex.Message;
                 }
             }
@@ -242,13 +322,13 @@ namespace Steam_Desktop_Authenticator
                         }
                     }
                     savedOrBackedUp = true;
-                    lblStatus.ForeColor = Color.FromArgb(78, 222, 163);
+                    lblStatus.ForeColor = AstroTheme.Secondary;
                     lblStatus.Text = "Plain .maFile and recovery code saved.";
                 }
                 catch (Exception ex)
                 {
                     DiagnosticErrorLogger.Log("Transfer emergency backup", ex, "Could not save plain emergency backup.");
-                    lblStatus.ForeColor = Color.FromArgb(255, 180, 171);
+                    lblStatus.ForeColor = AstroTheme.Error;
                     lblStatus.Text = ex.Message;
                 }
             }
