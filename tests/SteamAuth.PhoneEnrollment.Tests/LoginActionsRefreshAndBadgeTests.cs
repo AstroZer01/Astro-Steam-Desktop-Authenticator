@@ -702,6 +702,50 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
+        [Fact]
+        public async Task MonitorLoginActionsAsync_NotifiesManualApprovalWhenRateLimitedTokenRefreshFollowsSwitchToManual()
+        {
+            var transport = new StubLoginTransport();
+            SteamGuardAccount account = CreateAccount(76561198000016001UL, "acct_rl_manual_notice", transport);
+            transport.SetPendingRequest(account.Session.AccessToken, 20001UL, CreateSessionInfo("Desktop PC", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory));
+            transport.ActionResultOverride = 21; // Unauthorized -> triggers GenerateAccessTokenForApp retry
+            transport.TokenRefreshResultOverride = 84; // RateLimited during token refresh
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.LoginActionMonitoringEnabled = true;
+            manifest.LoginActionMode = LoginActionModes.Deny;
+
+            transport.OnTokenRefreshAsync = () =>
+            {
+                // User switches to Manual while the unauthorized retry's token refresh is rate limited.
+                manifest.LoginActionMode = LoginActionModes.Manual;
+                return Task.CompletedTask;
+            };
+
+            var notifications = new List<string>();
+            var service = new LoginApprovalService(_ => true, transport);
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                loginApprovalService: service,
+                notifyLoginAction: (title, message, icon) => notifications.Add(title + "|" + message),
+                initialAccounts: new[] { account }))
+            {
+                await form.MonitorLoginActionsAsync();
+
+                Assert.Single(transport.ActionDecisions);
+                Assert.Equal(1, transport.TokenRefreshCount);
+                string notice = Assert.Single(notifications);
+                Assert.StartsWith("Steam login approval needed|", notice, StringComparison.Ordinal);
+
+                // Global rate limit remains active so an immediate follow-up monitor pass makes no extra requests.
+                await form.MonitorLoginActionsAsync();
+                Assert.Equal(1, transport.SessionListFetchCount);
+            }
+        }
+
         private static void ClearLoginMonitorSchedules(MainForm form)
         {
             var lockField = typeof(MainForm).GetField("sessionStateLock", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
@@ -784,6 +828,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             public Func<string, int, CancellationToken, Task> OnSessionListFetchAsync { get; set; }
             public Func<Task> OnTokenRefreshAsync { get; set; }
             public int ActionResultOverride { get; set; } = 1;
+            public int TokenRefreshResultOverride { get; set; } = 1;
             public List<(ulong ClientId, bool Confirm)> ActionDecisions { get; } = new List<(ulong, bool)>();
             public int SessionListFetchCount => Volatile.Read(ref totalSessionListFetches);
             public int TokenRefreshCount => Volatile.Read(ref tokenRefreshCount);
@@ -856,11 +901,13 @@ namespace SteamAuth.PhoneEnrollment.Tests
                         await OnTokenRefreshAsync();
                     return new SteamProtocolResponse<TResponse>
                     {
-                        Result = 1,
-                        Body = new CAuthentication_AccessToken_GenerateForApp_Response
-                        {
-                            AccessToken = CreateUnexpiredToken(999999UL)
-                        } as TResponse
+                        Result = TokenRefreshResultOverride,
+                        Body = TokenRefreshResultOverride == 1
+                            ? new CAuthentication_AccessToken_GenerateForApp_Response
+                            {
+                                AccessToken = CreateUnexpiredToken(999999UL)
+                            } as TResponse
+                            : null
                     };
                 }
 

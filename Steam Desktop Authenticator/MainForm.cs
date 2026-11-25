@@ -2153,40 +2153,34 @@ namespace Steam_Desktop_Authenticator
                 if (completedAutomatedLoginActions.Contains(actionKey))
                     continue;
 
+                bool IsAutomaticDecisionStillCurrent()
+                {
+                    return TryEvaluateAutomaticLoginDecision(
+                        request,
+                        scanContext,
+                        out string liveActionMode,
+                        out LoginApprovalDecision liveDecision,
+                        out bool liveAllowWhitelistedIp) &&
+                        String.Equals(liveActionMode, currentActionMode, StringComparison.Ordinal) &&
+                        liveDecision == decision &&
+                        liveAllowWhitelistedIp == allowWhitelistedIp;
+                }
+
                 LoginApprovalActionResult actionResult;
                 try
                 {
                     actionResult = await RunAvailableSteamAccountOperationAsync(account,
                         () =>
                         {
-                            if (!TryEvaluateAutomaticLoginDecision(
-                                request,
-                                scanContext,
-                                out string lockedActionMode,
-                                out LoginApprovalDecision lockedDecision,
-                                out bool lockedAllowWhitelistedIp) ||
-                                !String.Equals(lockedActionMode, currentActionMode, StringComparison.Ordinal) ||
-                                lockedDecision != decision ||
-                                lockedAllowWhitelistedIp != allowWhitelistedIp)
-                            {
+                            if (!IsAutomaticDecisionStillCurrent())
                                 return Task.FromResult(new LoginApprovalActionResult { Succeeded = false, Skipped = true });
-                            }
 
                             return loginApprovalService.RespondAsync(
                                 account,
                                 request,
-                                lockedDecision,
+                                decision,
                                 cancellationToken,
-                                shouldSubmitDecision: () =>
-                                    TryEvaluateAutomaticLoginDecision(
-                                        request,
-                                        scanContext,
-                                        out string liveActionMode,
-                                        out LoginApprovalDecision liveDecision,
-                                        out bool liveAllowWhitelistedIp) &&
-                                    String.Equals(liveActionMode, lockedActionMode, StringComparison.Ordinal) &&
-                                    liveDecision == lockedDecision &&
-                                    liveAllowWhitelistedIp == lockedAllowWhitelistedIp);
+                                shouldSubmitDecision: IsAutomaticDecisionStillCurrent);
                         },
                         cancellationToken,
                         response =>
@@ -2214,6 +2208,7 @@ namespace Steam_Desktop_Authenticator
                         isBackgroundMonitor ? "Login action monitor" : "Login action refresh",
                         new InvalidOperationException(actionResult.ErrorMessage),
                         "Steam rate limited an automatic login action.");
+                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
                     return LoginAccountScanOutcome.RateLimited;
                 }
                 if (actionResult.ErrorKind == LoginApprovalErrorKind.SessionExpired || actionResult.ErrorKind == LoginApprovalErrorKind.Unauthorized)
@@ -2235,15 +2230,7 @@ namespace Steam_Desktop_Authenticator
                 }
                 else
                 {
-                    if (!TryEvaluateAutomaticLoginDecision(
-                        request,
-                        scanContext,
-                        out string postFailureMode,
-                        out LoginApprovalDecision postFailureDecision,
-                        out bool postFailureAllowWhitelistedIp) ||
-                        !String.Equals(postFailureMode, currentActionMode, StringComparison.Ordinal) ||
-                        postFailureDecision != decision ||
-                        postFailureAllowWhitelistedIp != allowWhitelistedIp)
+                    if (!IsAutomaticDecisionStillCurrent())
                     {
                         NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
                         continue;
