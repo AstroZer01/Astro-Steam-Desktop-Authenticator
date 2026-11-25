@@ -1582,8 +1582,11 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 //    - ReadTextWithLimit rejects null/empty canonical directory and mismatched opened handles.
                 string nestedRealDirInTarget = Path.Combine(realTargetDir, "nested");
                 Directory.CreateDirectory(nestedRealDirInTarget);
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.ValidateDirectoryAndGetRoot(directMaFilesJunction + Path.DirectorySeparatorChar));
                 Assert.Throws<InvalidDataException>(() => StoragePathGuard.GetValidatedCanonicalDirectoryPath(directMaFilesJunction));
                 Assert.Throws<InvalidDataException>(() => StoragePathGuard.GetValidatedCanonicalDirectoryPath(directMaFilesJunction + Path.DirectorySeparatorChar));
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.CreateAndPinDirectory(Path.Combine(linkedDataDir, "nested-create", "maFiles")));
+                Assert.False(Directory.Exists(Path.Combine(realTargetDir, "nested-create")));
                 Assert.Throws<InvalidDataException>(() => StoragePathGuard.ValidateDirectoryAndGetRoot(danglingJunction));
                 Assert.Throws<InvalidDataException>(() => StoragePathGuard.GetValidatedCanonicalDirectoryPath(danglingJunction));
                 Assert.Throws<InvalidDataException>(() => StoragePathGuard.GetValidatedCanonicalDirectoryPath(Path.Combine(linkedDataDir, "nested")));
@@ -1774,6 +1777,69 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void PathValidation_CreateAndPinDirectoryPinsCreatedHierarchy()
+        {
+            string nestedTarget = Path.Combine(dataDirectory, "create-pin-parent", "child", "maFiles");
+            string renamedTarget = Path.Combine(dataDirectory, "create-pin-parent", "child", "maFiles-moved");
+            Assert.False(Directory.Exists(nestedTarget));
+
+            using (StoragePathGuard.PinnedStorageDirectory pinned = StoragePathGuard.CreateAndPinDirectory(nestedTarget))
+            {
+                Assert.True(Directory.Exists(nestedTarget));
+                pinned.VerifyStillPinned();
+                Assert.ThrowsAny<IOException>(() => Directory.Move(nestedTarget, renamedTarget));
+                Assert.ThrowsAny<IOException>(() => Directory.Delete(nestedTarget, false));
+            }
+
+            Directory.Move(nestedTarget, renamedTarget);
+            Assert.True(Directory.Exists(renamedTarget));
+        }
+
+        [Fact]
+        public void GetAllAccounts_RetriesWhenConcurrentSaveRetiresSnapshottedFilename()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount first = CreateAccount(76561198000005001UL);
+            SteamGuardAccount second = CreateAccount(76561198000005002UL);
+            Assert.True(manifest.SaveAccount(first, false).Succeeded);
+            Assert.True(manifest.SaveAccount(second, false).Succeeded);
+
+            // Rename first entry to a GUID filename so a concurrent NormalizeAccountFilenames
+            // retires the snapshotted GUID filename and deletes it from disk before the reader opens it.
+            string maDir = Path.Combine(dataDirectory, "maFiles");
+            string oldFilename = manifest.Entries[0].Filename;
+            string guidFilename = first.Session.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
+            File.Move(Path.Combine(maDir, oldFilename), Path.Combine(maDir, guidFilename));
+            manifest.Entries[0].Filename = guidFilename;
+            Assert.True(manifest.Save());
+
+            bool simulatedConcurrentMutation = false;
+            manifest.OnBeforeGetAllAccountsFileReadForTest = () =>
+            {
+                if (simulatedConcurrentMutation)
+                    return;
+                simulatedConcurrentMutation = true;
+
+                // Retires guidFilename and commits canonical filename on disk while GetAllAccounts holds the old snapshot.
+                Assert.True(manifest.NormalizeAccountFilenames().Succeeded);
+                Assert.False(File.Exists(Path.Combine(maDir, guidFilename)));
+            };
+
+            try
+            {
+                SteamGuardAccount[] loaded = manifest.GetAllAccounts();
+                Assert.True(simulatedConcurrentMutation);
+                Assert.Equal(2, loaded.Length);
+                Assert.Contains(loaded, account => account.Session.SteamID == first.Session.SteamID);
+                Assert.Contains(loaded, account => account.Session.SteamID == second.Session.SteamID);
+            }
+            finally
+            {
+                manifest.OnBeforeGetAllAccountsFileReadForTest = null;
+            }
+        }
+
+        [Fact]
         public void VerifyPasskey_DoesNotOverwriteRotatedPasskeyProofWithStaleKey()
         {
             Manifest manifest = Manifest.GenerateNewManifest(false);
@@ -1781,13 +1847,28 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(manifest.SaveAccount(account, false).Succeeded);
             Assert.True(manifest.ChangeEncryptionKey(null, "old-passkey").Succeeded);
 
-            // Rotate key, then confirm VerifyPasskey with old key returns false and does not
-            // corrupt the cached passkey proof for subsequent encrypted writes.
-            Assert.True(manifest.ChangeEncryptionKey("old-passkey", "new-passkey").Succeeded);
-            Assert.False(manifest.VerifyPasskey("old-passkey"));
-            Assert.True(manifest.VerifyPasskey("new-passkey"));
+            // Deterministically rotate the encryption key AFTER VerifyPasskey("old-passkey") finishes reading
+            // with the old key and BEFORE it acquires storageLock to publish verifiedPasskeyProof.
+            bool rotatedMidVerification = false;
+            manifest.OnBeforeVerifyPasskeyProofPublishForTest = () =>
+            {
+                if (rotatedMidVerification)
+                    return;
+                rotatedMidVerification = true;
+                Assert.True(manifest.ChangeEncryptionKey("old-passkey", "new-passkey").Succeeded);
+            };
 
-            // Attempting an encrypted write with the retired passkey must fail closed.
+            try
+            {
+                Assert.False(manifest.VerifyPasskey("old-passkey"));
+                Assert.True(rotatedMidVerification);
+            }
+            finally
+            {
+                manifest.OnBeforeVerifyPasskeyProofPublishForTest = null;
+            }
+
+            // Attempting an encrypted write with the retired passkey must fail closed (proof was not overwritten).
             StorageResult staleWrite = manifest.SaveAccount(CreateAccount(76561198000006002UL), true, "old-passkey");
             Assert.False(staleWrite.Succeeded);
 

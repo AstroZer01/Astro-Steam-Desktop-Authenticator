@@ -475,25 +475,70 @@ namespace Steam_Desktop_Authenticator
             return newPassKey;
         }
 
+        internal Action OnBeforeVerifyPasskeyProofPublishForTest { get; set; }
+        internal Action OnBeforeGetAllAccountsFileReadForTest { get; set; }
+
         public SteamAuth.SteamGuardAccount[] GetAllAccounts(string passKey = null, int limit = -1)
         {
             if (limit < -1)
                 throw new ArgumentOutOfRangeException(nameof(limit));
 
-            ManifestEntry[] entriesSnapshot;
-            bool isEncrypted;
-            string credentialsStoreFilenameSnapshot;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                ManifestEntry[] entriesSnapshot;
+                bool isEncrypted;
+                string credentialsStoreFilenameSnapshot;
+                long revisionBefore;
+                lock (storageLock)
+                {
+                    isEncrypted = this.Encrypted;
+                    if (limit == 0 || (passKey == null && isEncrypted))
+                        return Array.Empty<SteamGuardAccount>();
+                    if (this.Entries == null)
+                        throw new InvalidDataException("The account manifest contains an invalid entries list.");
+                    entriesSnapshot = this.Entries.ToArray();
+                    credentialsStoreFilenameSnapshot = this.CredentialsStoreFilename;
+                    revisionBefore = this.storageRevision;
+                }
+
+                SteamAuth.SteamGuardAccount[] accounts = ReadAccountsFromSnapshot(
+                    entriesSnapshot,
+                    isEncrypted,
+                    credentialsStoreFilenameSnapshot,
+                    passKey,
+                    limit);
+
+                lock (storageLock)
+                {
+                    if (this.storageRevision == revisionBefore)
+                        return accounts;
+                }
+            }
+
+            // Under sustained concurrent writes, hold storageLock for one consistent read.
             lock (storageLock)
             {
-                isEncrypted = this.Encrypted;
-                if (limit == 0 || (passKey == null && isEncrypted))
+                if (limit == 0 || (passKey == null && this.Encrypted))
                     return Array.Empty<SteamGuardAccount>();
                 if (this.Entries == null)
                     throw new InvalidDataException("The account manifest contains an invalid entries list.");
-                entriesSnapshot = this.Entries.ToArray();
-                credentialsStoreFilenameSnapshot = this.CredentialsStoreFilename;
-            }
 
+                return ReadAccountsFromSnapshot(
+                    this.Entries.ToArray(),
+                    this.Encrypted,
+                    this.CredentialsStoreFilename,
+                    passKey,
+                    limit);
+            }
+        }
+
+        private SteamAuth.SteamGuardAccount[] ReadAccountsFromSnapshot(
+            ManifestEntry[] entriesSnapshot,
+            bool isEncrypted,
+            string credentialsStoreFilenameSnapshot,
+            string passKey,
+            int limit)
+        {
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
             string validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
             string[] entryPaths = ValidateAndResolveManifestEntries(
@@ -505,6 +550,7 @@ namespace Steam_Desktop_Authenticator
                 return Array.Empty<SteamGuardAccount>();
 
             string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
+            OnBeforeGetAllAccountsFileReadForTest?.Invoke();
 
             List<SteamAuth.SteamGuardAccount> accounts = new List<SteamAuth.SteamGuardAccount>();
             for (int i = 0; i < entriesSnapshot.Length; i++)
@@ -701,7 +747,7 @@ namespace Steam_Desktop_Authenticator
                 if (!Directory.Exists(maDir))
                     return candidates;
 
-                ValidateStorageDirectory(maDir);
+                StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
                 string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
                 HashSet<string> managedFilenames = new HashSet<string>(
                     Entries.Select(entry => entry.Filename), StringComparer.OrdinalIgnoreCase);
@@ -1145,6 +1191,8 @@ namespace Steam_Desktop_Authenticator
                     var accounts = this.GetAllAccounts(passkey);
                     bool valid = accounts != null && accounts.Length == expectedEntryCount;
 
+                    OnBeforeVerifyPasskeyProofPublishForTest?.Invoke();
+
                     lock (storageLock)
                     {
                         if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
@@ -1506,8 +1554,7 @@ namespace Steam_Desktop_Authenticator
                     }
                     else
                     {
-                        Directory.CreateDirectory(maDir);
-                        pinnedDir = StoragePathGuard.PinExistingDirectory(maDir);
+                        pinnedDir = StoragePathGuard.CreateAndPinDirectory(maDir);
                     }
 
                     string backupFilename = Path.Combine(maDir, SettingsBackupFilename);
@@ -1526,6 +1573,7 @@ namespace Steam_Desktop_Authenticator
                                 "The settings were saved, but a previous account-data cleanup could not be completed safely. Restart the application and try again.");
                         }
                     }
+                    pinnedDir.VerifyStillPinned();
                     DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
                     SweepOrphanedCredentialStoresLocked(maDir, this.CredentialsStoreFilename);
                     return StorageResult.Success();
@@ -1791,8 +1839,7 @@ namespace Steam_Desktop_Authenticator
 
                     if (pinnedDir == null)
                     {
-                        Directory.CreateDirectory(maDir);
-                        pinnedDir = StoragePathGuard.PinExistingDirectory(maDir);
+                        pinnedDir = StoragePathGuard.CreateAndPinDirectory(maDir);
                     }
 
                     StorageTransactionJournal journal = new StorageTransactionJournal()
@@ -1817,6 +1864,7 @@ namespace Steam_Desktop_Authenticator
                     WriteAllTextAtomically(manifestFilename, manifestContents, backupFilename);
                     manifestCommitted = true;
 
+                    pinnedDir.VerifyStillPinned();
                     bool backupDeleted = DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
                     bool obsoleteDeleted = backupDeleted &&
                         DeleteFilesBestEffort(
@@ -2309,11 +2357,6 @@ namespace Steam_Desktop_Authenticator
                 throw new InvalidDataException("The account manifest credential store path escapes the data directory.");
 
             return candidate;
-        }
-
-        private static void ValidateStorageDirectory(string directoryPath)
-        {
-            StoragePathGuard.ValidateDirectoryAndGetRoot(directoryPath);
         }
 
         private static void ValidateManifestState(

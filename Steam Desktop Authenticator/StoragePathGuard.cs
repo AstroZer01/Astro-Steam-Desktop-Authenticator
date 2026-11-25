@@ -130,7 +130,7 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrWhiteSpace(directoryPath))
                 throw new InvalidDataException("The account-data directory path is invalid.");
 
-            string fullPath = Path.GetFullPath(directoryPath);
+            string fullPath = StripNonRootTrailingSeparators(Path.GetFullPath(directoryPath));
             DirectoryInfo current = new DirectoryInfo(fullPath);
             while (current != null)
             {
@@ -191,6 +191,67 @@ namespace Steam_Desktop_Authenticator
         {
             string validatedRoot = ValidateDirectoryAndGetRoot(directoryPath);
             return PinExistingDirectoryCore(directoryPath, validatedRoot);
+        }
+
+        internal static PinnedStorageDirectory CreateAndPinDirectory(string directoryPath)
+        {
+            string validatedRoot = ValidateDirectoryAndGetRoot(directoryPath);
+            string normalizedTarget = StripNonRootTrailingSeparators(Path.GetFullPath(directoryPath));
+
+            // Walk upward to find the nearest existing ancestor directory and collect missing segments.
+            var missingSegments = new System.Collections.Generic.Stack<string>();
+            string existingAncestor = normalizedTarget;
+            while (!Directory.Exists(existingAncestor))
+            {
+                string parent = Path.GetDirectoryName(existingAncestor);
+                if (String.IsNullOrWhiteSpace(parent) ||
+                    String.Equals(parent, existingAncestor, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException("The account-data directory parent does not exist.");
+                }
+
+                string segment = Path.GetFileName(existingAncestor);
+                if (String.IsNullOrWhiteSpace(segment))
+                    throw new InvalidDataException("The account-data directory path is invalid.");
+
+                missingSegments.Push(segment);
+                existingAncestor = StripNonRootTrailingSeparators(parent);
+            }
+
+            // Pin the nearest existing ancestor first, then create and pin each missing segment
+            // step by step so no ancestor can be replaced with a junction during creation.
+            PinnedStorageDirectory currentPin = PinExistingDirectoryCore(
+                existingAncestor,
+                existingAncestor.TrimEnd(DirectorySeparators) + Path.DirectorySeparatorChar);
+            try
+            {
+                string currentPath = existingAncestor;
+                while (missingSegments.Count > 0)
+                {
+                    currentPin.VerifyStillPinned();
+                    string nextPath = Path.Combine(currentPath, missingSegments.Pop());
+                    Directory.CreateDirectory(nextPath);
+                    string nextRoot = nextPath.TrimEnd(DirectorySeparators) + Path.DirectorySeparatorChar;
+                    PinnedStorageDirectory nextPin = PinExistingDirectoryCore(nextPath, nextRoot);
+                    currentPin.Dispose();
+                    currentPin = nextPin;
+                    currentPath = nextPath;
+                }
+
+                // Ensure the final returned pin exposes the validated root for directoryPath.
+                if (!String.Equals(currentPin.ValidatedRoot, validatedRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    currentPin.Dispose();
+                    return PinExistingDirectoryCore(normalizedTarget, validatedRoot);
+                }
+
+                return currentPin;
+            }
+            catch
+            {
+                currentPin.Dispose();
+                throw;
+            }
         }
 
         private static PinnedStorageDirectory PinExistingDirectoryCore(string directoryPath, string validatedRoot)
