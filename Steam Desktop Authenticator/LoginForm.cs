@@ -139,58 +139,66 @@ namespace Steam_Desktop_Authenticator
             TimeSpan? deadline = null,
             int maxMismatchSubmissions = 3,
             Func<TimeSpan, CancellationToken, Task> delayAsync = null,
-            TimeSpan? postAcceptancePollDeadline = null)
+            Func<TimeSpan, CancellationToken, CancellationTokenSource> createTimeoutCts = null)
         {
             if (generateDeviceCodeAsync == null || submitDeviceCodeAsync == null || pollAuthSessionStatusAsync == null)
                 return new LegacyDeviceCodeLoginResult(null, false);
 
             int effectiveMaxMismatchSubmissions = Math.Max(1, maxMismatchSubmissions);
             bool hasExplicitOverallDeadline = deadline.HasValue && deadline.Value > TimeSpan.Zero;
-            TimeSpan effectiveOverallDeadline = hasExplicitOverallDeadline
+            DateTime explicitOverallDeadlineUtc = hasExplicitOverallDeadline
+                ? DateTime.UtcNow.Add(deadline.Value)
+                : DateTime.MaxValue;
+            TimeSpan effectiveSubmissionDeadline = hasExplicitOverallDeadline
                 ? deadline.Value
                 : TimeSpan.FromSeconds(Math.Max(30, 35 * effectiveMaxMismatchSubmissions));
-            TimeSpan effectivePollDeadline = postAcceptancePollDeadline.HasValue && postAcceptancePollDeadline.Value > TimeSpan.Zero
-                ? postAcceptancePollDeadline.Value
-                : (hasExplicitOverallDeadline ? deadline.Value : TimeSpan.FromSeconds(30));
             TimeSpan effectiveInterval = pollingInterval > TimeSpan.Zero
                 ? pollingInterval
                 : TimeSpan.FromSeconds(1);
             Func<TimeSpan, CancellationToken, Task> effectiveDelayAsync = delayAsync ?? ((delay, ct) => Task.Delay(delay, ct));
+            Func<TimeSpan, CancellationToken, CancellationTokenSource> effectiveCreateTimeoutCts = createTimeoutCts ??
+                ((duration, parentToken) =>
+                {
+                    CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(parentToken);
+                    cts.CancelAfter(duration);
+                    return cts;
+                });
 
-            using (CancellationTokenSource deadlineCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            bool deviceCodeAffirmativelyAccepted = false;
+
+            // Phase 1: submit/retry the local Steam Guard code, bounded strictly to the submission CTS.
+            using (CancellationTokenSource submissionCts = effectiveCreateTimeoutCts(effectiveSubmissionDeadline, cancellationToken))
             {
-                deadlineCts.CancelAfter(effectiveOverallDeadline);
-                CancellationToken effectiveToken = deadlineCts.Token;
+                CancellationToken submissionToken = submissionCts.Token;
 
                 try
                 {
-                    bool deviceCodeAffirmativelyAccepted = false;
                     bool readyToPoll = false;
                     int mismatchCount = 0;
                     string lastSubmittedCode = null;
 
                     while (!readyToPoll)
                     {
-                        effectiveToken.ThrowIfCancellationRequested();
-                        string code = await generateDeviceCodeAsync(effectiveToken);
+                        submissionToken.ThrowIfCancellationRequested();
+                        string code = await generateDeviceCodeAsync(submissionToken);
                         if (String.IsNullOrWhiteSpace(code))
                             return new LegacyDeviceCodeLoginResult(null, false);
 
                         if (lastSubmittedCode != null && String.Equals(code, lastSubmittedCode, StringComparison.Ordinal))
                         {
-                            AuthPollResult racedPoll = await pollAuthSessionStatusAsync(effectiveToken);
+                            AuthPollResult racedPoll = await pollAuthSessionStatusAsync(submissionToken);
                             if (racedPoll != null)
                             {
                                 cancellationToken.ThrowIfCancellationRequested();
                                 return new LegacyDeviceCodeLoginResult(racedPoll, deviceCodeAffirmativelyAccepted: false);
                             }
 
-                            await effectiveDelayAsync(effectiveInterval, effectiveToken);
+                            await effectiveDelayAsync(effectiveInterval, submissionToken);
                             continue;
                         }
 
                         lastSubmittedCode = code;
-                        EResult submitResult = await submitDeviceCodeAsync(code, effectiveToken);
+                        EResult submitResult = await submitDeviceCodeAsync(code, submissionToken);
 
                         if (submitResult == EResult.OK)
                         {
@@ -212,7 +220,7 @@ namespace Steam_Desktop_Authenticator
                         if (submitResult == EResult.TwoFactorCodeMismatch)
                         {
                             mismatchCount++;
-                            AuthPollResult racedPoll = await pollAuthSessionStatusAsync(effectiveToken);
+                            AuthPollResult racedPoll = await pollAuthSessionStatusAsync(submissionToken);
                             if (racedPoll != null)
                             {
                                 cancellationToken.ThrowIfCancellationRequested();
@@ -222,7 +230,7 @@ namespace Steam_Desktop_Authenticator
                             if (mismatchCount >= effectiveMaxMismatchSubmissions)
                                 throw new AuthenticationException("Steam rejected the generated Steam Guard code.", EResult.TwoFactorCodeMismatch);
 
-                            await effectiveDelayAsync(effectiveInterval, effectiveToken);
+                            await effectiveDelayAsync(effectiveInterval, submissionToken);
                             continue;
                         }
 
@@ -236,40 +244,47 @@ namespace Steam_Desktop_Authenticator
                         // Fall back to standard SteamKit polling without marking local device-code proof.
                         return new LegacyDeviceCodeLoginResult(null, deviceCodeAffirmativelyAccepted: false);
                     }
+                }
+                catch (OperationCanceledException) when (submissionCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException("Steam did not finalize authentication before the deadline.");
+                }
+            }
 
-                    // When no explicit overall deadline was passed, give post-acceptance polling its full
-                    // 30-second budget (linked only to caller cancellation) so prior TOTP rollover waits
-                    // never starve polling after Steam has already accepted the code.
-                    CancellationToken pollParentToken = hasExplicitOverallDeadline && !postAcceptancePollDeadline.HasValue
-                        ? effectiveToken
-                        : cancellationToken;
-                    using (CancellationTokenSource pollDeadlineCts = CancellationTokenSource.CreateLinkedTokenSource(pollParentToken))
+            // Phase 2: poll for tokens with an independent 30-second budget on the default production path
+            // (or the remaining explicit overall deadline when a caller supplied one).
+            TimeSpan effectivePollDeadline;
+            if (hasExplicitOverallDeadline)
+            {
+                effectivePollDeadline = explicitOverallDeadlineUtc - DateTime.UtcNow;
+                if (effectivePollDeadline <= TimeSpan.Zero)
+                    throw new TimeoutException("Steam did not finalize authentication before the deadline.");
+            }
+            else
+            {
+                effectivePollDeadline = TimeSpan.FromSeconds(30);
+            }
+
+            using (CancellationTokenSource pollDeadlineCts = effectiveCreateTimeoutCts(effectivePollDeadline, cancellationToken))
+            {
+                CancellationToken pollToken = pollDeadlineCts.Token;
+
+                try
+                {
+                    while (true)
                     {
-                        pollDeadlineCts.CancelAfter(effectivePollDeadline);
-                        CancellationToken pollToken = pollDeadlineCts.Token;
-
-                        try
+                        pollToken.ThrowIfCancellationRequested();
+                        AuthPollResult pollResult = await pollAuthSessionStatusAsync(pollToken);
+                        if (pollResult != null)
                         {
-                            while (true)
-                            {
-                                pollToken.ThrowIfCancellationRequested();
-                                AuthPollResult pollResult = await pollAuthSessionStatusAsync(pollToken);
-                                if (pollResult != null)
-                                {
-                                    cancellationToken.ThrowIfCancellationRequested();
-                                    return new LegacyDeviceCodeLoginResult(pollResult, deviceCodeAffirmativelyAccepted);
-                                }
+                            cancellationToken.ThrowIfCancellationRequested();
+                            return new LegacyDeviceCodeLoginResult(pollResult, deviceCodeAffirmativelyAccepted);
+                        }
 
-                                await effectiveDelayAsync(effectiveInterval, pollToken);
-                            }
-                        }
-                        catch (OperationCanceledException) when (pollDeadlineCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-                        {
-                            throw new TimeoutException("Steam did not finalize authentication before the deadline.");
-                        }
+                        await effectiveDelayAsync(effectiveInterval, pollToken);
                     }
                 }
-                catch (OperationCanceledException) when (deadlineCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                catch (OperationCanceledException) when (pollDeadlineCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
                 {
                     throw new TimeoutException("Steam did not finalize authentication before the deadline.");
                 }

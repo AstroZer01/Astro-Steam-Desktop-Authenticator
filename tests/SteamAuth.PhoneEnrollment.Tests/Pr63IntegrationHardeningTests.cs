@@ -859,43 +859,72 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public async Task CompleteLegacyDeviceCodeLoginAsync_GivesPostAcceptancePollingFullBudgetIndependentOfSubmissionRollover()
+        public async Task CompleteLegacyDeviceCodeLoginAsync_DefaultPathScopesSubmissionAndPollingDeadlinesIndependently()
         {
             var codes = new Queue<string>(new[] { "OLD01", "NEW02" });
+            var requestedDurations = new List<TimeSpan>();
+            var parentTokens = new List<CancellationToken>();
             int pollCalls = 0;
             string freshAccess = CreateJwt(DateTimeOffset.UtcNow.AddHours(2).ToUnixTimeSeconds());
             string freshRefresh = CreateJwt(DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds());
+            using var callerCts = new CancellationTokenSource();
 
-            // Submission consumes 80ms of a 120ms submission deadline, while post-acceptance polling
-            // takes 90ms (exceeding the remaining 40ms of the submission deadline) and still succeeds
-            // within its independent 250ms post-acceptance polling budget.
+            // Exercise the exact production default path (deadline: null).
             LoginForm.LegacyDeviceCodeLoginResult result = await LoginForm.CompleteLegacyDeviceCodeLoginAsync(
                 _ => Task.FromResult(codes.Dequeue()),
-                async (code, ct) =>
-                {
-                    if (code == "OLD01")
-                    {
-                        await Task.Delay(80, ct);
-                        return SteamKit2.EResult.TwoFactorCodeMismatch;
-                    }
-                    return SteamKit2.EResult.OK;
-                },
-                async ct =>
+                (code, _) => Task.FromResult(code == "OLD01"
+                    ? SteamKit2.EResult.TwoFactorCodeMismatch
+                    : SteamKit2.EResult.OK),
+                _ =>
                 {
                     pollCalls++;
-                    if (pollCalls == 1)
-                        return null; // poll right after mismatch
-                    await Task.Delay(90, ct);
-                    return CreateAuthPollResult(freshAccess, freshRefresh);
+                    return Task.FromResult(pollCalls >= 2
+                        ? CreateAuthPollResult(freshAccess, freshRefresh)
+                        : null);
                 },
                 TimeSpan.FromMilliseconds(5),
-                CancellationToken.None,
-                deadline: TimeSpan.FromMilliseconds(120),
+                callerCts.Token,
+                deadline: null,
                 delayAsync: (_, _) => Task.CompletedTask,
-                postAcceptancePollDeadline: TimeSpan.FromMilliseconds(250));
+                createTimeoutCts: (duration, parentToken) =>
+                {
+                    requestedDurations.Add(duration);
+                    parentTokens.Add(parentToken);
+                    return CancellationTokenSource.CreateLinkedTokenSource(parentToken);
+                });
 
             Assert.NotNull(result.PollResult);
             Assert.True(result.DeviceCodeAffirmativelyAccepted);
+            Assert.Equal(new[] { TimeSpan.FromSeconds(105), TimeSpan.FromSeconds(30) }, requestedDurations);
+            Assert.All(parentTokens, token => Assert.Equal(callerCts.Token, token));
+
+            // Verify that a SteamKit TaskCanceledException during polling (while the polling timer is active)
+            // propagates as TaskCanceledException and is NEVER misclassified as TimeoutException by an outer submission handler.
+            using var submissionTimer = new CancellationTokenSource();
+            int timerIndex = 0;
+            await Assert.ThrowsAsync<TaskCanceledException>(() =>
+                LoginForm.CompleteLegacyDeviceCodeLoginAsync(
+                    _ => Task.FromResult("ABCDE"),
+                    (_, _) => Task.FromResult(SteamKit2.EResult.OK),
+                    _ =>
+                    {
+                        // Simulate the submission timer firing during polling; because submissionCts
+                        // is scoped and disposed before polling begins, polling's TaskCanceledException
+                        // is never misclassified as TimeoutException.
+                        submissionTimer.Cancel();
+                        throw new TaskCanceledException("Simulated SteamKit AsyncJob timeout during polling");
+                    },
+                    TimeSpan.FromMilliseconds(5),
+                    callerCts.Token,
+                    deadline: null,
+                    delayAsync: (_, _) => Task.CompletedTask,
+                    createTimeoutCts: (_, parentToken) =>
+                    {
+                        timerIndex++;
+                        return timerIndex == 1
+                            ? CancellationTokenSource.CreateLinkedTokenSource(parentToken, submissionTimer.Token)
+                            : CancellationTokenSource.CreateLinkedTokenSource(parentToken);
+                    }));
         }
 
         [Fact]
