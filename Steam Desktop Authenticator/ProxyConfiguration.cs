@@ -241,18 +241,23 @@ namespace Steam_Desktop_Authenticator
         private const int MaximumProxyTestResponseBytes = 1024 * 1024;
         private static readonly object configurationLock = new object();
         private static ProxyConfiguration activeConfiguration;
+        private static ActiveClientGeneration activeClientGeneration;
         private static bool steamTrafficBlocked;
 
         public static bool ApplySavedConfiguration(Manifest manifest, out string error)
         {
             if (!ProxyConfiguration.TryFromManifest(manifest, out ProxyConfiguration configuration, out error))
             {
+                ActiveClientGeneration retiredClient;
                 lock (configurationLock)
                 {
                     activeConfiguration = null;
                     steamTrafficBlocked = true;
                     SteamNetworkConfiguration.BlockSteamTraffic();
+                    retiredClient = activeClientGeneration;
+                    activeClientGeneration = null;
                 }
+                retiredClient?.Release();
                 return false;
             }
 
@@ -265,12 +270,16 @@ namespace Steam_Desktop_Authenticator
             if (configuration == null)
                 throw new ArgumentNullException(nameof(configuration));
 
+            ActiveClientGeneration retiredClient;
             lock (configurationLock)
             {
                 SteamNetworkConfiguration.ConfigureProxy(configuration.Enabled ? configuration.CreateWebProxy() : null);
                 activeConfiguration = configuration;
                 steamTrafficBlocked = false;
+                retiredClient = activeClientGeneration;
+                activeClientGeneration = null;
             }
+            retiredClient?.Release();
         }
 
         public static HttpClient CreateActiveHttpClient()
@@ -279,10 +288,84 @@ namespace Steam_Desktop_Authenticator
             {
                 if (steamTrafficBlocked)
                     throw new InvalidOperationException("Steam networking is blocked until the proxy settings are corrected.");
-                return SteamNetworkConfiguration.CreateHttpClient(
-                    activeConfiguration != null && activeConfiguration.Enabled
-                        ? activeConfiguration.CreateWebProxy()
-                        : null);
+                return CreateActiveHttpClientCore();
+            }
+        }
+
+        internal static ActiveHttpClientLease AcquireActiveHttpClient()
+        {
+            lock (configurationLock)
+            {
+                if (steamTrafficBlocked)
+                    throw new InvalidOperationException("Steam networking is blocked until the proxy settings are corrected.");
+
+                if (activeClientGeneration == null || !activeClientGeneration.TryAcquire())
+                {
+                    ActiveClientGeneration replacement = new ActiveClientGeneration(CreateActiveHttpClientCore());
+                    if (!replacement.TryAcquire())
+                        throw new InvalidOperationException("The active HTTP client could not be acquired.");
+                    activeClientGeneration = replacement;
+                }
+
+                return new ActiveHttpClientLease(activeClientGeneration);
+            }
+        }
+
+        private static HttpClient CreateActiveHttpClientCore()
+        {
+            return SteamNetworkConfiguration.CreateHttpClient(
+                activeConfiguration != null && activeConfiguration.Enabled
+                    ? activeConfiguration.CreateWebProxy()
+                    : null);
+        }
+
+        internal sealed class ActiveHttpClientLease : IDisposable
+        {
+            private ActiveClientGeneration generation;
+
+            internal ActiveHttpClientLease(ActiveClientGeneration generation)
+            {
+                this.generation = generation;
+                Client = generation.Client;
+            }
+
+            public HttpClient Client { get; }
+
+            public void Dispose()
+            {
+                ActiveClientGeneration released = Interlocked.Exchange(ref generation, null);
+                released?.Release();
+            }
+        }
+
+        internal sealed class ActiveClientGeneration
+        {
+            private int references = 1;
+
+            internal ActiveClientGeneration(HttpClient client)
+            {
+                Client = client;
+            }
+
+            internal HttpClient Client { get; }
+
+            internal bool TryAcquire()
+            {
+                int observed = Volatile.Read(ref references);
+                while (observed > 0)
+                {
+                    int exchanged = Interlocked.CompareExchange(ref references, observed + 1, observed);
+                    if (exchanged == observed)
+                        return true;
+                    observed = exchanged;
+                }
+                return false;
+            }
+
+            internal void Release()
+            {
+                if (Interlocked.Decrement(ref references) == 0)
+                    Client.Dispose();
             }
         }
 

@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Windows.Forms;
 using System.Diagnostics;
+using System.IO;
 using CommandLine;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -35,21 +37,27 @@ namespace Steam_Desktop_Authenticator
 
         public static Process PriorProcess()
         // Returns a System.Diagnostics.Process pointing to
-        // a pre-existing process with the same name as the
-        // current one, if any; or null if the current process
-        // is unique.
+        // a pre-existing process in the current Windows session
+        // running the same executable path, or null if none is found.
         {
             try
             {
-                Process curr = Process.GetCurrentProcess();
-                Process[] procs = Process.GetProcessesByName(curr.ProcessName);
-                foreach (Process p in procs)
+                using (Process curr = Process.GetCurrentProcess())
                 {
-                    if ((p.Id != curr.Id) &&
-                        (p.MainModule.FileName == curr.MainModule.FileName))
-                        return p;
+                    string currentPath = GetCurrentExecutablePath(curr);
+                    if (String.IsNullOrWhiteSpace(currentPath))
+                        return null;
+
+                    Process[] procs = Process.GetProcessesByName(curr.ProcessName);
+                    return FindPriorProcess(
+                        curr.Id,
+                        curr.SessionId,
+                        currentPath,
+                        procs,
+                        process => process.Id,
+                        process => process.SessionId,
+                        process => process.MainModule?.FileName);
                 }
-                return null;
             }
             catch (Exception)
             {
@@ -57,40 +65,257 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static void RestoreExistingInstance()
+        internal static string GetCurrentExecutablePath(Process currentProcess)
         {
-            Process existing = PriorProcess();
-            if (existing == null)
-                return;
-
-            // A pinned-taskbar launch can arrive while the first process is still
-            // constructing its window, so wait briefly for a usable top-level handle.
-            for (int attempt = 0; attempt < 20; attempt++)
+            if (currentProcess != null)
             {
                 try
                 {
-                    existing.Refresh();
-                    if (existing.HasExited)
-                        return;
-
-                    IntPtr handle = existing.MainWindowHandle;
-                    if (handle != IntPtr.Zero)
-                    {
-                        PostMessage(handle, RestoreExistingInstanceMessage, IntPtr.Zero, IntPtr.Zero);
-                        ShowWindowAsync(handle, SW_RESTORE);
-                        SetForegroundWindow(handle);
-                        return;
-                    }
-
-                    if (PostRestoreMessageToHiddenWindow(existing.Id))
-                        return;
+                    // Prefer MainModule.FileName over Environment.ProcessPath on .NET 8 Windows:
+                    // it matches the candidate path reader (Process.MainModule.FileName) and avoids
+                    // a .NET 8 Environment.ProcessPath buffer-growth hang on executable paths >= MAX_PATH.
+                    string modulePath = currentProcess.MainModule?.FileName;
+                    if (!String.IsNullOrWhiteSpace(modulePath))
+                        return modulePath;
                 }
                 catch (Exception)
                 {
-                    return;
+                }
+            }
+
+            return Environment.ProcessPath;
+        }
+
+        internal static TProcess FindPriorProcess<TProcess>(
+            int currentProcessId,
+            string currentExecutablePath,
+            IReadOnlyList<TProcess> candidates,
+            Func<TProcess, int> getProcessId,
+            Func<TProcess, string> getExecutablePath)
+            where TProcess : class, IDisposable
+        {
+            return FindPriorProcess(
+                currentProcessId,
+                currentSessionId: 0,
+                currentExecutablePath,
+                candidates,
+                getProcessId,
+                getSessionId: _ => 0,
+                getExecutablePath);
+        }
+
+        internal static TProcess FindPriorProcess<TProcess>(
+            int currentProcessId,
+            int currentSessionId,
+            string currentExecutablePath,
+            IReadOnlyList<TProcess> candidates,
+            Func<TProcess, int> getProcessId,
+            Func<TProcess, int> getSessionId,
+            Func<TProcess, string> getExecutablePath)
+            where TProcess : class, IDisposable
+        {
+            if (getProcessId == null)
+                throw new ArgumentNullException(nameof(getProcessId));
+            if (getSessionId == null)
+                throw new ArgumentNullException(nameof(getSessionId));
+            if (getExecutablePath == null)
+                throw new ArgumentNullException(nameof(getExecutablePath));
+            if (candidates == null || candidates.Count == 0)
+                return null;
+
+            string normalizedCurrentPath = NormalizeProcessPath(currentExecutablePath);
+            TProcess match = null;
+            try
+            {
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    TProcess candidate = candidates[i];
+                    if (candidate == null)
+                        continue;
+
+                    if (match == null && normalizedCurrentPath != null)
+                    {
+                        try
+                        {
+                            if (getProcessId(candidate) != currentProcessId &&
+                                getSessionId(candidate) == currentSessionId)
+                            {
+                                string candidatePath = NormalizeProcessPath(getExecutablePath(candidate));
+                                if (candidatePath != null &&
+                                    String.Equals(candidatePath, normalizedCurrentPath, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    match = candidate;
+                                }
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Inaccessible (e.g., elevated) or exited processes must not abort lookup.
+                        }
+                    }
+
+                    if (!ReferenceEquals(candidate, match))
+                    {
+                        DisposeQuietly(candidate);
+                    }
                 }
 
-                Thread.Sleep(100);
+                return match;
+            }
+            catch (Exception)
+            {
+                // Clean up an already-retained match if indexing a custom IReadOnlyList throws.
+                DisposeQuietly(match);
+                throw;
+            }
+
+            static void DisposeQuietly(TProcess process)
+            {
+                if (process == null)
+                    return;
+
+                try
+                {
+                    process.Dispose();
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+
+        internal static string NormalizeProcessPath(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path) || path.IndexOf('\0') >= 0)
+                return null;
+
+            string candidate = path;
+            bool isExtendedVerbatim = candidate.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase);
+            if (candidate.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ||
+                candidate.StartsWith(@"\\.\UNC\", StringComparison.OrdinalIgnoreCase))
+            {
+                string uncRemainder = candidate.Substring(8);
+                if (!IsValidUncRemainder(uncRemainder))
+                    return null;
+                if (isExtendedVerbatim && HasTrailingSpaceOrDotSegment(uncRemainder))
+                    return candidate;
+                candidate = @"\\" + uncRemainder;
+            }
+            else if (candidate.StartsWith(@"UNC\", StringComparison.OrdinalIgnoreCase))
+            {
+                // .NET's Process.MainModule.FileName strips "\\?\" from "\\?\UNC\..."
+                // leaving "UNC\server\share\...".
+                string uncRemainder = candidate.Substring(4);
+                if (!IsValidUncRemainder(uncRemainder))
+                    return null;
+                candidate = @"\\" + uncRemainder;
+            }
+            else if (isExtendedVerbatim ||
+                candidate.StartsWith(@"\\.\", StringComparison.OrdinalIgnoreCase))
+            {
+                string deviceRemainder = candidate.Substring(4);
+                if (IsDriveRootedPath(deviceRemainder))
+                {
+                    if (isExtendedVerbatim && HasTrailingSpaceOrDotSegment(deviceRemainder))
+                        return candidate;
+                    candidate = deviceRemainder;
+                }
+                else if (deviceRemainder.StartsWith("Volume{", StringComparison.OrdinalIgnoreCase) ||
+                    deviceRemainder.StartsWith(@"GLOBALROOT\", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Preserve non-drive device/volume paths rather than stripping "\\?\"
+                    // into an unrooted string that Path.GetFullPath would resolve against CWD.
+                    return candidate;
+                }
+                else
+                {
+                    return null;
+                }
+            }
+
+            if (String.IsNullOrWhiteSpace(candidate) ||
+                Char.IsWhiteSpace(candidate[0]) ||
+                !Path.IsPathFullyQualified(candidate))
+            {
+                return null;
+            }
+
+            try
+            {
+                return Path.GetFullPath(candidate);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            static bool IsDriveRootedPath(string value)
+            {
+                return value.Length >= 3 &&
+                    ((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) &&
+                    value[1] == ':' &&
+                    (value[2] == '\\' || value[2] == '/');
+            }
+
+            static bool IsValidUncRemainder(string value)
+            {
+                return !String.IsNullOrWhiteSpace(value) &&
+                    !Char.IsWhiteSpace(value[0]) &&
+                    value[0] != '\\' &&
+                    value[0] != '/';
+            }
+
+            static bool HasTrailingSpaceOrDotSegment(string value)
+            {
+                string[] segments = value.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < segments.Length; i++)
+                {
+                    string segment = segments[i];
+                    char last = segment[segment.Length - 1];
+                    if (last == ' ' || (last == '.' && segment != "." && segment != ".."))
+                        return true;
+                }
+
+                return false;
+            }
+        }
+
+        private static void RestoreExistingInstance()
+        {
+            using (Process existing = PriorProcess())
+            {
+                if (existing == null)
+                    return;
+
+                // A pinned-taskbar launch can arrive while the first process is still
+                // constructing its window, so wait briefly for a usable top-level handle.
+                for (int attempt = 0; attempt < 20; attempt++)
+                {
+                    try
+                    {
+                        existing.Refresh();
+                        if (existing.HasExited)
+                            return;
+
+                        IntPtr handle = existing.MainWindowHandle;
+                        if (handle != IntPtr.Zero)
+                        {
+                            PostMessage(handle, RestoreExistingInstanceMessage, IntPtr.Zero, IntPtr.Zero);
+                            ShowWindowAsync(handle, SW_RESTORE);
+                            SetForegroundWindow(handle);
+                            return;
+                        }
+
+                        if (PostRestoreMessageToHiddenWindow(existing.Id))
+                            return;
+                    }
+                    catch (Exception)
+                    {
+                        return;
+                    }
+
+                    Thread.Sleep(100);
+                }
             }
         }
 
@@ -123,6 +348,10 @@ namespace Steam_Desktop_Authenticator
             instanceMutex = new Mutex(true, InstanceMutexName, out createdNew);
             if (!createdNew)
             {
+                // Release our handle to the existing named mutex immediately before waiting
+                // on window restoration so we do not keep the mutex alive if the primary exits.
+                instanceMutex.Dispose();
+                instanceMutex = null;
                 RestoreExistingInstance();
                 return;
             }
@@ -159,6 +388,15 @@ namespace Steam_Desktop_Authenticator
             {
                 AstroMessageBox.Show(
                     "Astro SDA could not safely recover its account data. No account data was loaded. Resolve any locked or unavailable account files, then restart the application.",
+                    "Astro Steam Desktop Assistant",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+            catch (ManifestStorageDirectoryException)
+            {
+                AstroMessageBox.Show(
+                    "Astro SDA cannot start because the account-data folder is not a supported local directory. Move the data folder to a regular local directory without symbolic links or junctions, then restart the application.",
                     "Astro Steam Desktop Assistant",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -228,8 +466,18 @@ namespace Steam_Desktop_Authenticator
             }
             finally
             {
-                instanceMutex.ReleaseMutex();
-                instanceMutex.Dispose();
+                try
+                {
+                    instanceMutex?.ReleaseMutex();
+                }
+                catch (ApplicationException)
+                {
+                }
+                finally
+                {
+                    instanceMutex?.Dispose();
+                    instanceMutex = null;
+                }
             }
         }
     }

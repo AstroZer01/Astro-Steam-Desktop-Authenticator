@@ -44,7 +44,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Equal(Confirmation.EMobileConfirmationType.RegisterApiKey, response.Confirmations[3].ConfType);
             Assert.Equal("API Key", response.Confirmations[3].TypeName);
 
-            Assert.Equal((Confirmation.EMobileConfirmationType)999, response.Confirmations[4].ConfType);
+            Assert.Equal(Confirmation.EMobileConfirmationType.Unknown, response.Confirmations[4].ConfType);
             Assert.Equal("Future Action", response.Confirmations[4].TypeName);
         }
 
@@ -60,6 +60,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [InlineData(Confirmation.EMobileConfirmationType.RegisterApiKey, "other")]
         [InlineData(Confirmation.EMobileConfirmationType.JoinFamilyGroup, "other")]
         [InlineData(Confirmation.EMobileConfirmationType.RequestRefund, "other")]
+        [InlineData(Confirmation.EMobileConfirmationType.Unknown, "other")]
         [InlineData((Confirmation.EMobileConfirmationType)999, "other")]
         public void GetCategory_MapsConfirmationTypesToExpectedTabs(
             Confirmation.EMobileConfirmationType confType,
@@ -73,15 +74,25 @@ namespace SteamAuth.PhoneEnrollment.Tests
         {
             Assert.Equal("Trade", TradeConfirmationClassifier.GetDisplayLabel(new Confirmation { ConfType = Confirmation.EMobileConfirmationType.Trade }));
             Assert.Equal("Market", TradeConfirmationClassifier.GetDisplayLabel(new Confirmation { ConfType = Confirmation.EMobileConfirmationType.MarketListing }));
-            Assert.Equal("Market", TradeConfirmationClassifier.GetDisplayLabel(new Confirmation { ConfType = Confirmation.EMobileConfirmationType.MarketPurchase }));
+            Assert.Equal("Purchase", TradeConfirmationClassifier.GetDisplayLabel(new Confirmation { ConfType = Confirmation.EMobileConfirmationType.MarketPurchase }));
             Assert.Equal("API Key", TradeConfirmationClassifier.GetDisplayLabel(new Confirmation
             {
                 ConfType = Confirmation.EMobileConfirmationType.RegisterApiKey,
                 TypeName = "  API Key  "
             }));
-            Assert.Equal("Confirmation", TradeConfirmationClassifier.GetDisplayLabel(new Confirmation
+            Assert.Equal("Account Recovery", TradeConfirmationClassifier.GetDisplayLabel(new Confirmation
             {
                 ConfType = Confirmation.EMobileConfirmationType.AccountRecovery,
+                TypeName = "   "
+            }));
+            Assert.Equal("Future Action", TradeConfirmationClassifier.GetDisplayLabel(new Confirmation
+            {
+                ConfType = Confirmation.EMobileConfirmationType.Unknown,
+                TypeName = "  Future Action  "
+            }));
+            Assert.Equal("Confirmation", TradeConfirmationClassifier.GetDisplayLabel(new Confirmation
+            {
+                ConfType = Confirmation.EMobileConfirmationType.Unknown,
                 TypeName = "   "
             }));
             Assert.Equal("Confirmation", TradeConfirmationClassifier.GetDisplayLabel(null));
@@ -90,8 +101,10 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [Theory]
         [InlineData(Confirmation.EMobileConfirmationType.Trade, "Trade confirmation needed", "trades")]
         [InlineData(Confirmation.EMobileConfirmationType.MarketListing, "Market confirmation needed", "market")]
-        [InlineData(Confirmation.EMobileConfirmationType.MarketPurchase, "Market confirmation needed", "market")]
-        [InlineData(Confirmation.EMobileConfirmationType.AccountRecovery, "Steam confirmation needed", "all")]
+        [InlineData(Confirmation.EMobileConfirmationType.MarketPurchase, "Purchase confirmation needed", "market")]
+        [InlineData(Confirmation.EMobileConfirmationType.AccountRecovery, "Account recovery confirmation needed", "all")]
+        [InlineData(Confirmation.EMobileConfirmationType.RegisterApiKey, "API key confirmation needed", "all")]
+        [InlineData(Confirmation.EMobileConfirmationType.Unknown, "Steam confirmation needed", "all")]
         [InlineData((Confirmation.EMobileConfirmationType)999, "Steam confirmation needed", "all")]
         public void NotificationMetadata_MatchesConfirmationCategory(
             Confirmation.EMobileConfirmationType confType,
@@ -123,12 +136,16 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Equal("76561198000000001:103", serialized.Value<string>("Id"));
             Assert.Equal("main_account", serialized.Value<string>("AccountName"));
             Assert.Equal("Buy Order - Weapon Case", serialized.Value<string>("Headline"));
+            Assert.Equal("Steam purchase", serialized.Value<string>("DefaultHeadline"));
             Assert.Equal("303", serialized.Value<string>("Creator"));
             Assert.Equal("https://community.cloudflare.steamstatic.com/icon.png", serialized.Value<string>("Icon"));
             Assert.Equal(new[] { "Buy 1x Weapon Case for $2.50" }, serialized["Summary"].ToObject<string[]>());
             Assert.Equal("MarketPurchase", serialized.Value<string>("Type"));
             Assert.Equal("market", serialized.Value<string>("Category"));
-            Assert.Equal("Market", serialized.Value<string>("TypeLabel"));
+            Assert.Equal("Purchase", serialized.Value<string>("TypeLabel"));
+            Assert.True(serialized.Value<bool>("IsSecuritySensitive"));
+            Assert.Equal("Confirm Purchase", serialized.Value<string>("AcceptLabel"));
+            Assert.Equal("Cancel", serialized.Value<string>("CancelLabel"));
         }
 
         [Theory]

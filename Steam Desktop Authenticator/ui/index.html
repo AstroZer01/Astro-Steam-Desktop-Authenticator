@@ -40,8 +40,9 @@
         
         <!-- Authenticator View -->
         <section id="view-authenticator" class="lg:col-span-8 lg:col-start-3 flex flex-col gap-4">
-            <div class="grid grid-cols-3 gap-4">
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <button id="btn-setup-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-xs">Setup New Account</button>
+                <button id="btn-transfer-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-xs">Transfer Authenticator</button>
                 <button id="btn-import-account" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-xs">Import Account</button>
                 <button id="btn-setup-encryption" class="glass-panel hover:bg-surface-bright text-on-surface text-sm py-3 px-2 rounded-xl transition-colors shadow-xs">Setup Encryption</button>
             </div>
@@ -323,6 +324,25 @@
                     </div>
                     <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6">
                         <div class="flex items-start gap-3">
+                            <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary disabled:opacity-50 disabled:cursor-not-allowed" id="allow-saved-steam-passwords" type="checkbox"/>
+                            <div>
+                                <label class="text-on-surface" for="allow-saved-steam-passwords">Allow saved Steam passwords for silent session renewal</label>
+                                <p id="allow-saved-passwords-note" class="text-sm text-on-surface-variant mt-1">Opt-in only. Requires manifest encryption. Stored separately in AES-256-GCM (PBKDF2-SHA256) encrypted with your passkey and never included in exports. Turning this off deletes all saved passwords.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6 space-y-3">
+                        <div>
+                            <h2 class="text-base font-semibold text-on-surface">Backup &amp; Export</h2>
+                            <p class="text-sm text-on-surface-variant mt-1">Export all managed accounts as an SDA-compatible archive. Saved Steam passwords are never included in exports.</p>
+                        </div>
+                        <div class="flex flex-col sm:flex-row gap-2">
+                            <button id="btn-export-all-encrypted" type="button" class="flex-1 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-sm font-medium text-primary hover:bg-primary/20 transition-colors">Export All Accounts (Encrypted .zip)</button>
+                            <button id="btn-export-all-plain" type="button" class="flex-1 rounded-lg border border-white/15 bg-surface-variant px-3 py-2 text-sm font-medium text-on-surface hover:bg-surface-bright transition-colors">Export All Accounts (Plain .zip)</button>
+                        </div>
+                    </div>
+                    <div class="rounded-xl border border-white/10 bg-surface-container-low p-4 mb-6">
+                        <div class="flex items-start gap-3">
                             <input class="mt-1 rounded-sm border-white/10 bg-surface-variant text-secondary focus:ring-secondary" id="diagnostic-error-logging-enabled" type="checkbox"/>
                             <div>
                                 <label class="text-on-surface" for="diagnostic-error-logging-enabled">Enable diagnostic error logging</label>
@@ -374,7 +394,7 @@
         </button>
         <button id="btn-remove-account" type="button" class="w-full text-left rounded-lg border border-white/10 bg-surface-variant p-3 hover:bg-surface-bright transition-colors">
             <span class="block font-semibold text-on-surface">Remove user from app</span>
-            <span class="block text-sm text-on-surface-variant mt-1">Keeps Steam Guard enabled on Steam and deletes only this account's local data.</span>
+            <span id="remove-account-local-desc" class="block text-sm text-on-surface-variant mt-1">Keeps Steam Guard enabled on Steam and deletes only this account's local data.</span>
         </button>
         <button id="btn-cancel-remove-account" type="button" class="w-full rounded-lg border border-white/10 py-2.5 text-sm text-on-surface-variant hover:bg-surface-variant transition-colors">Cancel</button>
     </div>
@@ -390,6 +410,55 @@
             <button id="btn-cancel-settings-navigation" type="button" class="rounded-lg border border-white/10 px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-variant transition-colors">Cancel</button>
             <button id="btn-discard-settings-navigation" type="button" class="rounded-lg border border-white/10 px-4 py-2 text-sm text-on-surface hover:bg-surface-variant transition-colors">Leave Without Saving</button>
             <button id="btn-save-settings-navigation" type="button" class="rounded-lg btn-primary px-4 py-2 text-sm">Save Changes</button>
+        </div>
+    </div>
+</div>
+
+<div id="account-options-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-xs p-4 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="account-options-title">
+    <div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-xl border border-white/10 bg-surface-container shadow-2xl p-5 space-y-4">
+        <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+                <h2 id="account-options-title" class="font-semibold text-on-surface truncate">Account options</h2>
+                <p id="account-options-subtitle" class="text-xs text-on-surface-variant mt-1 truncate"></p>
+            </div>
+            <button id="btn-close-account-options" type="button" class="shrink-0 p-1 rounded-sm hover:bg-surface-variant text-on-surface-variant" aria-label="Close account options">
+                <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+            </button>
+        </div>
+
+        <div id="account-options-health" class="rounded-lg border border-white/10 bg-surface-container-low px-3 py-2 text-xs text-on-surface-variant"></div>
+
+        <div class="space-y-3 border-t border-white/10 pt-3">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-on-surface-variant">Confirmation Monitoring</h3>
+            <label class="flex items-center justify-between gap-3 text-sm text-on-surface cursor-pointer">
+                <span>Use custom confirmation settings</span>
+                <input id="acct-opt-override" type="checkbox" class="rounded-sm bg-surface-variant border-white/20 text-primary focus:ring-primary">
+            </label>
+            <div id="acct-opt-override-fields" class="space-y-3 pl-3 border-l border-white/10">
+                <label class="flex items-center justify-between gap-3 text-sm text-on-surface cursor-pointer">
+                    <span>Auto-confirm trades</span>
+                    <input id="acct-opt-auto-trades" type="checkbox" class="rounded-sm bg-surface-variant border-white/20 text-primary focus:ring-primary">
+                </label>
+                <label class="flex items-center justify-between gap-3 text-sm text-on-surface cursor-pointer">
+                    <span>Auto-confirm market listings</span>
+                    <input id="acct-opt-auto-market" type="checkbox" class="rounded-sm bg-surface-variant border-white/20 text-primary focus:ring-primary">
+                </label>
+                <div class="flex items-center justify-between gap-3">
+                    <label for="acct-opt-interval" class="text-sm text-on-surface">Check interval (seconds)</label>
+                    <input id="acct-opt-interval" type="number" min="3" max="3600" placeholder="Global" class="w-24 rounded-lg bg-surface-variant border border-white/15 px-2.5 py-1.5 text-sm text-on-surface text-right focus:outline-hidden focus:ring-1 focus:ring-primary">
+                </div>
+                <p class="text-xs text-on-surface-variant">Allowed range: 3 to 3600 seconds. Leave blank to use the global check interval.</p>
+            </div>
+        </div>
+
+        <div id="account-options-password-section" class="hidden space-y-2 border-t border-white/10 pt-3"></div>
+        <div id="account-options-export-section" class="hidden space-y-2 border-t border-white/10 pt-3"></div>
+
+        <p id="account-options-error" class="hidden rounded-lg border border-error/40 bg-error-container/20 px-3 py-2 text-xs text-error"></p>
+
+        <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-2 border-t border-white/10">
+            <button id="btn-cancel-account-options" type="button" class="rounded-lg border border-white/10 px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-variant transition-colors">Close</button>
+            <button id="btn-save-account-options" type="button" class="rounded-lg btn-primary px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed">Save Account Options</button>
         </div>
     </div>
 </div>
@@ -495,11 +564,13 @@
 
     // Authenticator Actions
     document.getElementById('btn-setup-account').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'setup_account' }); });
+    document.getElementById('btn-transfer-account').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'transfer_account' }); });
     document.getElementById('btn-import-account').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'import_account' }); });
     document.getElementById('btn-setup-encryption').addEventListener('click', () => { window.chrome.webview.postMessage({ action: 'setup_encryption' }); });
-    document.getElementById('btn-copy').addEventListener('click', (e) => { 
-        window.chrome.webview.postMessage({ action: 'copy_token' }); 
+    document.getElementById('btn-copy').addEventListener('click', (e) => {
         let btn = e.currentTarget;
+        if (btn.disabled || currentAccPending) return;
+        window.chrome.webview.postMessage({ action: 'copy_token' });
         let originalText = btn.innerText;
         btn.innerText = "Copied!";
         btn.classList.add('bg-secondary', 'text-on-secondary');
@@ -511,17 +582,30 @@
     let qrScanWaiting = false;
     let qrScanRemainingSeconds = 0;
 
+    function updateCopyButton() {
+        const hasAccounts = allAccs.length > 0;
+        const btnCopy = document.getElementById('btn-copy');
+        const disabledStyle = "bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm transition-colors";
+        const canCopy = hasAccounts && !currentAccPending;
+        btnCopy.disabled = !canCopy;
+        btnCopy.className = canCopy
+            ? "bg-surface-variant hover:bg-surface-bright border border-white/10 rounded-lg px-6 w-24 transition-colors text-on-surface text-sm"
+            : disabledStyle + " rounded-lg px-6 w-24";
+    }
+
     function updateQrLoginButton() {
         const button = document.getElementById('btn-login-qr');
-        const hasAccounts = allAccs.some(account => !account.sessionExpired && !account.needsRenewal);
-        button.disabled = qrScanWaiting || !hasAccounts || currentAccExpired;
+        const hasAccounts = allAccs.some(account => !account.sessionExpired && !account.needsRenewal && !account.pendingActivation);
+        button.disabled = qrScanWaiting || !hasAccounts || currentAccExpired || currentAccPending;
 
         if (qrScanWaiting) {
             button.className = 'bg-primary/10 border border-primary text-primary text-sm py-3 px-4 rounded-lg shadow-xs cursor-crosshair';
             button.textContent = 'Waiting for Right Ctrl (' + qrScanRemainingSeconds + 's)';
-        } else if (!hasAccounts || currentAccExpired) {
+        } else if (!hasAccounts || currentAccExpired || currentAccPending) {
             button.className = 'bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm py-3 px-4 rounded-lg shadow-xs transition-colors';
-            button.textContent = currentAccExpired ? 'Renew session to use QR login' : 'Login via QR';
+            button.textContent = currentAccPending
+                ? 'Complete Steam activation to use QR login'
+                : (currentAccExpired ? 'Renew session to use QR login' : 'Login via QR');
         } else {
             button.className = 'bg-surface-variant hover:bg-surface-bright text-on-surface text-sm py-3 px-4 rounded-lg border border-white/10 transition-colors shadow-xs';
             button.textContent = 'Login via QR';
@@ -542,29 +626,33 @@
 
     document.getElementById('btn-login-qr').addEventListener('click', () => {
         const button = document.getElementById('btn-login-qr');
-        if (!qrScanWaiting && !currentAccExpired && !button.disabled)
+        if (!qrScanWaiting && !currentAccExpired && !currentAccPending && !button.disabled)
             window.chrome.webview.postMessage({ action: 'login_qr' });
     });
 
     let currentAcc = "";
     let currentAccSteamId = "";
     let currentAccExpired = false;
+    let currentAccPending = false;
     function updateToken(token) { 
         let el = document.getElementById('login-token-text');
         const displayToken = typeof token === 'string' && token.length > 0 ? token : '-----';
         if (el.innerText !== displayToken) el.innerText = displayToken;
     }
-    function updateCurrentAccount(accName, sessionExpired = false, steamId = "") {
-        const selectionChanged = currentAccSteamId !== (steamId || "") || currentAccExpired !== !!sessionExpired;
+    function updateCurrentAccount(accName, sessionExpired = false, steamId = "", pendingActivation = false) {
+        const selectionChanged = currentAccSteamId !== (steamId || "") || currentAccExpired !== !!sessionExpired || currentAccPending !== !!pendingActivation;
         currentAcc = accName;
         currentAccSteamId = steamId || "";
         currentAccExpired = !!sessionExpired;
-        document.getElementById('account-title').innerText = "Account: " + accName;
+        currentAccPending = !!pendingActivation;
+        document.getElementById('account-title').innerText = currentAccPending
+            ? "Account: " + accName + " (pending activation)"
+            : "Account: " + accName;
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         const tradeSelect = document.getElementById('trade-account-select');
         const loginSelect = document.getElementById('login-account-select');
         const previousTradeSelection = tradeSelect ? (tradeSelect.value || 'all') : 'all';
-        if (currentAccExpired) {
+        if (currentAccExpired || currentAccPending) {
             if (tradeSelect) tradeSelect.value = 'all';
             if (loginSelect) loginSelect.value = 'all';
         } else {
@@ -574,8 +662,9 @@
         }
         const tradeSelectionChanged = syncTradeAccountSelection(previousTradeSelection);
         renderLoginActions();
+        updateCopyButton();
         updateQrLoginButton();
-        if (selectionChanged && currentAccExpired) {
+        if (selectionChanged && (currentAccExpired || currentAccPending)) {
             if (!tradeSelectionChanged) {
                 window.chrome.webview.postMessage({ action: 'load_trades_cache', steamId: 'all' });
             }
@@ -608,30 +697,30 @@
             const leftExpired = Boolean(left && (left.sessionExpired || left.needsRenewal));
             const rightExpired = Boolean(right && (right.sessionExpired || right.needsRenewal));
             if (leftExpired !== rightExpired) return leftExpired ? -1 : 1;
+            const leftPending = Boolean(left && left.pendingActivation);
+            const rightPending = Boolean(right && right.pendingActivation);
+            if (leftPending !== rightPending) return leftPending ? -1 : 1;
             return String(left && left.name || '').localeCompare(String(right && right.name || ''), undefined, { sensitivity: 'base' });
         });
+        if (allAccs.length === 0) {
+            currentAcc = "";
+            currentAccSteamId = "";
+            currentAccExpired = false;
+            currentAccPending = false;
+            document.getElementById('account-title').innerText = "Account: ...";
+            updateToken("");
+        }
         renderAccountList(document.getElementById('filter-input').value.toLowerCase());
         
         const usableAccounts = allAccs.filter(account =>
-            !account.sessionExpired && !account.needsRenewal && account.steamId);
-        let hasAccounts = allAccs.length > 0;
-        let btnCopy = document.getElementById('btn-copy');
-        
-        let disabledStyle = "bg-transparent border border-white/10 text-on-surface/50 cursor-not-allowed text-sm transition-colors";
-        
-        btnCopy.disabled = !hasAccounts;
-        if (!hasAccounts) {
-            btnCopy.className = disabledStyle + " rounded-lg px-6 w-24";
-        } else {
-            btnCopy.className = "bg-surface-variant hover:bg-surface-bright border border-white/10 rounded-lg px-6 w-24 transition-colors text-on-surface text-sm";
-        }
-        
+            !account.sessionExpired && !account.needsRenewal && !account.pendingActivation && account.steamId);
+        updateCopyButton();
         updateQrLoginButton();
         
         let sel = document.getElementById('trade-account-select');
         if (sel) {
             const previousSelection = sel.value || 'all';
-            const previous = sel.value || (currentAccExpired ? 'all' : currentAccSteamId) || 'all';
+            const previous = sel.value || ((currentAccExpired || currentAccPending) ? 'all' : currentAccSteamId) || 'all';
             sel.innerHTML = '';
             const allOption = document.createElement('option');
             allOption.value = 'all';
@@ -643,13 +732,13 @@
                 opt.innerText = account.name;
                 sel.appendChild(opt);
             });
-            sel.value = usableAccounts.some(account => account.steamId === previous) && !currentAccExpired ? previous : 'all';
+            sel.value = usableAccounts.some(account => account.steamId === previous) && !currentAccExpired && !currentAccPending ? previous : 'all';
             syncTradeAccountSelection(previousSelection);
         }
 
         let loginSelect = document.getElementById('login-account-select');
         if (loginSelect) {
-            const previous = loginSelect.value || (currentAccExpired ? 'all' : currentAccSteamId) || 'all';
+            const previous = loginSelect.value || ((currentAccExpired || currentAccPending) ? 'all' : currentAccSteamId) || 'all';
             loginSelect.innerHTML = '';
             const allOption = document.createElement('option');
             allOption.value = 'all';
@@ -661,7 +750,7 @@
                 opt.innerText = account.name;
                 loginSelect.appendChild(opt);
             });
-            loginSelect.value = usableAccounts.some(account => account.steamId === previous) && !currentAccExpired ? previous : 'all';
+            loginSelect.value = usableAccounts.some(account => account.steamId === previous) && !currentAccExpired && !currentAccPending ? previous : 'all';
         }
         renderLoginActions();
     }
@@ -671,6 +760,7 @@
         allAccs.forEach(acc => {
             if (filterText && !acc.name.toLowerCase().includes(filterText)) return;
             const sessionExpired = Boolean(acc.sessionExpired || acc.needsRenewal);
+            const pendingActivation = Boolean(acc.pendingActivation);
             const row = document.createElement('div');
             if (acc.steamId === currentAccSteamId || (!acc.steamId && acc.name === currentAcc)) {
                 row.className = "bg-primary-container/20 text-white px-3 py-2 border-l-2 border-primary font-bold";
@@ -682,21 +772,51 @@
             accountButton.type = 'button';
             accountButton.className = "min-w-0 flex-1 border-0 bg-transparent p-0 text-left text-inherit cursor-pointer";
             const name = document.createElement('span');
-            name.className = "block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ellipsis" + (sessionExpired ? " text-[#ffb4ab]" : "");
-            name.textContent = sessionExpired ? acc.name + " (expired session)" : acc.name;
+            name.className = "block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ellipsis" + (pendingActivation ? " text-[#ffd180]" : (sessionExpired ? " text-[#ffb4ab]" : ""));
+            if (pendingActivation) {
+                name.textContent = acc.name + " (pending activation)";
+            } else if (acc.recoveryInProgress) {
+                name.textContent = acc.name + " (renewing session…)";
+            } else if (acc.passwordRejected) {
+                name.textContent = acc.name + " (saved password rejected)";
+            } else {
+                name.textContent = sessionExpired ? acc.name + " (expired session)" : acc.name;
+            }
             accountButton.appendChild(name);
             accountButton.onclick = () => { window.chrome.webview.postMessage({ action: 'switch_account', accountName: acc.name, steamId: acc.steamId }); };
 
             const accountActions = document.createElement('div');
             accountActions.className = "shrink-0 flex items-center gap-1";
+            const optionsButton = document.createElement('button');
+            optionsButton.type = 'button';
+            optionsButton.disabled = !acc.steamId;
+            if (acc.steamId)
+                optionsButton.dataset.optionsSteamId = acc.steamId;
+            optionsButton.className = acc.steamId
+                ? "shrink-0 rounded-sm p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
+                : "shrink-0 rounded-sm p-1 text-on-surface-variant opacity-50 cursor-not-allowed transition-colors";
+            optionsButton.title = "Account options for " + acc.name;
+            optionsButton.setAttribute('aria-label', "Account options for " + acc.name);
+            optionsButton.innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+            optionsButton.onclick = event => {
+                if (optionsButton.disabled) return;
+                event.stopPropagation();
+                openAccountOptionsModal(acc);
+            };
+            accountActions.appendChild(optionsButton);
+
             const renewButton = document.createElement('button');
             renewButton.type = 'button';
-            renewButton.disabled = !sessionExpired || !acc.steamId;
-            renewButton.className = sessionExpired && acc.steamId
-                ? "shrink-0 rounded-sm p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
-                : "shrink-0 rounded-sm p-1 text-on-surface-variant opacity-70 cursor-not-allowed transition-colors";
-            renewButton.title = "Renew session";
-            renewButton.setAttribute('aria-label', "Renew session");
+            const canVerifyPending = pendingActivation && Boolean(acc.steamId);
+            const canRenewSession = sessionExpired && Boolean(acc.steamId) && !pendingActivation;
+            renewButton.disabled = !canVerifyPending && !canRenewSession;
+            renewButton.className = canVerifyPending
+                ? "shrink-0 rounded-sm p-1 text-[#ffd180] hover:bg-primary/20 hover:text-primary transition-colors"
+                : (canRenewSession
+                    ? "shrink-0 rounded-sm p-1 text-on-surface-variant hover:bg-primary/20 hover:text-primary transition-colors"
+                    : "shrink-0 rounded-sm p-1 text-on-surface-variant opacity-70 cursor-not-allowed transition-colors");
+            renewButton.title = canVerifyPending ? "Verify Steam activation" : "Renew session";
+            renewButton.setAttribute('aria-label', canVerifyPending ? "Verify Steam activation" : "Renew session");
             renewButton.innerHTML = '<svg class="ui-icon renew-session-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 0 0-13.66-5.66L4 8"/><path d="M4 4v4h4"/><path d="M4 12a8 8 0 0 0 13.66 5.66L20 16"/><path d="M20 20v-4h-4"/></svg>';
             renewButton.onclick = event => {
                 if (renewButton.disabled) return;
@@ -729,9 +849,19 @@
         accountPendingRemoval = account;
         document.getElementById('remove-account-name').textContent = account.name;
         const unlinkButton = document.getElementById('btn-unlink-steam-guard');
-        const canUnlinkSteamGuard = Boolean(account.steamId);
+        const canUnlinkSteamGuard = Boolean(account.steamId) && !Boolean(account.pendingActivation);
         unlinkButton.disabled = !canUnlinkSteamGuard;
-        unlinkButton.title = canUnlinkSteamGuard ? '' : 'This local account has no saved Steam session to unlink Steam Guard.';
+        unlinkButton.title = canUnlinkSteamGuard
+            ? ''
+            : (account.pendingActivation
+                ? 'This authenticator is pending Steam activation and has not been finalized yet.'
+                : 'This local account has no saved Steam session to unlink Steam Guard.');
+        const removeLocalDesc = document.getElementById('remove-account-local-desc');
+        if (removeLocalDesc) {
+            removeLocalDesc.textContent = account.pendingActivation
+                ? "Deletes this pending local record and its saved recovery code from this app. Back up your recovery code first."
+                : "Keeps Steam Guard enabled on Steam and deletes only this account's local data.";
+        }
         const modal = document.getElementById('remove-account-modal');
         modal.classList.remove('hidden');
         modal.classList.add('flex');
@@ -798,6 +928,380 @@
     document.getElementById('btn-cancel-remove-account').addEventListener('click', closeRemoveAccountModal);
     document.getElementById('remove-account-modal').addEventListener('click', event => {
         if (event.target.id === 'remove-account-modal') closeRemoveAccountModal();
+    });
+
+    let accountOptionsTarget = null;
+    let accountOptionsSavePending = false;
+    let accountOptionsEscapeHandler = null;
+    let accountOptionsPreviousFocus = null;
+    let accountListRenderDeferred = false;
+
+    function syncAccountOptionsOverrideUI() {
+        const isPending = Boolean(accountOptionsTarget && accountOptionsTarget.pendingActivation);
+        const overrideEnabled = !isPending && document.getElementById('acct-opt-override').checked;
+        const fields = document.getElementById('acct-opt-override-fields');
+        fields.classList.toggle('opacity-50', !overrideEnabled);
+        document.getElementById('acct-opt-auto-trades').disabled = !overrideEnabled || accountOptionsSavePending;
+        document.getElementById('acct-opt-auto-market').disabled = !overrideEnabled || accountOptionsSavePending;
+        document.getElementById('acct-opt-interval').disabled = !overrideEnabled || accountOptionsSavePending;
+    }
+
+    function updateAccountOptionsHealthBanner(account) {
+        const healthEl = document.getElementById('account-options-health');
+        if (!healthEl || !account) return;
+        if (account.pendingActivation) {
+            healthEl.className = 'rounded-lg border border-[#ffd180]/40 bg-[#ffd180]/10 px-3 py-2 text-xs text-[#ffd180]';
+            healthEl.textContent = 'This authenticator is pending Steam activation. Auto-confirmation monitoring stays paused until Steam confirms activation.';
+            return;
+        }
+        const state = account.healthState || 'idle';
+        if (state === 'warning') {
+            healthEl.className = 'rounded-lg border border-error/40 bg-error-container/20 px-3 py-2 text-xs text-error';
+            healthEl.textContent = account.lastScanError || 'Last background confirmation check failed. Retrying with backoff.';
+        } else if (state === 'ok') {
+            healthEl.className = 'rounded-lg border border-[#4edea3]/30 bg-[#00a572]/15 px-3 py-2 text-xs text-[#4edea3]';
+            healthEl.textContent = 'Confirmation monitor healthy.';
+        } else {
+            healthEl.className = 'rounded-lg border border-white/10 bg-surface-container-low px-3 py-2 text-xs text-on-surface-variant';
+            healthEl.textContent = 'Confirmation monitor waiting for next scheduled check.';
+        }
+    }
+
+    function updateAccountOptionsPasswordSection(account) {
+        const section = document.getElementById('account-options-password-section');
+        if (!section || !account) return;
+        section.innerHTML = '';
+        section.classList.remove('hidden');
+
+        const heading = document.createElement('h3');
+        heading.className = 'text-xs font-semibold uppercase tracking-wider text-on-surface-variant';
+        heading.textContent = 'Silent Session Renewal Password';
+        section.appendChild(heading);
+
+        const status = document.createElement('p');
+        if (account.pendingActivation) {
+            status.className = 'text-xs text-on-surface-variant';
+            status.textContent = 'Verify and activate this authenticator on Steam before saving a password for silent renewal.';
+            section.appendChild(status);
+            return;
+        }
+        if (!account.canSavePasswords) {
+            status.className = 'text-xs text-on-surface-variant';
+            status.textContent = 'Enable manifest encryption and opt into saved Steam passwords in Settings to store a password for silent renewal.';
+            section.appendChild(status);
+            return;
+        }
+
+        if (account.passwordRejected) {
+            status.className = 'text-xs text-error font-medium';
+            status.textContent = 'Status: Rejected by Steam — automatic renewal paused.';
+        } else if (account.hasSavedPassword) {
+            status.className = 'text-xs text-[#4edea3]';
+            status.textContent = 'Status: Saved (encrypted with your manifest passkey).';
+        } else {
+            status.className = 'text-xs text-on-surface-variant';
+            status.textContent = 'Status: Not saved.';
+        }
+        section.appendChild(status);
+
+        const btnRow = document.createElement('div');
+        btnRow.className = 'flex flex-wrap gap-2 pt-1';
+
+        const setBtn = document.createElement('button');
+        setBtn.type = 'button';
+        setBtn.className = 'rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 transition-colors';
+        setBtn.textContent = account.hasSavedPassword ? 'Update Saved Password' : 'Save Password';
+        setBtn.onclick = () => {
+            window.chrome.webview.postMessage({ action: 'set_account_password', steamId: account.steamId });
+        };
+        btnRow.appendChild(setBtn);
+
+        if (account.hasSavedPassword) {
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'rounded-lg border border-error/40 bg-error-container/20 px-3 py-1.5 text-xs font-medium text-error hover:bg-error-container/40 transition-colors';
+            removeBtn.textContent = 'Remove Saved Password';
+            removeBtn.onclick = () => {
+                window.chrome.webview.postMessage({ action: 'remove_account_password', steamId: account.steamId });
+            };
+            btnRow.appendChild(removeBtn);
+        }
+
+        section.appendChild(btnRow);
+    }
+
+    function updateAccountOptionsExportSection(account) {
+        const section = document.getElementById('account-options-export-section');
+        if (!section || !account || !account.steamId) return;
+        section.innerHTML = '';
+        section.classList.remove('hidden');
+
+        const isPending = Boolean(account.pendingActivation);
+        const heading = document.createElement('h3');
+        heading.className = 'text-xs font-semibold uppercase tracking-wider text-on-surface-variant';
+        heading.textContent = isPending ? 'Pending Backup Export' : 'Backup & Secret Export';
+        section.appendChild(heading);
+
+        const note = document.createElement('p');
+        note.className = 'text-xs text-on-surface-variant';
+        note.textContent = isPending
+            ? 'Export this pending authenticator record (including its recovery code) for backup. Active secret QR export is unavailable until Steam confirms activation.'
+            : 'Export this account for backup or scan its login secret into KeePassXC or Bitwarden. Saved Steam passwords are never exported.';
+        section.appendChild(note);
+
+        const btnRow = document.createElement('div');
+        btnRow.className = 'flex flex-wrap gap-2 pt-1';
+
+        const exportMaBtn = document.createElement('button');
+        exportMaBtn.type = 'button';
+        exportMaBtn.className = 'rounded-lg border border-white/15 bg-surface-variant px-3 py-1.5 text-xs font-medium text-on-surface hover:bg-surface-bright transition-colors';
+        exportMaBtn.textContent = isPending ? 'Export Pending .maFile' : 'Export .maFile';
+        exportMaBtn.onclick = () => {
+            window.chrome.webview.postMessage({ action: 'export_account_file', steamId: account.steamId, format: 'plain_mafile' });
+        };
+        btnRow.appendChild(exportMaBtn);
+
+        const exportZipBtn = document.createElement('button');
+        exportZipBtn.type = 'button';
+        exportZipBtn.className = 'rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 transition-colors';
+        exportZipBtn.textContent = isPending ? 'Export Pending Encrypted .zip' : 'Export Encrypted .zip';
+        exportZipBtn.onclick = () => {
+            window.chrome.webview.postMessage({ action: 'export_account_file', steamId: account.steamId, format: 'encrypted_zip' });
+        };
+        btnRow.appendChild(exportZipBtn);
+
+        const qrBtn = document.createElement('button');
+        qrBtn.type = 'button';
+        qrBtn.disabled = isPending;
+        qrBtn.title = isPending ? 'Verify Steam activation before exporting an active secret QR code.' : '';
+        qrBtn.className = isPending
+            ? 'rounded-lg border border-white/10 bg-surface-variant/40 px-3 py-1.5 text-xs font-medium text-on-surface-variant opacity-50 cursor-not-allowed transition-colors'
+            : 'rounded-lg border border-secondary/40 bg-secondary-container/20 px-3 py-1.5 text-xs font-medium text-secondary hover:bg-secondary-container/35 transition-colors';
+        qrBtn.textContent = 'Show Secret QR Code';
+        qrBtn.onclick = () => {
+            if (qrBtn.disabled) return;
+            window.chrome.webview.postMessage({ action: 'open_export_qr', steamId: account.steamId });
+        };
+        btnRow.appendChild(qrBtn);
+
+        section.appendChild(btnRow);
+    }
+
+    function openAccountOptionsModal(account) {
+        if (!account || !account.steamId) return;
+        accountOptionsPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        accountOptionsTarget = account;
+        accountOptionsSavePending = false;
+        const isPending = Boolean(account.pendingActivation);
+
+        document.getElementById('account-options-title').textContent = account.name;
+        document.getElementById('account-options-subtitle').textContent = isPending
+            ? 'SteamID ' + account.steamId + ' • Pending activation'
+            : 'SteamID ' + account.steamId;
+        document.getElementById('acct-opt-override').checked = Boolean(account.autoConfirmOverrideEnabled);
+        document.getElementById('acct-opt-auto-trades').checked = Boolean(account.autoConfirmTrades);
+        document.getElementById('acct-opt-auto-market').checked = Boolean(account.autoConfirmMarket);
+        document.getElementById('acct-opt-interval').value =
+            typeof account.tradeConfirmationCheckInterval === 'number' ? String(account.tradeConfirmationCheckInterval) : '';
+        const err = document.getElementById('account-options-error');
+        err.textContent = '';
+        err.classList.add('hidden');
+        document.getElementById('btn-save-account-options').disabled = isPending;
+        document.getElementById('acct-opt-override').disabled = isPending;
+        syncAccountOptionsOverrideUI();
+        updateAccountOptionsHealthBanner(account);
+        updateAccountOptionsPasswordSection(account);
+        updateAccountOptionsExportSection(account);
+
+        const modal = document.getElementById('account-options-modal');
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+
+        if (accountOptionsEscapeHandler)
+            document.removeEventListener('keydown', accountOptionsEscapeHandler);
+        accountOptionsEscapeHandler = event => {
+            if (event.key === 'Escape') {
+                if (accountOptionsSavePending) return;
+                event.preventDefault();
+                closeAccountOptionsModal();
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const focusables = Array.from(modal.querySelectorAll('button:not([disabled]), input:not([disabled])'));
+            if (focusables.length === 0) return;
+            const idx = focusables.indexOf(document.activeElement);
+            if (idx === -1) {
+                event.preventDefault();
+                focusables[event.shiftKey ? focusables.length - 1 : 0].focus();
+                return;
+            }
+            const next = event.shiftKey ? idx - 1 : idx + 1;
+            if (next < 0 || next >= focusables.length) {
+                event.preventDefault();
+                focusables[event.shiftKey ? focusables.length - 1 : 0].focus();
+            }
+        };
+        document.addEventListener('keydown', accountOptionsEscapeHandler);
+        const initialFocus = isPending
+            ? modal.querySelector('button:not([disabled]), input:not([disabled])')
+            : document.getElementById('acct-opt-override');
+        if (initialFocus)
+            initialFocus.focus();
+    }
+
+    function closeAccountOptionsModal() {
+        if (accountOptionsSavePending) return;
+        const closedSteamId = accountOptionsTarget ? accountOptionsTarget.steamId : null;
+        if (accountOptionsEscapeHandler) {
+            document.removeEventListener('keydown', accountOptionsEscapeHandler);
+            accountOptionsEscapeHandler = null;
+        }
+        accountOptionsTarget = null;
+        const modal = document.getElementById('account-options-modal');
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+        if (accountListRenderDeferred) {
+            accountListRenderDeferred = false;
+            renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+        }
+        const focusTarget = accountOptionsPreviousFocus;
+        accountOptionsPreviousFocus = null;
+        if (focusTarget && focusTarget.isConnected && !focusTarget.disabled) {
+            focusTarget.focus();
+        } else if (closedSteamId) {
+            const restoredOptionsBtn = document.querySelector('button[data-options-steam-id="' + closedSteamId + '"]');
+            if (restoredOptionsBtn && !restoredOptionsBtn.disabled)
+                restoredOptionsBtn.focus();
+        }
+    }
+
+    function saveAccountOptions() {
+        if (!accountOptionsTarget || accountOptionsSavePending) return;
+        const err = document.getElementById('account-options-error');
+        err.textContent = '';
+        err.classList.add('hidden');
+
+        const overrideEnabled = document.getElementById('acct-opt-override').checked;
+        const autoConfirmTrades = document.getElementById('acct-opt-auto-trades').checked;
+        const autoConfirmMarket = document.getElementById('acct-opt-auto-market').checked;
+        const intervalInput = document.getElementById('acct-opt-interval');
+        if (intervalInput.validity && intervalInput.validity.badInput) {
+            err.textContent = 'Check interval must be a whole number between 3 and 3600 seconds.';
+            err.classList.remove('hidden');
+            return;
+        }
+        const rawInterval = intervalInput.value.trim();
+        let checkInterval = null;
+        if (rawInterval !== '') {
+            const parsed = Number(rawInterval);
+            if (!Number.isInteger(parsed) || parsed < 3 || parsed > 3600) {
+                err.textContent = 'Check interval must be a whole number between 3 and 3600 seconds.';
+                err.classList.remove('hidden');
+                return;
+            }
+            checkInterval = parsed;
+        }
+
+        accountOptionsSavePending = true;
+        document.getElementById('btn-save-account-options').disabled = true;
+        document.getElementById('acct-opt-override').disabled = true;
+        syncAccountOptionsOverrideUI();
+
+        window.chrome.webview.postMessage({
+            action: 'save_account_settings',
+            steamId: accountOptionsTarget.steamId,
+            overrideEnabled: overrideEnabled,
+            autoConfirmTrades: autoConfirmTrades,
+            autoConfirmMarket: autoConfirmMarket,
+            checkInterval: checkInterval
+        });
+    }
+
+    function updateAccountMetadata(metadata) {
+        if (!metadata || !metadata.steamId) return;
+        const existing = allAccs.find(item => item.steamId === metadata.steamId);
+        if (!existing) return;
+        const prevCanSave = Boolean(existing.canSavePasswords);
+        const prevHasSaved = Boolean(existing.hasSavedPassword);
+        const prevRejected = Boolean(existing.passwordRejected);
+        const prevPending = Boolean(existing.pendingActivation);
+        if (typeof metadata.pendingActivation === 'boolean')
+            existing.pendingActivation = metadata.pendingActivation;
+        if (typeof metadata.autoConfirmOverrideEnabled === 'boolean')
+            existing.autoConfirmOverrideEnabled = metadata.autoConfirmOverrideEnabled;
+        if (typeof metadata.autoConfirmTrades === 'boolean')
+            existing.autoConfirmTrades = metadata.autoConfirmTrades;
+        if (typeof metadata.autoConfirmMarket === 'boolean')
+            existing.autoConfirmMarket = metadata.autoConfirmMarket;
+        if ('tradeConfirmationCheckInterval' in metadata)
+            existing.tradeConfirmationCheckInterval = metadata.tradeConfirmationCheckInterval;
+        if (typeof metadata.healthState === 'string')
+            existing.healthState = metadata.healthState;
+        if ('lastScanError' in metadata)
+            existing.lastScanError = metadata.lastScanError;
+        if (typeof metadata.hasSavedPassword === 'boolean')
+            existing.hasSavedPassword = metadata.hasSavedPassword;
+        if (typeof metadata.passwordRejected === 'boolean')
+            existing.passwordRejected = metadata.passwordRejected;
+        if (typeof metadata.recoveryInProgress === 'boolean')
+            existing.recoveryInProgress = metadata.recoveryInProgress;
+        if (typeof metadata.canSavePasswords === 'boolean')
+            existing.canSavePasswords = metadata.canSavePasswords;
+        if (accountOptionsTarget && accountOptionsTarget.steamId === metadata.steamId) {
+            const isPending = Boolean(existing.pendingActivation);
+            document.getElementById('btn-save-account-options').disabled = isPending || accountOptionsSavePending;
+            document.getElementById('acct-opt-override').disabled = isPending || accountOptionsSavePending;
+            syncAccountOptionsOverrideUI();
+            updateAccountOptionsHealthBanner(existing);
+            const passwordStateChanged =
+                prevPending !== isPending ||
+                prevCanSave !== Boolean(existing.canSavePasswords) ||
+                prevHasSaved !== Boolean(existing.hasSavedPassword) ||
+                prevRejected !== Boolean(existing.passwordRejected);
+            if (passwordStateChanged) {
+                updateAccountOptionsPasswordSection(existing);
+            }
+            if (prevPending !== isPending) {
+                document.getElementById('account-options-subtitle').textContent = isPending
+                    ? 'SteamID ' + existing.steamId + ' • Pending activation'
+                    : 'SteamID ' + existing.steamId;
+                updateAccountOptionsExportSection(existing);
+            }
+        }
+        if (accountOptionsTarget) {
+            accountListRenderDeferred = true;
+        } else {
+            renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+        }
+    }
+
+    function accountSettingsSaved(metadata) {
+        accountOptionsSavePending = false;
+        const isPending = Boolean(accountOptionsTarget && accountOptionsTarget.pendingActivation);
+        document.getElementById('btn-save-account-options').disabled = isPending;
+        document.getElementById('acct-opt-override').disabled = isPending;
+        syncAccountOptionsOverrideUI();
+        updateAccountMetadata(metadata);
+        closeAccountOptionsModal();
+    }
+
+    function accountSettingsSaveFailed(message) {
+        accountOptionsSavePending = false;
+        const isPending = Boolean(accountOptionsTarget && accountOptionsTarget.pendingActivation);
+        document.getElementById('btn-save-account-options').disabled = isPending;
+        document.getElementById('acct-opt-override').disabled = isPending;
+        syncAccountOptionsOverrideUI();
+        const err = document.getElementById('account-options-error');
+        err.textContent = message || 'Account options could not be saved.';
+        err.classList.remove('hidden');
+    }
+
+    document.getElementById('acct-opt-override').addEventListener('change', syncAccountOptionsOverrideUI);
+    document.getElementById('btn-close-account-options').addEventListener('click', closeAccountOptionsModal);
+    document.getElementById('btn-cancel-account-options').addEventListener('click', closeAccountOptionsModal);
+    document.getElementById('btn-save-account-options').addEventListener('click', saveAccountOptions);
+    document.getElementById('account-options-modal').addEventListener('click', event => {
+        if (event.target.id === 'account-options-modal' && !accountOptionsSavePending) closeAccountOptionsModal();
     });
 
     document.getElementById('filter-input').addEventListener('input', (e) => {
@@ -878,7 +1382,10 @@
     }
 
     function getConfirmationFallbackHeadline(confirmation) {
-        if (confirmation && confirmation.Type === 'MarketPurchase') return 'Market purchase';
+        if (confirmation && typeof confirmation.DefaultHeadline === 'string' && confirmation.DefaultHeadline.trim()) {
+            return confirmation.DefaultHeadline.trim();
+        }
+        if (confirmation && confirmation.Type === 'MarketPurchase') return 'Steam purchase';
         if (confirmation && confirmation.Type === 'MarketListing') return 'Market listing';
         const category = getConfirmationCategory(confirmation);
         if (category === 'market') return 'Steam market';
@@ -1065,6 +1572,7 @@
                 const image = document.createElement('img');
                 image.src = c.Icon;
                 image.alt = '';
+                image.referrerPolicy = 'no-referrer';
                 image.className = 'w-11 h-11 shrink-0 object-contain rounded-lg bg-surface-container-lowest border border-white/5';
                 image.onerror = () => image.remove();
                 content.appendChild(image);
@@ -1078,7 +1586,9 @@
             headline.textContent = c.Headline || getConfirmationFallbackHeadline(c);
             headline.title = headline.textContent;
             const type = document.createElement('span');
-            type.className = 'shrink-0 max-w-[40%] truncate rounded-full border border-white/10 bg-surface-variant px-2 py-0.5 text-xs text-on-surface-variant';
+            type.className = c.IsSecuritySensitive
+                ? 'shrink-0 max-w-[40%] truncate rounded-full border border-error/40 bg-error-container/30 px-2 py-0.5 text-xs font-medium text-error'
+                : 'shrink-0 max-w-[40%] truncate rounded-full border border-white/10 bg-surface-variant px-2 py-0.5 text-xs text-on-surface-variant';
             type.textContent = getConfirmationTypeLabel(c);
             type.title = type.textContent;
             top.appendChild(headline);
@@ -1099,13 +1609,13 @@
             cancel.type = 'button';
             cancel.disabled = isActionInFlight;
             cancel.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-error-container/30 hover:bg-error-container/60 text-error text-sm font-medium transition-colors border border-error/30 disabled:opacity-50 disabled:cursor-not-allowed';
-            cancel.textContent = 'Cancel';
+            cancel.textContent = (typeof c.CancelLabel === 'string' && c.CancelLabel.trim()) ? c.CancelLabel.trim() : 'Cancel';
             cancel.onclick = () => sendTradeAction(c.Id, 'reject_trade', card);
             const accept = document.createElement('button');
             accept.type = 'button';
             accept.disabled = isActionInFlight;
             accept.className = 'w-full sm:w-auto px-4 py-2 rounded-lg bg-[#00a572]/20 hover:bg-[#00a572]/40 text-[#4edea3] text-sm font-medium transition-colors border border-[#4edea3]/30 disabled:opacity-50 disabled:cursor-not-allowed';
-            accept.textContent = 'Accept';
+            accept.textContent = (typeof c.AcceptLabel === 'string' && c.AcceptLabel.trim()) ? c.AcceptLabel.trim() : 'Accept';
             accept.onclick = () => sendTradeAction(c.Id, 'accept_trade', card);
             actions.appendChild(cancel);
             actions.appendChild(accept);
@@ -1179,7 +1689,11 @@
 
     document.getElementById('btn-refresh-login-actions').addEventListener('click', () => {
         showRefreshSpinner('login-actions');
-        window.chrome.webview.postMessage({ action: 'refresh_login_actions' });
+        const loginSelect = document.getElementById('login-account-select');
+        window.chrome.webview.postMessage({
+            action: 'refresh_login_actions',
+            steamId: loginSelect ? (loginSelect.value || 'all') : 'all'
+        });
     });
     document.getElementById('login-account-select').addEventListener('change', event => {
         const selectedAccount = event.target.value;
@@ -1420,7 +1934,7 @@
             const badges = document.createElement('div');
             badges.className = 'flex flex-wrap gap-2';
             badges.appendChild(loginBadge(request.requestedPersistence || 'Not specified', 'neutral'));
-            if (request.securityHistory === 'New or unknown login') badges.appendChild(loginBadge('New login', 'warning'));
+            if (request.isNewLogin || request.securityHistory === 'First-time login') badges.appendChild(loginBadge('New login', 'warning'));
             if (request.locationMismatch) badges.appendChild(loginBadge('Location mismatch', 'warning'));
             if (request.highUsageLogin) badges.appendChild(loginBadge('High-use login', 'warning'));
             heading.appendChild(titleGroup);
@@ -1526,6 +2040,7 @@
     const saveBoundSettingIds = [
         'trade-confirmation-custom-interval-enabled', 'trade-confirmation-check-interval',
         'auto-confirm-market', 'auto-confirm-trades', 'close-to-tray', 'check-for-updates',
+        'allow-saved-steam-passwords',
         'diagnostic-error-logging-enabled', 'login-action-monitoring-enabled',
         'login-action-mode', 'login-action-auto-allow-ip-enabled',
         'login-action-auto-allow-current-device-ip', 'login-action-auto-allow-ip',
@@ -1543,6 +2058,7 @@
             autoConfirmTrades: document.getElementById('auto-confirm-trades').checked,
             minimizeToTray: document.getElementById('close-to-tray').checked,
             checkForUpdates: document.getElementById('check-for-updates').checked,
+            allowSavedSteamPasswords: document.getElementById('allow-saved-steam-passwords').checked,
             diagnosticErrorLoggingEnabled: document.getElementById('diagnostic-error-logging-enabled').checked,
             loginActionMonitoringEnabled: document.getElementById('login-action-monitoring-enabled').checked,
             loginActionMode: document.getElementById('login-action-mode').value,
@@ -1632,6 +2148,14 @@
     document.getElementById('btn-check-for-updates').addEventListener('click', () => {
         updateCheckState(true, 'Checking for updates…', 'info');
         window.chrome.webview.postMessage({ action: 'check_for_updates' });
+    });
+
+    document.getElementById('btn-export-all-encrypted').addEventListener('click', () => {
+        window.chrome.webview.postMessage({ action: 'export_all_accounts', format: 'encrypted_zip' });
+    });
+
+    document.getElementById('btn-export-all-plain').addEventListener('click', () => {
+        window.chrome.webview.postMessage({ action: 'export_all_accounts', format: 'plain_zip' });
     });
 
     const proxyPassword = document.getElementById('proxy-pass');
@@ -1731,6 +2255,18 @@
         document.getElementById('auto-confirm-trades').checked = settings.autoConfirmTrades;
         document.getElementById('close-to-tray').checked = settings.minimizeToTray;
         document.getElementById('check-for-updates').checked = settings.checkForUpdates !== false;
+        const allowSavedCb = document.getElementById('allow-saved-steam-passwords');
+        const allowSavedNote = document.getElementById('allow-saved-passwords-note');
+        const canEnableSavedPasswords = !!settings.manifestEncrypted && settings.aesGcmSupported !== false;
+        allowSavedCb.disabled = !canEnableSavedPasswords;
+        allowSavedCb.checked = canEnableSavedPasswords && !!settings.allowSavedSteamPasswords;
+        if (!settings.manifestEncrypted) {
+            allowSavedNote.textContent = 'Disabled because manifest encryption is off. Set up encryption on the Authenticator tab to enable saved passwords.';
+        } else if (settings.aesGcmSupported === false) {
+            allowSavedNote.textContent = 'Unavailable because AES-GCM encryption is not supported on this system.';
+        } else {
+            allowSavedNote.textContent = 'Opt-in only. Stored separately in AES-256-GCM (PBKDF2-SHA256) encrypted with your passkey and never included in exports. Turning this off deletes all saved passwords.';
+        }
         document.getElementById('diagnostic-error-logging-enabled').checked = !!settings.diagnosticErrorLoggingEnabled;
         document.getElementById('login-action-monitoring-enabled').checked = settings.loginActionMonitoringEnabled;
         document.getElementById('login-action-mode').value = settings.loginActionMode || 'manual';
