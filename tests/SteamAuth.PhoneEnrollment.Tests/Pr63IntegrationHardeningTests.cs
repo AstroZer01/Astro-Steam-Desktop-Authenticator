@@ -391,6 +391,61 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public async Task TryVerifyLegacyDeviceCodeAcceptanceAsync_RequiresAffirmativeOkAndRejectsDuplicateRequest()
+        {
+            SteamGuardAccount legacyUpgraded = CreateAccount(76561198000009015UL, "upgraded-legacy-dup", fullyEnrolled: false);
+            legacyUpgraded.TokenGID = null;
+            legacyUpgraded.DeviceID = null;
+
+            Assert.True(LoginForm.RequiresLegacyDeviceCodeProof(LoginForm.LoginType.Refresh, legacyUpgraded));
+            Assert.False(LoginForm.RequiresLegacyDeviceCodeProof(LoginForm.LoginType.Initial, legacyUpgraded));
+
+            // Affirmative EResult.OK proves Steam accepted this local record's TOTP code.
+            bool okAccepted = await LoginForm.TryVerifyLegacyDeviceCodeAcceptanceAsync(
+                _ => Task.FromResult("ABCDE"),
+                (_, _) => Task.FromResult(SteamKit2.EResult.OK),
+                CancellationToken.None);
+            Assert.True(okAccepted);
+
+            // EResult.DuplicateRequest (e.g., mobile approval completing sign-in ahead of local code)
+            // must NOT count as affirmative code acceptance and must leave legacy recovery Unverified.
+            bool duplicateAccepted = await LoginForm.TryVerifyLegacyDeviceCodeAcceptanceAsync(
+                _ => Task.FromResult("ABCDE"),
+                (_, _) => Task.FromResult(SteamKit2.EResult.DuplicateRequest),
+                CancellationToken.None);
+            Assert.False(duplicateAccepted);
+
+            bool mismatchAccepted = await LoginForm.TryVerifyLegacyDeviceCodeAcceptanceAsync(
+                _ => Task.FromResult("ABCDE"),
+                (_, _) => Task.FromResult(SteamKit2.EResult.TwoFactorCodeMismatch),
+                CancellationToken.None);
+            Assert.False(mismatchAccepted);
+
+            var activeStatus = new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+            {
+                Result = 1,
+                Body = new SteamAuth.Protocol.CTwoFactor_Status_Response
+                {
+                    State = 1,
+                    TokenGid = "gid-from-steam",
+                    DeviceIdentifier = "android:from-steam"
+                }
+            };
+            Assert.Equal(
+                AuthenticatorActivationStatus.Unverified,
+                SteamGuardAccount.EvaluateActivationStatusResponse(
+                    legacyUpgraded,
+                    activeStatus,
+                    allowUncorroboratedActiveWhenDeviceCodeVerified: duplicateAccepted));
+            Assert.Equal(
+                AuthenticatorActivationStatus.ActiveForThisRecord,
+                SteamGuardAccount.EvaluateActivationStatusResponse(
+                    legacyUpgraded,
+                    activeStatus,
+                    allowUncorroboratedActiveWhenDeviceCodeVerified: okAccepted));
+        }
+
+        [Fact]
         public void ShouldDeletePendingOnExplicitCancel_PreservesPendingRecordAfterSteamAcceptsFinalization()
         {
             Assert.True(LoginForm.ShouldDeletePendingOnExplicitCancel(finalizationAcceptedBySteam: false));

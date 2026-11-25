@@ -14,7 +14,6 @@ namespace Steam_Desktop_Authenticator
         private readonly CancellationToken cancellationToken;
         private readonly bool allowInteractiveDeviceAuth;
         private int deviceCodesGenerated = 0;
-        public bool UsedLocalAccountDeviceCode { get; private set; }
 
         public UserFormAuthenticator(
             SteamGuardAccount account,
@@ -128,8 +127,6 @@ namespace Steam_Desktop_Authenticator
                 cancellationToken.ThrowIfCancellationRequested();
                 deviceCode = await account.GenerateSteamGuardCodeAsync(cancellationToken);
                 deviceCodesGenerated++;
-                if (!String.IsNullOrWhiteSpace(deviceCode))
-                    UsedLocalAccountDeviceCode = true;
             }
 
             return deviceCode;

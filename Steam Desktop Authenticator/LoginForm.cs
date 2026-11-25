@@ -54,6 +54,57 @@ namespace Steam_Desktop_Authenticator
             return !finalizationAcceptedBySteam;
         }
 
+        internal static bool RequiresLegacyDeviceCodeProof(LoginType loginReason, SteamGuardAccount targetAccount)
+        {
+            return loginReason == LoginType.Refresh &&
+                targetAccount != null &&
+                !targetAccount.FullyEnrolled &&
+                String.IsNullOrWhiteSpace(targetAccount.TokenGID) &&
+                String.IsNullOrWhiteSpace(targetAccount.DeviceID) &&
+                !String.IsNullOrWhiteSpace(targetAccount.SharedSecret);
+        }
+
+        internal static async Task<bool> TryVerifyLegacyDeviceCodeAcceptanceAsync(
+            Func<CancellationToken, Task<string>> generateDeviceCodeAsync,
+            Func<string, CancellationToken, Task<EResult>> submitDeviceCodeAsync,
+            CancellationToken cancellationToken)
+        {
+            if (generateDeviceCodeAsync == null || submitDeviceCodeAsync == null)
+                return false;
+
+            string code = await generateDeviceCodeAsync(cancellationToken);
+            if (String.IsNullOrWhiteSpace(code))
+                return false;
+
+            EResult result = await submitDeviceCodeAsync(code, cancellationToken);
+            // Only an affirmative EResult.OK proves Steam accepted this local record's
+            // TOTP code. EResult.DuplicateRequest (such as mobile approval racing ahead)
+            // fails closed so a stale record lacking identifiers is never promoted.
+            return result == EResult.OK;
+        }
+
+        private static async Task<AuthPollResult> PollAfterAffirmativeDeviceCodeAsync(
+            CredentialsAuthSession authSession,
+            CancellationToken cancellationToken)
+        {
+            DateTime deadlineUtc = DateTime.UtcNow.AddSeconds(30);
+            TimeSpan interval = authSession.PollingInterval > TimeSpan.Zero
+                ? authSession.PollingInterval
+                : TimeSpan.FromSeconds(1);
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                AuthPollResult pollResult = await authSession.PollAuthSessionStatusAsync().WaitAsync(cancellationToken);
+                if (pollResult != null)
+                    return pollResult;
+                if (DateTime.UtcNow >= deadlineUtc)
+                    throw new TimeoutException("Steam did not finalize authentication after accepting the Steam Guard code.");
+
+                await Task.Delay(interval, cancellationToken);
+            }
+        }
+
         public LoginForm(
             LoginType loginReason = LoginType.Initial,
             SteamGuardAccount account = null,
@@ -445,7 +496,6 @@ namespace Steam_Desktop_Authenticator
             }
 
             // Create a new auth session
-            UserFormAuthenticator userAuthenticator = new UserFormAuthenticator(this.account, this, cancellationToken, allowInteractiveDeviceAuth: LoginReason == LoginType.Transfer);
             CredentialsAuthSession authSession;
             try
             {
@@ -457,7 +507,7 @@ namespace Steam_Desktop_Authenticator
                     IsPersistentSession = LoginReason == LoginType.Transfer,
                     PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_MobileApp,
                     ClientOSType = EOSType.Android9,
-                    Authenticator = userAuthenticator,
+                    Authenticator = new UserFormAuthenticator(this.account, this, cancellationToken, allowInteractiveDeviceAuth: LoginReason == LoginType.Transfer),
                 });
             }
             catch (AuthenticatorAlreadyLinkedException)
@@ -495,11 +545,54 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
+            bool legacyDeviceCodeAffirmativelyAccepted = false;
+            if (RequiresLegacyDeviceCodeProof(LoginReason, this.account) &&
+                this.account?.Session != null &&
+                authSession.SteamID.ConvertToUInt64() == this.account.Session.SteamID)
+            {
+                try
+                {
+                    SteamKit2.Internal.Authentication authService = steamClient
+                        .GetHandler<SteamUnifiedMessages>()
+                        ?.CreateService<SteamKit2.Internal.Authentication>();
+                    if (authService != null)
+                    {
+                        legacyDeviceCodeAffirmativelyAccepted = await TryVerifyLegacyDeviceCodeAcceptanceAsync(
+                            ct => this.account.GenerateSteamGuardCodeAsync(ct),
+                            async (code, ct) =>
+                            {
+                                var response = await authService.UpdateAuthSessionWithSteamGuardCode(
+                                    new CAuthentication_UpdateAuthSessionWithSteamGuardCode_Request
+                                    {
+                                        client_id = authSession.ClientID,
+                                        steamid = authSession.SteamID.ConvertToUInt64(),
+                                        code = code,
+                                        code_type = EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode
+                                    }).ToTask().WaitAsync(ct);
+                                return response.Result;
+                            },
+                            cancellationToken);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    ResetLoginButton(cancellationToken);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Steam login verification", ex, "Could not affirmatively verify legacy Steam Guard device code acceptance.");
+                    legacyDeviceCodeAffirmativelyAccepted = false;
+                }
+            }
+
             // Starting polling Steam for authentication response
             AuthPollResult pollResponse;
             try
             {
-                pollResponse = await authSession.PollingWaitForResultAsync(cancellationToken);
+                pollResponse = legacyDeviceCodeAffirmativelyAccepted
+                    ? await PollAfterAffirmativeDeviceCodeAsync(authSession, cancellationToken)
+                    : await authSession.PollingWaitForResultAsync(cancellationToken);
             }
             catch (AuthenticatorAlreadyLinkedException)
             {
@@ -582,7 +675,7 @@ namespace Steam_Desktop_Authenticator
                             resolvedKey,
                             (candidate, ct) => candidate.VerifyAuthenticatorActivationAsync(
                                 ct,
-                                allowUncorroboratedActiveWhenDeviceCodeVerified: userAuthenticator.UsedLocalAccountDeviceCode),
+                                allowUncorroboratedActiveWhenDeviceCodeVerified: legacyDeviceCodeAffirmativelyAccepted),
                             cancellationToken,
                             expectedStorageRevision);
                     }
