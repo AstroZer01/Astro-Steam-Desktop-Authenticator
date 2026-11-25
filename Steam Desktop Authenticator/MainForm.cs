@@ -113,6 +113,7 @@ namespace Steam_Desktop_Authenticator
         private readonly Func<bool, string, string, Task> publishUpdateCheckStateAsync;
         private readonly Action<string, string, ToolTipIcon> notifyLoginAction;
         private readonly Func<Task> publishLoginActionsAsync;
+        private readonly Func<CancellationToken, Task<string>> getCurrentPublicIpv4Async;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -520,7 +521,8 @@ namespace Steam_Desktop_Authenticator
             LoginApprovalService loginApprovalService = null,
             Action<string, string, ToolTipIcon> notifyLoginAction = null,
             SteamGuardAccount[] initialAccounts = null,
-            Func<Task> publishLoginActionsAsync = null)
+            Func<Task> publishLoginActionsAsync = null,
+            Func<CancellationToken, Task<string>> getCurrentPublicIpv4Async = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
@@ -538,6 +540,7 @@ namespace Steam_Desktop_Authenticator
             this.loginApprovalService = loginApprovalService;
             this.notifyLoginAction = notifyLoginAction ?? ShowLoginActionNotification;
             this.publishLoginActionsAsync = publishLoginActionsAsync ?? PublishCachedLoginActionsToWebViewAsync;
+            this.getCurrentPublicIpv4Async = getCurrentPublicIpv4Async ?? GetCurrentPublicIpv4Async;
         }
 
         private static (DialogResult Result, bool DisableStartupChecks) ShowUpdateAvailablePrompt(Version latestVersion, string checkboxText)
@@ -1918,7 +1921,6 @@ namespace Steam_Desktop_Authenticator
                 await ScanLoginAccountAsync(
                     nextAccount,
                     useKnownRequestsCache: true,
-                    applyAutomatedActions: manifest.LoginActionMode != LoginActionModes.Manual,
                     notifyManualRequests: true,
                     isBackgroundMonitor: true,
                     scanContext: new LoginScanContext(),
@@ -1990,7 +1992,6 @@ namespace Steam_Desktop_Authenticator
         private async Task<LoginAccountScanOutcome> ScanLoginAccountAsync(
             SteamGuardAccount account,
             bool useKnownRequestsCache,
-            bool applyAutomatedActions,
             bool notifyManualRequests,
             bool isBackgroundMonitor,
             LoginScanContext scanContext,
@@ -2068,7 +2069,33 @@ namespace Steam_Desktop_Authenticator
                     continue;
                 pendingLoginRequests[requestKey] = request;
 
-                if (!applyAutomatedActions || !manifest.LoginActionMonitoringEnabled || manifest.LoginActionMode == LoginActionModes.Manual)
+                if (!manifest.LoginActionMonitoringEnabled || manifest.LoginActionMode == LoginActionModes.Manual)
+                {
+                    if (notifyManualRequests && manifest.LoginActionMonitoringEnabled && notifiedLoginRequests.Add(requestKey))
+                    {
+                        string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
+                        NotifyLoginAction("Steam login approval needed", account.AccountName + ": " + device, ToolTipIcon.Info);
+                    }
+                    continue;
+                }
+
+                if (manifest.LoginActionMode == LoginActionModes.Deny &&
+                    manifest.LoginActionAutoAllowIpEnabled &&
+                    manifest.LoginActionAutoAllowCurrentDeviceIp &&
+                    !(!String.IsNullOrWhiteSpace(manifest.LoginActionAutoAllowIp) &&
+                      AreSameIpv4Address(request.IPAddress, manifest.LoginActionAutoAllowIp)) &&
+                    IsValidIpv4Address(request.IPAddress) &&
+                    !scanContext.CurrentDeviceIpChecked)
+                {
+                    scanContext.CurrentDeviceIp = await getCurrentPublicIpv4Async(cancellationToken);
+                    scanContext.CurrentDeviceIpChecked = true;
+                }
+
+                // Re-evaluate live rules and session availability after any async public-IP lookup.
+                if (!IsSessionAvailableForAccountOperations(account))
+                    break;
+                string currentActionMode = manifest.LoginActionMode;
+                if (!manifest.LoginActionMonitoringEnabled || currentActionMode == LoginActionModes.Manual)
                 {
                     if (notifyManualRequests && manifest.LoginActionMonitoringEnabled && notifiedLoginRequests.Add(requestKey))
                     {
@@ -2079,26 +2106,19 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 bool allowWhitelistedIp = false;
-                if (manifest.LoginActionMode == LoginActionModes.Deny && manifest.LoginActionAutoAllowIpEnabled)
+                if (currentActionMode == LoginActionModes.Deny && manifest.LoginActionAutoAllowIpEnabled)
                 {
                     bool allowAdditionalIp = !String.IsNullOrWhiteSpace(manifest.LoginActionAutoAllowIp) &&
                         AreSameIpv4Address(request.IPAddress, manifest.LoginActionAutoAllowIp);
-                    bool allowCurrentDeviceIp = false;
-                    if (!allowAdditionalIp && manifest.LoginActionAutoAllowCurrentDeviceIp && IsValidIpv4Address(request.IPAddress))
-                    {
-                        if (!scanContext.CurrentDeviceIpChecked)
-                        {
-                            scanContext.CurrentDeviceIp = await GetCurrentPublicIpv4Async(cancellationToken);
-                            scanContext.CurrentDeviceIpChecked = true;
-                        }
-                        allowCurrentDeviceIp = AreSameIpv4Address(request.IPAddress, scanContext.CurrentDeviceIp);
-                    }
+                    bool allowCurrentDeviceIp = !allowAdditionalIp &&
+                        manifest.LoginActionAutoAllowCurrentDeviceIp &&
+                        AreSameIpv4Address(request.IPAddress, scanContext.CurrentDeviceIp);
                     allowWhitelistedIp = allowAdditionalIp || allowCurrentDeviceIp;
                 }
-                LoginApprovalDecision decision = manifest.LoginActionMode == LoginActionModes.ApprovePersistent || allowWhitelistedIp
+                LoginApprovalDecision decision = currentActionMode == LoginActionModes.ApprovePersistent || allowWhitelistedIp
                     ? LoginApprovalDecision.ApprovePersistent
                     : LoginApprovalDecision.Deny;
-                string actionKey = requestKey + "|" + manifest.LoginActionMode + "|" + decision;
+                string actionKey = requestKey + "|" + currentActionMode + "|" + decision;
                 if (completedAutomatedLoginActions.Contains(actionKey))
                     continue;
 
@@ -2975,7 +2995,6 @@ namespace Steam_Desktop_Authenticator
                 return;
 
             var scanContext = new LoginScanContext();
-            bool applyAutomatedActions = manifest.LoginActionMonitoringEnabled && manifest.LoginActionMode != LoginActionModes.Manual;
             foreach (SteamGuardAccount account in targetAccounts)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -2985,7 +3004,6 @@ namespace Steam_Desktop_Authenticator
                 LoginAccountScanOutcome outcome = await ScanLoginAccountAsync(
                     account,
                     useKnownRequestsCache: false,
-                    applyAutomatedActions: applyAutomatedActions,
                     notifyManualRequests: false,
                     isBackgroundMonitor: false,
                     scanContext: scanContext,
@@ -3227,6 +3245,7 @@ namespace Steam_Desktop_Authenticator
 
                     if (queuedManualLoginRefreshScope == null)
                     {
+                        manualLoginRefreshScanStarted = true;
                         manualLoginRefreshPublishing = true;
                         shouldPublish = true;
                     }

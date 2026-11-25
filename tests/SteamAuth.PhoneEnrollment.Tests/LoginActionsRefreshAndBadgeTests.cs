@@ -460,6 +460,103 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
+        [Fact]
+        public async Task MonitorLoginActionsAsync_EvaluatesAutomaticRuleEnabledWhileFetchIsInFlight()
+        {
+            var transport = new StubLoginTransport();
+            SteamGuardAccount account = CreateAccount(76561198000011001UL, "acct_live_enable", transport);
+            transport.SetPendingRequest(account.Session.AccessToken, 15001UL, CreateSessionInfo("Unknown PC", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory));
+
+            var fetchEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFetch = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            transport.OnSessionListFetchAsync = async (token, count, _) =>
+            {
+                if (token == account.Session.AccessToken && count == 1)
+                {
+                    fetchEntered.TrySetResult(true);
+                    await releaseFetch.Task;
+                }
+            };
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.LoginActionMonitoringEnabled = true;
+            manifest.LoginActionMode = LoginActionModes.Manual;
+
+            var notifications = new List<string>();
+            var service = new LoginApprovalService(_ => true, transport);
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                loginApprovalService: service,
+                notifyLoginAction: (title, message, icon) => notifications.Add(title + "|" + message),
+                initialAccounts: new[] { account }))
+            {
+                Task monitorTask = form.MonitorLoginActionsAsync();
+                await fetchEntered.Task;
+
+                // User enables automatic denial while the monitor fetch is in flight.
+                manifest.LoginActionMode = LoginActionModes.Deny;
+                releaseFetch.SetResult(true);
+
+                await monitorTask;
+
+                var decision = Assert.Single(transport.ActionDecisions);
+                Assert.False(decision.Confirm);
+                Assert.DoesNotContain(notifications, item => item.StartsWith("Steam login approval needed|", StringComparison.Ordinal));
+                Assert.Contains(notifications, item => item.StartsWith("Automatically denied Steam login|", StringComparison.Ordinal));
+            }
+        }
+
+        [Fact]
+        public async Task RefreshLoginActionsAsync_DoesNotSendAutomaticDecisionWhenSwitchedToManualDuringPublicIpLookup()
+        {
+            var transport = new StubLoginTransport();
+            SteamGuardAccount account = CreateAccount(76561198000012001UL, "acct_live_manual", transport);
+            transport.SetPendingRequest(account.Session.AccessToken, 16001UL, CreateSessionInfo("Desktop PC", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory));
+
+            var ipLookupEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseIpLookup = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.LoginActionMonitoringEnabled = true;
+            manifest.LoginActionMode = LoginActionModes.Deny;
+            manifest.LoginActionAutoAllowIpEnabled = true;
+            manifest.LoginActionAutoAllowCurrentDeviceIp = true;
+
+            var service = new LoginApprovalService(_ => true, transport);
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                loginApprovalService: service,
+                notifyLoginAction: (_, __, ___) => { },
+                initialAccounts: new[] { account },
+                getCurrentPublicIpv4Async: async _ =>
+                {
+                    ipLookupEntered.TrySetResult(true);
+                    await releaseIpLookup.Task;
+                    return "203.0.113.99";
+                }))
+            {
+                Task refreshTask = form.RefreshLoginActionsAsync("all");
+                await ipLookupEntered.Task;
+
+                // User switches back to Manual mode while public IP lookup is in flight.
+                manifest.LoginActionMode = LoginActionModes.Manual;
+                releaseIpLookup.SetResult(true);
+
+                await refreshTask;
+
+                Assert.Empty(transport.ActionDecisions);
+                JObject payload = JObject.Parse(form.BuildCachedLoginActionsPayloadJson());
+                JToken pending = Assert.Single((JArray)payload["requests"]);
+                Assert.Equal("16001", pending.Value<string>("clientId"));
+            }
+        }
+
         private static void ClearLoginMonitorSchedules(MainForm form)
         {
             var lockField = typeof(MainForm).GetField("sessionStateLock", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
