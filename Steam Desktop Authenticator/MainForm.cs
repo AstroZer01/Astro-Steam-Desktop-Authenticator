@@ -1644,11 +1644,114 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private const int WmSizing = 0x0214;
+        private const int WmszLeft = 1;
+        private const int WmszRight = 2;
+        private const int WmszTop = 3;
+        private const int WmszTopLeft = 4;
+        private const int WmszTopRight = 5;
+        private const int WmszBottom = 6;
+        private const int WmszBottomLeft = 7;
+        private const int WmszBottomRight = 8;
+        private const int DefaultModernWindowWidth = 920;
+        private const int DefaultModernWindowHeight = 660;
+        private const double ModernWindowAspectRatio = (double)DefaultModernWindowWidth / DefaultModernWindowHeight;
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct ResizeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        internal static void AdjustResizeRectForAspectRatio(ref ResizeRect rect, int edge, double aspectRatio, int minWidth, int minHeight)
+        {
+            if (aspectRatio <= 0)
+                return;
+
+            int effectiveMinWidth = Math.Max(1, minWidth);
+            int effectiveMinHeight = Math.Max(1, minHeight);
+            int width = rect.Right - rect.Left;
+            int height = rect.Bottom - rect.Top;
+
+            switch (edge)
+            {
+                case WmszLeft:
+                case WmszRight:
+                {
+                    int targetWidth = Math.Max(effectiveMinWidth, width);
+                    int targetHeight = Math.Max(effectiveMinHeight, (int)Math.Round(targetWidth / aspectRatio));
+                    targetWidth = Math.Max(effectiveMinWidth, (int)Math.Round(targetHeight * aspectRatio));
+                    if (edge == WmszLeft)
+                        rect.Left = rect.Right - targetWidth;
+                    else
+                        rect.Right = rect.Left + targetWidth;
+                    rect.Bottom = rect.Top + targetHeight;
+                    break;
+                }
+                case WmszTop:
+                case WmszBottom:
+                {
+                    int targetHeight = Math.Max(effectiveMinHeight, height);
+                    int targetWidth = Math.Max(effectiveMinWidth, (int)Math.Round(targetHeight * aspectRatio));
+                    targetHeight = Math.Max(effectiveMinHeight, (int)Math.Round(targetWidth / aspectRatio));
+                    if (edge == WmszTop)
+                        rect.Top = rect.Bottom - targetHeight;
+                    else
+                        rect.Bottom = rect.Top + targetHeight;
+                    rect.Right = rect.Left + targetWidth;
+                    break;
+                }
+                case WmszTopLeft:
+                case WmszTopRight:
+                case WmszBottomLeft:
+                case WmszBottomRight:
+                {
+                    // Orthogonal projection onto the aspect-ratio ray keeps corner dragging smooth
+                    // in both grow and shrink directions without sticking to one axis.
+                    double scale = (width * aspectRatio + height) / (aspectRatio * aspectRatio + 1.0);
+                    double minScale = Math.Max(effectiveMinWidth / aspectRatio, effectiveMinHeight);
+                    if (scale < minScale)
+                        scale = minScale;
+
+                    int targetHeight = Math.Max(effectiveMinHeight, (int)Math.Round(scale));
+                    int targetWidth = Math.Max(effectiveMinWidth, (int)Math.Round(scale * aspectRatio));
+
+                    if (edge == WmszTopLeft || edge == WmszBottomLeft)
+                        rect.Left = rect.Right - targetWidth;
+                    else
+                        rect.Right = rect.Left + targetWidth;
+
+                    if (edge == WmszTopLeft || edge == WmszTopRight)
+                        rect.Top = rect.Bottom - targetHeight;
+                    else
+                        rect.Bottom = rect.Top + targetHeight;
+                    break;
+                }
+            }
+        }
+
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == Program.RestoreExistingInstanceMessage)
             {
                 TryBeginInvoke(() => RestoreWindowFromActivation(true));
+                return;
+            }
+
+            if (m.Msg == WmSizing && m.LParam != IntPtr.Zero && this.FormBorderStyle == FormBorderStyle.Sizable)
+            {
+                ResizeRect rect = Marshal.PtrToStructure<ResizeRect>(m.LParam);
+                AdjustResizeRectForAspectRatio(
+                    ref rect,
+                    m.WParam.ToInt32(),
+                    ModernWindowAspectRatio,
+                    this.MinimumSize.Width,
+                    this.MinimumSize.Height);
+                Marshal.StructureToPtr(rect, m.LParam, true);
+                m.Result = (IntPtr)1;
                 return;
             }
 
@@ -6093,10 +6196,10 @@ namespace Steam_Desktop_Authenticator
 
         private async void SetupModernUI()
         {
-            this.MinimumSize = new Size(440, 560);
+            this.MinimumSize = new Size(720, 517);
             this.MaximumSize = Size.Empty;
-            this.Size = new Size(920, 660);
-            this.MaximizeBox = true;
+            this.Size = new Size(DefaultModernWindowWidth, DefaultModernWindowHeight);
+            this.MaximizeBox = false;
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.BackColor = AstroTheme.Background;
             this.Text = "Astro SDA";
