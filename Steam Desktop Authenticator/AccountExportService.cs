@@ -344,33 +344,10 @@ namespace Steam_Desktop_Authenticator
                         FileFlagBackupSemantics | FileFlagOpenReparsePoint,
                         IntPtr.Zero);
 
-                    if (handle.IsInvalid && !isLeaf)
-                    {
-                        int lastError = Marshal.GetLastWin32Error();
-                        handle.Dispose();
-                        if (lastError == ErrorAccessDenied)
-                        {
-                            // Traverse-only ancestor directory: still open without FILE_SHARE_DELETE
-                            // and verify it is not a reparse point or the live maFiles directory.
-                            handle = CreateFileW(
-                                dirPath,
-                                0,
-                                FileShareReadWrite,
-                                IntPtr.Zero,
-                                OpenExisting,
-                                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
-                                IntPtr.Zero);
-                        }
-                        else
-                        {
-                            throw new IOException("Could not open and pin the export destination directory path.");
-                        }
-                    }
-
                     if (handle.IsInvalid)
                     {
                         handle.Dispose();
-                        throw new IOException("Could not open and verify the export destination directory.");
+                        throw new IOException("Could not open and pin the export destination directory path.");
                     }
 
                     handles.Add(handle);
@@ -540,7 +517,6 @@ namespace Steam_Desktop_Authenticator
             public uint FileIndexLow;
         }
 
-        private const int ErrorAccessDenied = 5;
         private const uint FileListDirectory = 0x00000001;
         private const uint FileFlagBackupSemantics = 0x02000000;
         private const uint FileFlagOpenReparsePoint = 0x00200000;

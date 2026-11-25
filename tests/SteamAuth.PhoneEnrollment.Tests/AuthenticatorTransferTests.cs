@@ -1110,5 +1110,72 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.False(form.IsTransferFenceOrMarkerActive(steamId));
             }
         }
+
+        [Fact]
+        public void CorruptPendingMarker_SuppressesOlderStagedRecoveryWithoutDeletingStagedFile()
+        {
+            ulong steamId = 76561198000000094UL;
+            SteamGuardAccount olderStaged = new SteamGuardAccount
+            {
+                AccountName = "corrupt_marker_user",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(1, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(21, 20).Select(i => (byte)i).ToArray()),
+                RevocationCode = "RCM001",
+                DeviceID = "android:cm",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = steamId }
+            };
+
+            string stagedPath = PendingTransferMarker.TryStageProtectedReplacement(
+                olderStaged,
+                manifestEncrypted: false,
+                passKey: null,
+                out bool stagingFailed,
+                transferAttemptId: "attempt-old-cm");
+            Assert.False(stagingFailed);
+            Assert.True(File.Exists(stagedPath));
+
+            // Write an unreadable/corrupt marker (no valid TransferAttemptId)
+            string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+            Directory.CreateDirectory(maDir);
+            string markerPath = PendingTransferMarker.GetMarkerPath(steamId);
+            File.WriteAllText(markerPath, "{ corrupt unreadable marker");
+
+            // Fail closed: MUST NOT offer olderStaged while corrupt marker is unresolved,
+            // AND MUST preserve stagedPath and markerPath on disk.
+            var pending = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(Array.Empty<SteamGuardAccount>(), passKey: null);
+            Assert.Empty(pending);
+            Assert.True(File.Exists(stagedPath));
+            Assert.True(File.Exists(markerPath));
+        }
+
+        [Fact]
+        public void LoginForm_ShouldCloseForDeferredExit_ReturnsTrueAfterDeferredApplicationOrTrayExit()
+        {
+            bool ownerDeferredExit = false;
+            using (LoginForm loginForm = new LoginForm(
+                LoginForm.LoginType.Transfer,
+                isDeferredExitRequested: () => ownerDeferredExit))
+            {
+                Assert.False(loginForm.ShouldCloseForDeferredExit());
+
+                // Owner tray/menu exit deferred during Continue
+                ownerDeferredExit = true;
+                Assert.True(loginForm.ShouldCloseForDeferredExit());
+                ownerDeferredExit = false;
+                Assert.False(loginForm.ShouldCloseForDeferredExit());
+
+                // ApplicationExitCall canceled during Continue also marks deferred close directly on LoginForm
+                var onFormClosing = typeof(LoginForm).GetMethod(
+                    "OnFormClosing",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                loginForm.SetIrreversibleTransferInFlight(true);
+                var appExitArgs = new System.Windows.Forms.FormClosingEventArgs(System.Windows.Forms.CloseReason.ApplicationExitCall, false);
+                onFormClosing.Invoke(loginForm, new object[] { appExitArgs });
+                Assert.True(appExitArgs.Cancel);
+                Assert.True(loginForm.ShouldCloseForDeferredExit());
+                loginForm.SetIrreversibleTransferInFlight(false);
+            }
+        }
     }
 }

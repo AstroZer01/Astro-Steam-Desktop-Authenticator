@@ -416,6 +416,7 @@ namespace Steam_Desktop_Authenticator
 
             try
             {
+                await WaitForTradeConfirmationDispatchSlotAsync(cancellationToken);
                 return await action();
             }
             catch (Exception exception) when (IsTradeConfirmationTokenFailure(exception))
@@ -424,6 +425,7 @@ namespace Steam_Desktop_Authenticator
                 // Refresh once and retry the same confirmation action before the
                 // coordinator classifies the session as requiring reauthentication.
                 await RefreshAndPersistAccessTokenAsync(account, cancellationToken);
+                await WaitForTradeConfirmationDispatchSlotAsync(cancellationToken);
                 return await action();
             }
         }
@@ -571,7 +573,8 @@ namespace Steam_Desktop_Authenticator
 
             for (int attempt = 0; attempt <= retryCount; attempt++)
             {
-                await WaitForTradeConfirmationDispatchSlotAsync(cancellationToken);
+                if (TryGetTradeRateLimitMessage(out string retryRateLimitMessage))
+                    throw new TradeRateLimitedException(retryRateLimitMessage);
                 try
                 {
                     Func<Task<Confirmation[]>> fetchAction = async () =>
@@ -581,6 +584,7 @@ namespace Steam_Desktop_Authenticator
                             await RefreshAndPersistAccessTokenAsync(account, cancellationToken);
                             refreshAccessTokenBeforeRetry = false;
                         }
+                        await WaitForTradeConfirmationDispatchSlotAsync(cancellationToken);
                         return await account.FetchConfirmationsAsync(cancellationToken);
                     };
 
@@ -603,6 +607,10 @@ namespace Steam_Desktop_Authenticator
                         cancellationToken,
                         null,
                         exception => ShouldDeferTradeConfirmationFailure(exception, attempt < retryCount));
+                }
+                catch (TradeRateLimitedException)
+                {
+                    throw;
                 }
                 catch (Exception ex) when (IsRateLimitedResponse(ex))
                 {
@@ -1458,7 +1466,8 @@ namespace Steam_Desktop_Authenticator
                         Interlocked.Increment(ref activeIrreversibleTransferCount);
                     else
                         Interlocked.Decrement(ref activeIrreversibleTransferCount);
-                }))
+                },
+                isDeferredExitRequested: () => exitAfterTransferRequested))
             {
                 loginForm.ShowDialog(this);
                 if (loginForm.SavedPasswordUpdated && loginForm.SavedPasswordUpdatedSteamId.HasValue)
@@ -1569,8 +1578,8 @@ namespace Steam_Desktop_Authenticator
                                 enforceTransferAttemptBase: true);
                             if (retryResult.Succeeded)
                             {
-                                PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(resolvedStaged.SteamId);
                                 PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId, resolvedStaged.TransferAttemptId);
+                                PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(resolvedStaged.SteamId);
                                 OnTransferredAccountCommitted(candidate, effectivePassKey);
                             }
                             return retryResult;
@@ -2510,7 +2519,6 @@ namespace Steam_Desktop_Authenticator
                     bool accepted = false;
                     try
                     {
-                        await WaitForTradeConfirmationDispatchSlotAsync(lifetimeCancellationSource.Token);
                         accepted = await RunAvailableSteamAccountOperationAsync(account, () =>
                             RunTradeConfirmationActionWithRefreshRetryAsync(
                                 account,
@@ -6084,7 +6092,9 @@ namespace Steam_Desktop_Authenticator
                 await confirmationsSemaphore.WaitAsync(lifetimeCancellationSource.Token);
                 try
                 {
-                    await WaitForTradeConfirmationDispatchSlotAsync(lifetimeCancellationSource.Token);
+                    if (TryGetTradeRateLimitMessage(out string activeRateLimitMessage))
+                        throw new TradeRateLimitedException(activeRateLimitMessage);
+
                     bool steamAcceptedAction = await RunAvailableSteamAccountOperationAsync(account, () =>
                         RunTradeConfirmationActionWithRefreshRetryAsync(
                             account,

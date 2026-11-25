@@ -479,15 +479,16 @@ namespace Steam_Desktop_Authenticator
                     committedAttemptIds.TryGetValue(loaded.SteamId, out string committedAttemptId);
                     PendingTransferMarkerRecord activeMarker = TryReadMarker(loaded.SteamId);
 
-                    // 0. If an active pending marker exists for a DIFFERENT transfer attempt,
+                    // 0. If an active pending marker exists for a DIFFERENT transfer attempt, OR if
+                    //    the active marker is unreadable/corrupt (blank TransferAttemptId), fail closed:
                     //    keep this older staged recovery out of automatic recovery while the newer
-                    //    attempt's outcome is unknown, WITHOUT deleting it yet (in case the newer
+                    //    attempt's outcome is unresolved, WITHOUT deleting it yet (in case the newer
                     //    attempt crashed before Steam received Continue and the older staged copy
                     //    is still the only local copy of the active authenticator). It will be
                     //    cleaned up once a newer replacement commits durably.
                     if (activeMarker != null &&
-                        !String.IsNullOrWhiteSpace(activeMarker.TransferAttemptId) &&
-                        !String.Equals(activeMarker.TransferAttemptId, loaded.TransferAttemptId, StringComparison.Ordinal))
+                        (String.IsNullOrWhiteSpace(activeMarker.TransferAttemptId) ||
+                         !String.Equals(activeMarker.TransferAttemptId, loaded.TransferAttemptId, StringComparison.Ordinal)))
                     {
                         continue;
                     }

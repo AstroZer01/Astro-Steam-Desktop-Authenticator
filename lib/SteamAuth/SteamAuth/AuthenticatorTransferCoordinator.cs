@@ -203,8 +203,7 @@ namespace SteamAuth
 
                         // SaveAccount succeeded -> clear matching pre-dispatch marker first, then clean up staging!
                         interaction.ClearPreDispatchMarker(steamId, transferAttemptId);
-                        if (!String.IsNullOrEmpty(stagedPath))
-                            interaction.CleanupStagedReplacement(stagedPath);
+                        interaction.CleanupStagedReplacement(stagedPath);
 
                         // Optional short-timeout non-fatal DeviceID enrichment AFTER durable save
                         if (await linker.TryEnrichTransferredDeviceIdAsync(replacement, cancellationToken))

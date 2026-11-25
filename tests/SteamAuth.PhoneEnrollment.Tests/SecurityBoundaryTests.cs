@@ -226,18 +226,34 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 // Wrong passkey MUST STILL FAIL
                 Assert.False(manifest.SaveAccount(accountA, encrypt: true, passKey: "WrongPasskey!").Succeeded);
 
-                // Cold-start Manifest reload (no prior VerifyPasskey): saving healthy account A still succeeds
-                // even while B is corrupt, while wrong passkey fails closed
-                Manifest reloaded = Manifest.GetManifest(true);
-                accountA.Session.AccessToken = "at-a3";
-                Assert.True(reloaded.SaveAccount(accountA, encrypt: true, passKey: passKey).Succeeded);
-                Assert.False(reloaded.SaveAccount(accountA, encrypt: true, passKey: "WrongPasskey!").Succeeded);
+                // Cold-start Manifest reload #1 (no prior VerifyPasskey): repairing corrupt account B FIRST
+                // (target entry is corrupt, falls back to healthy account A) MUST succeed, while wrong passkey fails closed.
+                Manifest reloadedForCorruptTarget = Manifest.GetManifest(true);
+                Assert.False(reloadedForCorruptTarget.SaveAccount(accountB, encrypt: true, passKey: "WrongPasskey!").Succeeded);
+                Assert.True(reloadedForCorruptTarget.SaveAccount(accountB, encrypt: true, passKey: passKey).Succeeded);
 
-                // Restore B, rekey from passKey -> newPassKey, and verify old passKey proof is invalidated immediately
-                Assert.True(reloaded.SaveAccount(accountB, encrypt: true, passKey: passKey).Succeeded);
-                Assert.True(reloaded.ChangeEncryptionKey(passKey, newPassKey).Succeeded);
-                Assert.False(reloaded.SaveAccount(accountA, encrypt: true, passKey: passKey).Succeeded);
-                Assert.True(reloaded.SaveAccount(accountA, encrypt: true, passKey: newPassKey).Succeeded);
+                // Re-corrupt account A (the FIRST entry in Entries) with empty/0-byte content and reload fresh:
+                // saving a brand-new account C when the first entry in Entries is empty MUST fall back to healthy B and succeed!
+                string fileA = Path.Combine(maDir, reloadedForCorruptTarget.Entries.Single(e => e.SteamID == steamIdA).Filename);
+                File.WriteAllText(fileA, String.Empty);
+                SteamGuardAccount accountC = new SteamGuardAccount
+                {
+                    AccountName = "new_user_c",
+                    SharedSecret = Convert.ToBase64String(Enumerable.Range(81, 20).Select(i => (byte)i).ToArray()),
+                    IdentitySecret = Convert.ToBase64String(Enumerable.Range(101, 20).Select(i => (byte)i).ToArray()),
+                    DeviceID = "android:newc",
+                    FullyEnrolled = true,
+                    Session = new SessionData { SteamID = 76561198000009003UL, AccessToken = "at-c1", RefreshToken = "rt-c1" }
+                };
+                Manifest reloadedForNewAccount = Manifest.GetManifest(true);
+                Assert.False(reloadedForNewAccount.SaveAccount(accountC, encrypt: true, passKey: "WrongPasskey!").Succeeded);
+                Assert.True(reloadedForNewAccount.SaveAccount(accountC, encrypt: true, passKey: passKey).Succeeded);
+
+                // Restore A, rekey from passKey -> newPassKey, and verify old passKey proof is invalidated immediately
+                Assert.True(reloadedForNewAccount.SaveAccount(accountA, encrypt: true, passKey: passKey).Succeeded);
+                Assert.True(reloadedForNewAccount.ChangeEncryptionKey(passKey, newPassKey).Succeeded);
+                Assert.False(reloadedForNewAccount.SaveAccount(accountA, encrypt: true, passKey: passKey).Succeeded);
+                Assert.True(reloadedForNewAccount.SaveAccount(accountA, encrypt: true, passKey: newPassKey).Succeeded);
             }
             finally
             {

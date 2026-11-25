@@ -26,6 +26,7 @@ namespace Steam_Desktop_Authenticator
         private readonly Func<ulong, CancellationToken, Task<IDisposable>> beginTransferFenceAsync;
         private readonly Action<SteamGuardAccount, string> onAccountCommitted;
         private readonly Action<bool> onIrreversibleTransferStateChanged;
+        private readonly Func<bool> isDeferredExitRequested;
         private bool savePasswordRequested;
         public bool SavedPasswordUpdated { get; private set; }
         public ulong? SavedPasswordUpdatedSteamId { get; private set; }
@@ -36,7 +37,8 @@ namespace Steam_Desktop_Authenticator
             string passKey = null,
             Func<ulong, CancellationToken, Task<IDisposable>> beginTransferFenceAsync = null,
             Action<SteamGuardAccount, string> onAccountCommitted = null,
-            Action<bool> onIrreversibleTransferStateChanged = null)
+            Action<bool> onIrreversibleTransferStateChanged = null,
+            Func<bool> isDeferredExitRequested = null)
         {
             InitializeComponent();
             this.LoginReason = loginReason;
@@ -45,6 +47,7 @@ namespace Steam_Desktop_Authenticator
             this.beginTransferFenceAsync = beginTransferFenceAsync;
             this.onAccountCommitted = onAccountCommitted;
             this.onIrreversibleTransferStateChanged = onIrreversibleTransferStateChanged;
+            this.isDeferredExitRequested = isDeferredExitRequested;
 
             try
             {
@@ -82,6 +85,24 @@ namespace Steam_Desktop_Authenticator
         private CancellationTokenSource loginCancellationSource;
         private SteamClient activeSteamClient;
         private volatile bool transferContinueInFlight;
+        private volatile bool deferredCloseRequested;
+
+        internal bool ShouldCloseForDeferredExit()
+        {
+            return deferredCloseRequested || (isDeferredExitRequested?.Invoke() ?? false);
+        }
+
+        private void CompleteTransferNonClosingOutcome(CancellationToken attemptCancellationToken)
+        {
+            if (ShouldCloseForDeferredExit())
+            {
+                if (!IsDisposed && !Disposing)
+                    this.Close();
+                return;
+            }
+
+            ResetLoginButton(attemptCancellationToken);
+        }
 
         internal void SetIrreversibleTransferInFlight(bool inFlight)
         {
@@ -98,6 +119,8 @@ namespace Steam_Desktop_Authenticator
                 e.CloseReason != CloseReason.TaskManagerClosing)
             {
                 e.Cancel = true;
+                if (e.CloseReason == CloseReason.ApplicationExitCall || e.CloseReason == CloseReason.FormOwnerClosing)
+                    deferredCloseRequested = true;
                 if (e.CloseReason == CloseReason.UserClosing)
                 {
                     AstroMessageBox.Show(
@@ -1072,6 +1095,7 @@ namespace Steam_Desktop_Authenticator
                 LoginTransferInteraction transferInteraction = new LoginTransferInteraction(
                     this,
                     manifest,
+                    sessionData.SteamID,
                     encrypt,
                     resolvedPassKey,
                     previousCommittedTransferAttemptId,
@@ -1099,7 +1123,7 @@ namespace Steam_Desktop_Authenticator
                         return;
 
                     case TransferCoordinatorResultKind.Canceled:
-                        ResetLoginButton(cancellationToken);
+                        CompleteTransferNonClosingOutcome(cancellationToken);
                         return;
 
                     case TransferCoordinatorResultKind.ReplacementReceivedSavePending:
@@ -1120,6 +1144,7 @@ namespace Steam_Desktop_Authenticator
                                     enforceTransferAttemptBase: true);
                                 if (retryResult.Succeeded)
                                 {
+                                    PendingTransferMarker.DeleteMarkerBestEffort(candidate.Session.SteamID, outcome.TransferAttemptId);
                                     PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(candidate.Session.SteamID);
                                     onAccountCommitted?.Invoke(candidate, resolvedPassKey);
                                 }
@@ -1167,19 +1192,19 @@ namespace Steam_Desktop_Authenticator
                             "Authenticator Transfer",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Error);
-                        ResetLoginButton(cancellationToken);
+                        CompleteTransferNonClosingOutcome(cancellationToken);
                         return;
                 }
             }
             catch (OperationCanceledException)
             {
-                ResetLoginButton(cancellationToken);
+                CompleteTransferNonClosingOutcome(cancellationToken);
             }
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Authenticator transfer", ex, "The authenticator transfer encountered an unexpected error.");
                 AstroMessageBox.Show("An unexpected error occurred during authenticator transfer.", "Authenticator Transfer", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                ResetLoginButton(cancellationToken);
+                CompleteTransferNonClosingOutcome(cancellationToken);
             }
             finally
             {
@@ -1232,6 +1257,7 @@ namespace Steam_Desktop_Authenticator
         {
             private readonly LoginForm owner;
             private readonly Manifest manifest;
+            private readonly ulong steamId;
             private readonly bool encrypt;
             private readonly string passKey;
             private readonly string previousCommittedTransferAttemptId;
@@ -1240,6 +1266,7 @@ namespace Steam_Desktop_Authenticator
             public LoginTransferInteraction(
                 LoginForm owner,
                 Manifest manifest,
+                ulong steamId,
                 bool encrypt,
                 string passKey,
                 string previousCommittedTransferAttemptId,
@@ -1247,6 +1274,7 @@ namespace Steam_Desktop_Authenticator
             {
                 this.owner = owner;
                 this.manifest = manifest;
+                this.steamId = steamId;
                 this.encrypt = encrypt;
                 this.passKey = passKey;
                 this.previousCommittedTransferAttemptId = previousCommittedTransferAttemptId;
@@ -1324,7 +1352,9 @@ namespace Steam_Desktop_Authenticator
 
             public void CleanupStagedReplacement(string stagedRecoveryPath)
             {
-                PendingTransferMarker.DeleteStagedRecoveryBestEffort(stagedRecoveryPath);
+                if (!String.IsNullOrEmpty(stagedRecoveryPath))
+                    PendingTransferMarker.DeleteStagedRecoveryBestEffort(stagedRecoveryPath);
+                PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(steamId);
             }
 
             public bool PersistReplacementAccount(SteamGuardAccount replacement, string transferAttemptId, out string failureMessage)
@@ -1339,8 +1369,9 @@ namespace Steam_Desktop_Authenticator
                 if (result.Succeeded)
                 {
                     failureMessage = null;
-                    PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(replacement.Session.SteamID);
                     // Synchronously retire the old account generation BEFORE RecoveryCodeForm!
+                    // Note: marker clearing and staged recovery cleanup run in the coordinator
+                    // strictly in order (ClearPreDispatchMarker -> CleanupStagedReplacement).
                     onCommitted?.Invoke(replacement);
                     return true;
                 }

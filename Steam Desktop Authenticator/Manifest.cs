@@ -1025,9 +1025,21 @@ namespace Steam_Desktop_Authenticator
                     continue;
                 }
 
-                string decrypted = FileEncryptor.DecryptData(passKey, entry.Salt, entry.IV, rawContents);
+                if (String.IsNullOrEmpty(rawContents) || String.IsNullOrEmpty(entry.Salt) || String.IsNullOrEmpty(entry.IV))
+                    continue;
+
+                string decrypted;
+                try
+                {
+                    decrypted = FileEncryptor.DecryptData(passKey, entry.Salt, entry.IV, rawContents);
+                }
+                catch (Exception ex) when (ex is ArgumentException || ex is FormatException || ex is CryptographicException)
+                {
+                    continue;
+                }
+
                 if (decrypted == null)
-                    return false;
+                    continue;
 
                 try
                 {
