@@ -46,7 +46,15 @@ namespace Steam_Desktop_Authenticator
         private readonly HashSet<string> recordedRecentLoginAttempts = new HashSet<string>();
         private readonly HashSet<string> notifiedTradeConfirmations = new HashSet<string>();
         private readonly Dictionary<ulong, int> pendingTradeConfirmationCounts = new Dictionary<ulong, int>();
-        private readonly SemaphoreSlim tradeLoadSemaphore = new SemaphoreSlim(1, 1);
+        private readonly object tradeLoadLock = new object();
+        private bool tradeLoadActive;
+        private bool tradeLoadScanStarted;
+        private long tradeLoadRunnerSequence;
+        private long tradeLoadOwnerId;
+        private TradeLoadScope activeTradeLoadScope;
+        private TradeLoadScope queuedTradeLoadScope;
+        private TaskCompletionSource<bool> activeTradeLoadCompletion;
+        private TaskCompletionSource<bool> queuedTradeLoadCompletion;
         private readonly SteamAccountOperationCoordinator steamAccountOperationCoordinator = new SteamAccountOperationCoordinator();
         private readonly object accountGenerationLock = new object();
         private readonly object sessionStateLock = new object();
@@ -121,6 +129,11 @@ namespace Steam_Desktop_Authenticator
         private readonly Action<string, string, ToolTipIcon> notifyLoginAction;
         private readonly Func<Task> publishLoginActionsAsync;
         private readonly Func<CancellationToken, Task<string>> getCurrentPublicIpv4Async;
+        private readonly Func<SteamGuardAccount, CancellationToken, Task<Confirmation[]>> fetchTradeConfirmationsForPageAsync;
+        private readonly Func<SteamGuardAccount, Confirmation, bool, CancellationToken, Task<bool>> respondTradeConfirmationAsync;
+        private readonly Action<int> updateTradePendingCount;
+        private readonly Func<string, string, Task> publishTradesAsync;
+        private readonly Action<string, MessageBoxIcon> showTradeConfirmationMessage;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -152,10 +165,27 @@ namespace Steam_Desktop_Authenticator
             public Confirmation Confirmation { get; set; }
         }
 
-        private sealed class TradeRateLimitedException : Exception
+        internal sealed class TradeRateLimitedException : Exception
         {
             public TradeRateLimitedException(string message) : base(message)
             {
+            }
+        }
+
+        private sealed class TradeLoadScope
+        {
+            public bool IncludeSelection { get; private set; }
+            public HashSet<ulong> AccountSteamIds { get; } = new HashSet<ulong>();
+
+            public void AddFullSelection()
+            {
+                IncludeSelection = true;
+            }
+
+            public void AddAccount(ulong steamId)
+            {
+                if (steamId != 0)
+                    AccountSteamIds.Add(steamId);
             }
         }
 
@@ -686,7 +716,7 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
-        private TradeRateLimitedException ApplyTradeRateLimit(Exception exception)
+        internal TradeRateLimitedException ApplyTradeRateLimit(Exception exception)
         {
             TimeSpan delay = TradeConfirmationScheduler.DefaultRateLimitDelay;
             string retryAfter = null;
@@ -828,7 +858,12 @@ namespace Steam_Desktop_Authenticator
             Action<string, string, ToolTipIcon> notifyLoginAction = null,
             SteamGuardAccount[] initialAccounts = null,
             Func<Task> publishLoginActionsAsync = null,
-            Func<CancellationToken, Task<string>> getCurrentPublicIpv4Async = null)
+            Func<CancellationToken, Task<string>> getCurrentPublicIpv4Async = null,
+            Func<SteamGuardAccount, CancellationToken, Task<Confirmation[]>> fetchTradeConfirmationsForPageAsync = null,
+            Func<SteamGuardAccount, Confirmation, bool, CancellationToken, Task<bool>> respondTradeConfirmationAsync = null,
+            Action<int> updateTradePendingCount = null,
+            Func<string, string, Task> publishTradesAsync = null,
+            Action<string, MessageBoxIcon> showTradeConfirmationMessage = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
@@ -847,6 +882,39 @@ namespace Steam_Desktop_Authenticator
             this.notifyLoginAction = notifyLoginAction ?? ShowLoginActionNotification;
             this.publishLoginActionsAsync = publishLoginActionsAsync ?? PublishCachedLoginActionsToWebViewAsync;
             this.getCurrentPublicIpv4Async = getCurrentPublicIpv4Async ?? GetCurrentPublicIpv4Async;
+            this.fetchTradeConfirmationsForPageAsync = fetchTradeConfirmationsForPageAsync ?? FetchTradeConfirmationsForPageNonBlockingAsync;
+            this.respondTradeConfirmationAsync = respondTradeConfirmationAsync ?? RespondTradeConfirmationWithRefreshRetryAsync;
+            this.updateTradePendingCount = updateTradePendingCount ?? UpdateTradePendingCountToWebView;
+            this.publishTradesAsync = publishTradesAsync ?? PublishCachedTradesToWebViewAsync;
+            this.showTradeConfirmationMessage = showTradeConfirmationMessage ?? ShowTradeConfirmationDialogMessage;
+        }
+
+        private static void ShowTradeConfirmationDialogMessage(string message, MessageBoxIcon icon)
+        {
+            AstroMessageBox.Show(message, "Trade Confirmations", MessageBoxButtons.OK, icon);
+        }
+
+        private Task<Confirmation[]> FetchTradeConfirmationsForPageNonBlockingAsync(
+            SteamGuardAccount account,
+            CancellationToken cancellationToken)
+        {
+            return FetchTradeConfirmationsForPageAsync(account, cancellationToken, nonBlocking: true);
+        }
+
+        private Task<bool> RespondTradeConfirmationWithRefreshRetryAsync(
+            SteamGuardAccount account,
+            Confirmation confirmation,
+            bool accept,
+            CancellationToken cancellationToken)
+        {
+            return RunAvailableSteamAccountOperationAsync(account, () =>
+                RunTradeConfirmationActionWithRefreshRetryAsync(
+                    account,
+                    () => accept
+                        ? account.AcceptConfirmation(confirmation, cancellationToken)
+                        : account.DenyConfirmation(confirmation, cancellationToken),
+                    cancellationToken),
+                cancellationToken);
         }
 
         private static (DialogResult Result, bool DisableStartupChecks) ShowUpdateAvailablePrompt(Version latestVersion, string checkboxText)
@@ -2617,9 +2685,8 @@ namespace Steam_Desktop_Authenticator
                     if (notifiedTradeConfirmations.Add(confirmationKey))
                         NotifyTradeConfirmation(account, pending);
                 }
-                pendingTradeConfirmationCounts[steamId] = pendingConfirmations.Count;
-                UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
                 CacheTradeConfirmations(account, pendingConfirmations);
+                UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
                 if (IsWebTabActive("trades"))
                     await PublishCachedTradesAsync();
 
@@ -3171,9 +3238,14 @@ namespace Steam_Desktop_Authenticator
 
         private void UpdateTradePendingCount(int count)
         {
+            updateTradePendingCount(count);
+        }
+
+        private void UpdateTradePendingCountToWebView(int count)
+        {
             if (InvokeRequired)
             {
-                TryBeginInvoke(() => UpdateTradePendingCount(count));
+                TryBeginInvoke(() => UpdateTradePendingCountToWebView(count));
                 return;
             }
             if (IsDisposed || Disposing)
@@ -3650,16 +3722,37 @@ namespace Steam_Desktop_Authenticator
                 loadedTradeConfirmations.Remove(key);
             }
 
+            int cachedCount = 0;
             foreach (Confirmation confirmation in confirmationList)
             {
                 string confirmationKey = BuildTradeConfirmationKey(account, confirmation);
                 if (IsRecentlyResolved(recentlyResolvedTradeConfirmations, confirmationKey))
                     continue;
 
+                if (!loadedTradeConfirmations.ContainsKey(confirmationKey))
+                    cachedCount++;
                 loadedTradeConfirmations[confirmationKey] =
                     new LoadedTradeConfirmation { Account = account, Confirmation = confirmation };
             }
+            pendingTradeConfirmationCounts[account.Session.SteamID] = cachedCount;
             loadedTradeConfirmationAccounts.Add(account.Session.SteamID);
+        }
+
+        private void ReconcilePendingTradeCountForAccount(ulong steamId)
+        {
+            if (steamId == 0)
+                return;
+
+            SteamGuardAccount account = FindLoadedAccountBySteamId(allAccounts, steamId);
+            if (!IsSessionAvailableForAccountOperations(account))
+            {
+                pendingTradeConfirmationCounts.Remove(steamId);
+                return;
+            }
+
+            string accountPrefix = steamId.ToString(CultureInfo.InvariantCulture) + ":";
+            pendingTradeConfirmationCounts[steamId] = loadedTradeConfirmations.Keys
+                .Count(key => key.StartsWith(accountPrefix, StringComparison.Ordinal));
         }
 
         private void InvalidateTradeConfirmationCache(SteamGuardAccount account)
@@ -3684,21 +3777,27 @@ namespace Steam_Desktop_Authenticator
             if (allAccounts == null || allAccounts.Length == 0)
                 return true;
 
-            IEnumerable<SteamGuardAccount> accounts = tradeAccountSelection == "all"
+            string currentSelection = GetCurrentTradeSelection();
+            IEnumerable<SteamGuardAccount> accounts = currentSelection == "all"
                 ? allAccounts
-                : allAccounts.Where(account => account.Session?.SteamID.ToString(CultureInfo.InvariantCulture) == tradeAccountSelection || account.AccountName == tradeAccountSelection);
+                : allAccounts.Where(account => account.Session?.SteamID.ToString(CultureInfo.InvariantCulture) == currentSelection || account.AccountName == currentSelection);
             return accounts
                 .Where(IsSessionAvailableForAccountOperations)
                 .All(account => loadedTradeConfirmationAccounts.Contains(account.Session.SteamID));
         }
 
-        private async Task PublishCachedTradesAsync(string errorMessage = null, string selection = null)
+        private Task PublishCachedTradesAsync(string errorMessage = null, string selection = null)
+        {
+            return publishTradesAsync(errorMessage, selection);
+        }
+
+        private async Task PublishCachedTradesToWebViewAsync(string errorMessage = null, string selection = null)
         {
             CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
             if (coreWebView == null)
                 return;
 
-            string selectionToPublish = String.IsNullOrWhiteSpace(selection) ? tradeAccountSelection : selection;
+            string selectionToPublish = String.IsNullOrWhiteSpace(selection) ? GetCurrentTradeSelection() : selection;
             IEnumerable<LoadedTradeConfirmation> entries = loadedTradeConfirmations.Values
                 .Where(entry => IsSessionAvailableForAccountOperations(entry.Account));
             if (selectionToPublish != "all")
@@ -3727,15 +3826,41 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private string GetCurrentTradeSelection()
+        {
+            lock (tradeLoadLock)
+            {
+                return tradeAccountSelection;
+            }
+        }
+
+        private string GetNormalizedTradeSelection()
+        {
+            string candidateSelection = GetCurrentTradeSelection();
+            SteamGuardAccount selectedAccount = FindAccountBySelectionKey(candidateSelection);
+            if (selectedAccount != null && !IsSessionAvailableForAccountOperations(selectedAccount))
+            {
+                lock (tradeLoadLock)
+                {
+                    if (String.Equals(tradeAccountSelection, candidateSelection, StringComparison.Ordinal))
+                        tradeAccountSelection = "all";
+                    candidateSelection = tradeAccountSelection;
+                }
+            }
+            return candidateSelection;
+        }
+
         private async Task LoadCachedTradesAsync(string selectedAccountName)
         {
             if (!String.IsNullOrWhiteSpace(selectedAccountName))
-                tradeAccountSelection = selectedAccountName;
+            {
+                lock (tradeLoadLock)
+                {
+                    tradeAccountSelection = selectedAccountName;
+                }
+            }
 
-            SteamGuardAccount selectedAccount = FindAccountBySelectionKey(tradeAccountSelection);
-            if (selectedAccount != null && !IsSessionAvailableForAccountOperations(selectedAccount))
-                tradeAccountSelection = "all";
-
+            GetNormalizedTradeSelection();
             await PublishCachedTradesAsync();
             if (!IsTradeCacheCompleteForSelection())
                 _ = LoadTradesAsync();
@@ -6555,7 +6680,7 @@ namespace Steam_Desktop_Authenticator
             return account.Session.SteamID.ToString() + ":" + confirmation.ID.ToString();
         }
 
-        private async Task RespondToTradeConfirmationAsync(string confirmationKey, bool accept)
+        internal async Task RespondToTradeConfirmationAsync(string confirmationKey, bool accept)
         {
             if (!TryParseTradeConfirmationKey(confirmationKey, out ulong steamId))
                 return;
@@ -6589,6 +6714,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             bool actionSucceeded = false;
+            int? updatedPendingCount = null;
             try
             {
                 if (!loadedTradeConfirmations.TryGetValue(confirmationKey, out LoadedTradeConfirmation entry))
@@ -6601,7 +6727,8 @@ namespace Steam_Desktop_Authenticator
 
                 if (TryGetTradeRateLimitMessage(out string rateLimitMessage))
                 {
-                    AstroMessageBox.Show(rateLimitMessage, "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    if (!lifetimeCancellationSource.IsCancellationRequested)
+                        showTradeConfirmationMessage(rateLimitMessage, MessageBoxIcon.Warning);
                     return;
                 }
 
@@ -6611,17 +6738,19 @@ namespace Steam_Desktop_Authenticator
                     if (TryGetTradeRateLimitMessage(out string activeRateLimitMessage))
                         throw new TradeRateLimitedException(activeRateLimitMessage);
 
-                    bool steamAcceptedAction = await RunAvailableSteamAccountOperationAsync(account, () =>
-                        RunTradeConfirmationActionWithRefreshRetryAsync(
-                            account,
-                            () => accept
-                                ? account.AcceptConfirmation(entry.Confirmation, lifetimeCancellationSource.Token)
-                                : account.DenyConfirmation(entry.Confirmation, lifetimeCancellationSource.Token),
-                            lifetimeCancellationSource.Token),
+                    bool steamAcceptedAction = await respondTradeConfirmationAsync(
+                        account,
+                        entry.Confirmation,
+                        accept,
                         lifetimeCancellationSource.Token);
                     if (!steamAcceptedAction)
                         throw new InvalidOperationException("Steam did not accept that confirmation action. The confirmation remains pending.");
                     actionSucceeded = true;
+                    MarkRecentlyResolved(recentlyResolvedTradeConfirmations, confirmationKey);
+                    completedTradeActions[confirmationKey] = DateTime.UtcNow;
+                    loadedTradeConfirmations.Remove(confirmationKey);
+                    ReconcilePendingTradeCountForAccount(steamId);
+                    updatedPendingCount = pendingTradeConfirmationCounts.Values.Sum();
                 }
                 finally
                 {
@@ -6631,20 +6760,20 @@ namespace Steam_Desktop_Authenticator
             catch (TradeRateLimitedException ex)
             {
                 if (!lifetimeCancellationSource.IsCancellationRequested)
-                    AstroMessageBox.Show(ex.Message, "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    showTradeConfirmationMessage(ex.Message, MessageBoxIcon.Warning);
             }
             catch (Exception ex) when (IsRateLimitedResponse(ex))
             {
                 TradeRateLimitedException rateLimitException = ApplyTradeRateLimit(ex);
                 DiagnosticErrorLogger.Log("Trade confirmation action", rateLimitException, accept ? "Accept request rate limited." : "Deny request rate limited.");
                 if (!lifetimeCancellationSource.IsCancellationRequested)
-                    AstroMessageBox.Show(rateLimitException.Message, "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    showTradeConfirmationMessage(rateLimitException.Message, MessageBoxIcon.Warning);
             }
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Trade confirmation action", ex, accept ? "Accept request failed." : "Deny request failed.");
                 if (!lifetimeCancellationSource.IsCancellationRequested)
-                    AstroMessageBox.Show(ex.Message, "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    showTradeConfirmationMessage(ex.Message, MessageBoxIcon.Error);
             }
             finally
             {
@@ -6652,9 +6781,8 @@ namespace Steam_Desktop_Authenticator
                 {
                     if (actionSucceeded)
                     {
-                        MarkRecentlyResolved(recentlyResolvedTradeConfirmations, confirmationKey);
-                        completedTradeActions[confirmationKey] = DateTime.UtcNow;
-                        loadedTradeConfirmations.Remove(confirmationKey);
+                        if (updatedPendingCount.HasValue)
+                            UpdateTradePendingCount(updatedPendingCount.Value);
                         try
                         {
                             await PublishCachedTradesAsync();
@@ -6669,8 +6797,9 @@ namespace Steam_Desktop_Authenticator
                 {
                     tradeActionCompletion.TrySetResult(actionSucceeded);
                     tradeActionsInProgress.TryRemove(confirmationKey, out _);
-                await CompleteWebTradeActionAsync(confirmationKey, actionSucceeded);
-                    _ = LoadTradesAsync();
+                    await CompleteWebTradeActionAsync(confirmationKey, actionSucceeded);
+                    if (actionSucceeded)
+                        _ = ReloadTradesForAccountAsync(steamId);
                 }
             }
         }
@@ -6735,122 +6864,396 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private async Task LoadTradesAsync(string selectedAccountName = null)
+        internal Task LoadTradesAsync(string selectedAccountName = null)
         {
-            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
-            PersistExpiredRefreshTokenStates();
-            DispatchEligibleSilentReloginsForExpiredAccounts(allAccounts);
             if (!String.IsNullOrWhiteSpace(selectedAccountName))
-                tradeAccountSelection = selectedAccountName;
-            SteamGuardAccount selectedAccount = FindAccountBySelectionKey(tradeAccountSelection);
-            if (selectedAccount != null && !IsSessionAvailableForAccountOperations(selectedAccount))
-                tradeAccountSelection = "all";
-            string selectionToLoad = tradeAccountSelection;
-
-            if (allAccounts == null || allAccounts.Length == 0)
             {
-                await PublishCachedTradesAsync();
-                return;
-            }
-
-            SteamGuardAccount[] accountsToLoad = selectionToLoad == "all"
-                ? allAccounts.Where(account => IsSessionAvailableForAccountOperations(account) && !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID)).ToArray()
-                : allAccounts.Where(account => IsSessionAvailableForAccountOperations(account) &&
-                    !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID) &&
-                    (account.Session.SteamID.ToString(CultureInfo.InvariantCulture) == selectionToLoad || account.AccountName == selectionToLoad)).ToArray();
-            if (accountsToLoad.Length == 0 && IsSessionAvailableForAccountOperations(currentAccount) && !IsAccountBusyWithRecoveryOrTransfer(currentAccount.Session.SteamID))
-                accountsToLoad = new[] { currentAccount };
-            if (accountsToLoad.Length == 0)
-            {
-                await PublishCachedTradesAsync();
-                return;
-            }
-
-            if (cancellationToken.IsCancellationRequested || !await tradeLoadSemaphore.WaitAsync(0))
-                return;
-            bool confirmationsSemaphoreAcquired = false;
-            try
-            {
-                await confirmationsSemaphore.WaitAsync(cancellationToken);
-                confirmationsSemaphoreAcquired = true;
-
-                var unavailableAccounts = new List<string>();
-                string rateLimitMessage = null;
-                if (!TryGetTradeRateLimitMessage(out rateLimitMessage))
+                lock (tradeLoadLock)
                 {
-                    foreach (SteamGuardAccount account in accountsToLoad)
-                    {
-                        if (TryGetTradeRateLimitMessage(out rateLimitMessage))
-                            break;
-                        if (silentReloginService.IsRecoveryInProgress(account.Session.SteamID))
-                        {
-                            unavailableAccounts.Add(account.AccountName + " is renewing its session.");
-                            continue;
-                        }
-                        try
-                        {
-                            if (TryGetTradeRateLimitMessage(out rateLimitMessage))
-                                break;
+                    tradeAccountSelection = selectedAccountName;
+                }
+            }
+            return QueueOrRunTradeLoadAsync(targetAccountSteamId: null);
+        }
 
-                            Confirmation[] accountConfirmations = await FetchTradeConfirmationsForPageAsync(account, cancellationToken, nonBlocking: true);
-                            if (accountConfirmations == null)
-                            {
-                                unavailableAccounts.Add(account.AccountName + " is busy or renewing its session.");
-                                continue;
-                            }
-                            // Manual refresh displays all pending confirmations without postponing the automatic confirmation schedule.
-                            CacheTradeConfirmations(account, accountConfirmations);
-                            tradeConfirmationScheduler.RecordManualRefreshHealth(account.Session.SteamID);
-                            PublishAccountHealthMetadata(account.Session.SteamID);
-                        }
-                        catch (TradeRateLimitedException ex)
+        internal Task ReloadTradesForAccountAsync(ulong steamId)
+        {
+            if (steamId == 0)
+                return Task.CompletedTask;
+            return QueueOrRunTradeLoadAsync(targetAccountSteamId: steamId);
+        }
+
+        internal async Task WaitForPendingTradeLoadAsync()
+        {
+            while (true)
+            {
+                Task pending;
+                lock (tradeLoadLock)
+                {
+                    pending = queuedTradeLoadCompletion?.Task ?? activeTradeLoadCompletion?.Task;
+                }
+                if (pending == null)
+                    return;
+                await pending;
+            }
+        }
+
+        private SteamGuardAccount[] ResolveTradeAccountsToLoad(TradeLoadScope scope, string selectionToLoad)
+        {
+            SteamGuardAccount[] accountsSnapshot = allAccounts;
+            if (accountsSnapshot == null || accountsSnapshot.Length == 0 || scope == null)
+                return Array.Empty<SteamGuardAccount>();
+
+            var result = new List<SteamGuardAccount>();
+            var seenSteamIds = new HashSet<ulong>();
+
+            void AddAccountIfEligible(SteamGuardAccount candidate)
+            {
+                if (candidate != null &&
+                    IsSessionAvailableForAccountOperations(candidate) &&
+                    !IsAccountBusyWithRecoveryOrTransfer(candidate.Session.SteamID) &&
+                    seenSteamIds.Add(candidate.Session.SteamID))
+                {
+                    result.Add(candidate);
+                }
+            }
+
+            if (scope.IncludeSelection)
+            {
+                if (selectionToLoad == "all")
+                {
+                    foreach (SteamGuardAccount account in accountsSnapshot)
+                        AddAccountIfEligible(account);
+                }
+                else
+                {
+                    foreach (SteamGuardAccount account in accountsSnapshot)
+                    {
+                        if (account?.Session != null &&
+                            (account.Session.SteamID.ToString(CultureInfo.InvariantCulture) == selectionToLoad ||
+                             account.AccountName == selectionToLoad))
                         {
-                            rateLimitMessage = ex.Message;
-                            DiagnosticErrorLogger.Log("Trade confirmation fetch", ex, "Steam rate limited confirmation requests.");
-                            break;
-                        }
-                        catch (Exception ex)
-                        {
-                            DiagnosticErrorLogger.Log("Trade confirmation fetch", ex, "A confirmation list request failed after all retries.");
-                            if (IsDefinitiveSessionFailure(ex))
-                                InvalidateTradeConfirmationCache(account);
-                            else
-                            {
-                                ResolvedAccountConfirmationPolicy policy = ResolveAccountConfirmationPolicyForMonitor(account.Session.SteamID);
-                                tradeConfirmationScheduler.RecordTransientFailure(account.Session.SteamID, policy.Interval, "Manual confirmation refresh failed.");
-                                PublishAccountHealthMetadata(account.Session.SteamID);
-                                unavailableAccounts.Add(account.AccountName + " could not be loaded.");
-                            }
+                            AddAccountIfEligible(account);
                         }
                     }
                 }
+            }
 
-                string errorMessage = !String.IsNullOrWhiteSpace(rateLimitMessage)
-                    ? rateLimitMessage
-                    : unavailableAccounts.Count == 0
-                        ? null
-                        : "Some account confirmations could not be loaded: " + String.Join(" ", unavailableAccounts);
-                UpdateTradePendingCount(pendingTradeConfirmationCounts.Values.Sum());
-                await PublishCachedTradesAsync(errorMessage, selectionToLoad);
-            }
-            catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+            if (scope.AccountSteamIds.Count > 0)
             {
+                foreach (SteamGuardAccount account in accountsSnapshot)
+                {
+                    if (account?.Session != null && scope.AccountSteamIds.Contains(account.Session.SteamID))
+                        AddAccountIfEligible(account);
+                }
             }
-            catch (Exception ex)
+
+            if (scope.IncludeSelection && result.Count == 0 && scope.AccountSteamIds.Count == 0)
+                AddAccountIfEligible(currentAccount);
+
+            return result.ToArray();
+        }
+
+        private async Task QueueOrRunTradeLoadAsync(ulong? targetAccountSteamId)
+        {
+            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
+            Task waitTask = null;
+            long runnerId = 0;
+            lock (tradeLoadLock)
             {
-                Debug.WriteLine("Trade confirmation load failed: " + ex.Message);
-                DiagnosticErrorLogger.Log("Trade confirmation page", ex, "The confirmation page could not be updated.");
-                await PublishCachedTradesAsync("Steam confirmations could not be loaded. Please try refreshing.", selectionToLoad);
+                if (!tradeLoadActive)
+                {
+                    tradeLoadActive = true;
+                    tradeLoadScanStarted = false;
+                    runnerId = ++tradeLoadRunnerSequence;
+                    tradeLoadOwnerId = runnerId;
+                    activeTradeLoadScope = new TradeLoadScope();
+                    if (targetAccountSteamId.HasValue)
+                        activeTradeLoadScope.AddAccount(targetAccountSteamId.Value);
+                    else
+                        activeTradeLoadScope.AddFullSelection();
+                    activeTradeLoadCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+                else if (!tradeLoadScanStarted)
+                {
+                    if (targetAccountSteamId.HasValue)
+                        activeTradeLoadScope.AddAccount(targetAccountSteamId.Value);
+                    else
+                        activeTradeLoadScope.AddFullSelection();
+                    waitTask = activeTradeLoadCompletion.Task;
+                }
+                else
+                {
+                    if (queuedTradeLoadScope == null)
+                    {
+                        queuedTradeLoadScope = new TradeLoadScope();
+                        queuedTradeLoadCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    }
+                    if (targetAccountSteamId.HasValue)
+                        queuedTradeLoadScope.AddAccount(targetAccountSteamId.Value);
+                    else
+                        queuedTradeLoadScope.AddFullSelection();
+                    waitTask = queuedTradeLoadCompletion.Task;
+                }
+            }
+
+            if (runnerId == 0)
+            {
+                try
+                {
+                    await waitTask;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                }
+                return;
+            }
+
+            try
+            {
+                await RunCoalescedTradeLoadsAsync(runnerId);
             }
             finally
             {
-                if (confirmationsSemaphoreAcquired)
-                    confirmationsSemaphore.Release();
-                tradeLoadSemaphore.Release();
+                List<TaskCompletionSource<bool>> remainingCompletions = null;
+                lock (tradeLoadLock)
+                {
+                    if (tradeLoadOwnerId == runnerId)
+                    {
+                        tradeLoadActive = false;
+                        tradeLoadScanStarted = false;
+                        tradeLoadOwnerId = 0;
+                        activeTradeLoadScope = null;
+                        queuedTradeLoadScope = null;
+                        if (activeTradeLoadCompletion != null)
+                        {
+                            remainingCompletions = remainingCompletions ?? new List<TaskCompletionSource<bool>>();
+                            remainingCompletions.Add(activeTradeLoadCompletion);
+                            activeTradeLoadCompletion = null;
+                        }
+                        if (queuedTradeLoadCompletion != null)
+                        {
+                            remainingCompletions = remainingCompletions ?? new List<TaskCompletionSource<bool>>();
+                            remainingCompletions.Add(queuedTradeLoadCompletion);
+                            queuedTradeLoadCompletion = null;
+                        }
+                    }
+                }
+                if (remainingCompletions != null)
+                {
+                    foreach (TaskCompletionSource<bool> completion in remainingCompletions)
+                        completion.TrySetResult(true);
+                }
+            }
+        }
 
-                if (!lifetimeCancellationSource.IsCancellationRequested &&
-                    !String.Equals(selectionToLoad, tradeAccountSelection, StringComparison.Ordinal))
-                    _ = LoadTradesAsync();
+        private async Task RunCoalescedTradeLoadsAsync(long runnerId)
+        {
+            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
+            while (true)
+            {
+                TaskCompletionSource<bool> currentCompletion = null;
+                string selectionToLoad = GetNormalizedTradeSelection();
+                string errorMessage = null;
+                int totalPendingCount = 0;
+                bool pendingCountComputed = false;
+                bool canceled = false;
+
+                try
+                {
+                    PersistExpiredRefreshTokenStates();
+                    DispatchEligibleSilentReloginsForExpiredAccounts(allAccounts);
+                    await confirmationsSemaphore.WaitAsync(cancellationToken);
+                    try
+                    {
+                        TradeLoadScope scopeToLoad;
+                        lock (tradeLoadLock)
+                        {
+                            tradeLoadScanStarted = true;
+                            scopeToLoad = activeTradeLoadScope;
+                            currentCompletion = activeTradeLoadCompletion;
+                        }
+
+                        selectionToLoad = GetNormalizedTradeSelection();
+                        SteamGuardAccount[] accountsToLoad = ResolveTradeAccountsToLoad(scopeToLoad, selectionToLoad);
+                        if (accountsToLoad.Length > 0)
+                        {
+                            var unavailableAccounts = new List<string>();
+                            string rateLimitMessage = null;
+                            if (!TryGetTradeRateLimitMessage(out rateLimitMessage))
+                            {
+                                foreach (SteamGuardAccount account in accountsToLoad)
+                                {
+                                    cancellationToken.ThrowIfCancellationRequested();
+                                    if (TryGetTradeRateLimitMessage(out rateLimitMessage))
+                                        break;
+                                    if (silentReloginService.IsRecoveryInProgress(account.Session.SteamID))
+                                    {
+                                        unavailableAccounts.Add(account.AccountName + " is renewing its session.");
+                                        continue;
+                                    }
+                                    if (!IsSessionAvailableForAccountOperations(account))
+                                    {
+                                        InvalidateTradeConfirmationCache(account);
+                                        continue;
+                                    }
+
+                                    try
+                                    {
+                                        if (TryGetTradeRateLimitMessage(out rateLimitMessage))
+                                            break;
+
+                                        Confirmation[] accountConfirmations = await fetchTradeConfirmationsForPageAsync(account, cancellationToken);
+                                        if (accountConfirmations == null)
+                                        {
+                                            unavailableAccounts.Add(account.AccountName + " is busy or renewing its session.");
+                                            continue;
+                                        }
+                                        if (!IsSessionAvailableForAccountOperations(account))
+                                        {
+                                            InvalidateTradeConfirmationCache(account);
+                                            continue;
+                                        }
+                                        // Manual refresh displays all pending confirmations without postponing the automatic confirmation schedule.
+                                        CacheTradeConfirmations(account, accountConfirmations);
+                                        tradeConfirmationScheduler.RecordManualRefreshHealth(account.Session.SteamID);
+                                        PublishAccountHealthMetadata(account.Session.SteamID);
+                                    }
+                                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                                    {
+                                        throw;
+                                    }
+                                    catch (TradeRateLimitedException ex)
+                                    {
+                                        rateLimitMessage = ex.Message;
+                                        DiagnosticErrorLogger.Log("Trade confirmation fetch", ex, "Steam rate limited confirmation requests.");
+                                        break;
+                                    }
+                                    catch (Exception ex) when (IsRateLimitedResponse(ex))
+                                    {
+                                        TradeRateLimitedException rateLimitException = ApplyTradeRateLimit(ex);
+                                        rateLimitMessage = rateLimitException.Message;
+                                        DiagnosticErrorLogger.Log("Trade confirmation fetch", rateLimitException, "Steam rate limited confirmation requests.");
+                                        break;
+                                    }
+                                    catch (SessionUnavailableException)
+                                    {
+                                        InvalidateTradeConfirmationCache(account);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        DiagnosticErrorLogger.Log("Trade confirmation fetch", ex, "A confirmation list request failed after all retries.");
+                                        if (IsDefinitiveSessionFailure(ex))
+                                            InvalidateTradeConfirmationCache(account);
+                                        else
+                                        {
+                                            ResolvedAccountConfirmationPolicy policy = ResolveAccountConfirmationPolicyForMonitor(account.Session.SteamID);
+                                            tradeConfirmationScheduler.RecordTransientFailure(account.Session.SteamID, policy.Interval, "Manual confirmation refresh failed.");
+                                            PublishAccountHealthMetadata(account.Session.SteamID);
+                                            unavailableAccounts.Add(account.AccountName + " could not be loaded.");
+                                        }
+                                    }
+                                }
+                            }
+
+                            errorMessage = !String.IsNullOrWhiteSpace(rateLimitMessage)
+                                ? rateLimitMessage
+                                : unavailableAccounts.Count == 0
+                                    ? null
+                                    : "Some account confirmations could not be loaded: " + String.Join(" ", unavailableAccounts);
+                        }
+
+                        totalPendingCount = pendingTradeConfirmationCounts.Values.Sum();
+                        pendingCountComputed = true;
+                    }
+                    finally
+                    {
+                        confirmationsSemaphore.Release();
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    canceled = true;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine("Trade confirmation load failed: " + ex.Message);
+                    DiagnosticErrorLogger.Log("Trade confirmation page", ex, "The confirmation page could not be updated.");
+                    errorMessage = "Steam confirmations could not be loaded. Please try refreshing.";
+                }
+
+                if (canceled || cancellationToken.IsCancellationRequested)
+                    break;
+
+                if (pendingCountComputed)
+                    UpdateTradePendingCount(totalPendingCount);
+
+                bool shouldPublish;
+                lock (tradeLoadLock)
+                {
+                    tradeLoadScanStarted = true;
+                    if (currentCompletion == null)
+                        currentCompletion = activeTradeLoadCompletion;
+                    shouldPublish = queuedTradeLoadScope == null &&
+                        String.Equals(selectionToLoad, tradeAccountSelection, StringComparison.Ordinal);
+                }
+
+                if (shouldPublish && !cancellationToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await PublishCachedTradesAsync(errorMessage, selectionToLoad);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Trade confirmation UI", ex, "The trade confirmation list could not be sent to the UI.");
+                    }
+                }
+
+                bool continueLoop = false;
+                TaskCompletionSource<bool> canceledQueuedCompletion = null;
+                lock (tradeLoadLock)
+                {
+                    bool selectionChanged = !String.Equals(selectionToLoad, tradeAccountSelection, StringComparison.Ordinal);
+                    if (!cancellationToken.IsCancellationRequested && (queuedTradeLoadScope != null || selectionChanged))
+                    {
+                        if (queuedTradeLoadScope == null)
+                            queuedTradeLoadScope = new TradeLoadScope();
+                        if (selectionChanged)
+                            queuedTradeLoadScope.AddFullSelection();
+
+                        activeTradeLoadScope = queuedTradeLoadScope;
+                        activeTradeLoadCompletion = queuedTradeLoadCompletion ?? new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        queuedTradeLoadScope = null;
+                        queuedTradeLoadCompletion = null;
+                        tradeLoadScanStarted = false;
+                        continueLoop = true;
+                    }
+                    else if (tradeLoadOwnerId == runnerId)
+                    {
+                        tradeLoadActive = false;
+                        tradeLoadScanStarted = false;
+                        tradeLoadOwnerId = 0;
+                        activeTradeLoadScope = null;
+                        activeTradeLoadCompletion = null;
+                        queuedTradeLoadScope = null;
+                        canceledQueuedCompletion = queuedTradeLoadCompletion;
+                        queuedTradeLoadCompletion = null;
+                    }
+                }
+
+                currentCompletion?.TrySetResult(true);
+                canceledQueuedCompletion?.TrySetResult(true);
+
+                if (!continueLoop)
+                    break;
             }
         }
     }
