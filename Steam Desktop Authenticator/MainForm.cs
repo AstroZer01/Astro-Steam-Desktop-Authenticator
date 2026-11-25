@@ -2235,6 +2235,20 @@ namespace Steam_Desktop_Authenticator
                 }
                 else
                 {
+                    if (!TryEvaluateAutomaticLoginDecision(
+                        request,
+                        scanContext,
+                        out string postFailureMode,
+                        out LoginApprovalDecision postFailureDecision,
+                        out bool postFailureAllowWhitelistedIp) ||
+                        !String.Equals(postFailureMode, currentActionMode, StringComparison.Ordinal) ||
+                        postFailureDecision != decision ||
+                        postFailureAllowWhitelistedIp != allowWhitelistedIp)
+                    {
+                        NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
+                        continue;
+                    }
+
                     NotifyAutomatedLoginActionOnce(actionKey + "|failed",
                         "Automatic Steam login action failed",
                         account.AccountName + ": " + actionResult.ErrorMessage,

@@ -661,6 +661,47 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
+        [Fact]
+        public async Task RefreshLoginActionsAsync_SuppressesStaleAutomaticFailureNotificationWhenTokenRefreshFailsAfterSwitchToManual()
+        {
+            var transport = new StubLoginTransport();
+            SteamGuardAccount account = CreateAccount(76561198000015001UL, "acct_retry_fail_manual", transport);
+            transport.SetPendingRequest(account.Session.AccessToken, 19001UL, CreateSessionInfo("Desktop PC", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory));
+            transport.ActionResultOverride = 21; // Unauthorized -> triggers GenerateAccessTokenForApp retry
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.LoginActionMonitoringEnabled = true;
+            manifest.LoginActionMode = LoginActionModes.Deny;
+
+            transport.OnTokenRefreshAsync = () =>
+            {
+                // User switches to Manual while the unauthorized retry's token refresh fails transiently.
+                manifest.LoginActionMode = LoginActionModes.Manual;
+                throw new System.Net.Http.HttpRequestException("Transient network error during token refresh.");
+            };
+
+            var notifications = new List<string>();
+            var service = new LoginApprovalService(_ => true, transport);
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                loginApprovalService: service,
+                notifyLoginAction: (title, message, icon) => notifications.Add(title + "|" + message),
+                initialAccounts: new[] { account }))
+            {
+                await form.RefreshLoginActionsAsync("all");
+
+                Assert.Single(transport.ActionDecisions);
+                Assert.Equal(1, transport.TokenRefreshCount);
+                Assert.Empty(notifications);
+                JObject payload = JObject.Parse(form.BuildCachedLoginActionsPayloadJson());
+                JToken pending = Assert.Single((JArray)payload["requests"]);
+                Assert.Equal("19001", pending.Value<string>("clientId"));
+            }
+        }
+
         private static void ClearLoginMonitorSchedules(MainForm form)
         {
             var lockField = typeof(MainForm).GetField("sessionStateLock", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
