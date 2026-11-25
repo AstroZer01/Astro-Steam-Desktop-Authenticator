@@ -18,6 +18,8 @@ namespace Steam_Desktop_Authenticator
 
         private static long storageTransactionCommitCount;
         private static long storageMutationEpoch;
+        private static readonly HashSet<string> inProcessQuarantinedDirectories =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private const string StorageJournalFilename = ".asda-storage-transaction.json";
         private const string StorageJournalQuarantineFilename = ".asda-storage-transaction.quarantined";
@@ -32,6 +34,14 @@ namespace Steam_Desktop_Authenticator
         internal static Func<string, bool> BeforeDeleteFileForTesting { get; set; }
         internal static Action OnAfterReplaceFilesBeforeManifestCommitForTest { get; set; }
         internal static Action OnBeforeRebaseRetainedStorageTransactionForTest { get; set; }
+
+        internal static void ClearInProcessQuarantineForTest()
+        {
+            lock (storageLock)
+            {
+                inProcessQuarantinedDirectories.Clear();
+            }
+        }
 
         private enum StagedAccountFileMode
         {
@@ -109,10 +119,50 @@ namespace Steam_Desktop_Authenticator
             return new AccountFileTargetPlan(StagedAccountFileMode.CreateFallbackGuid, fallbackFilename);
         }
 
+        private static string NormalizeQuarantineDirectoryKey(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+                return null;
+            return path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+
+        private static void RecordInProcessQuarantineLocked(string maDir, string canonicalDir)
+        {
+            string fullKey = NormalizeQuarantineDirectoryKey(Path.GetFullPath(maDir));
+            if (!String.IsNullOrEmpty(fullKey))
+                inProcessQuarantinedDirectories.Add(fullKey);
+
+            string canonicalKey = NormalizeQuarantineDirectoryKey(canonicalDir);
+            if (!String.IsNullOrEmpty(canonicalKey))
+                inProcessQuarantinedDirectories.Add(canonicalKey);
+        }
+
+        private static bool IsStorageDirectoryQuarantined(string maDir, string canonicalDir = null)
+        {
+            if (Path.Exists(Path.Combine(maDir, StorageJournalQuarantineFilename)))
+                return true;
+
+            lock (storageLock)
+            {
+                if (inProcessQuarantinedDirectories.Count == 0)
+                    return false;
+
+                string fullKey = NormalizeQuarantineDirectoryKey(Path.GetFullPath(maDir));
+                if (!String.IsNullOrEmpty(fullKey) && inProcessQuarantinedDirectories.Contains(fullKey))
+                    return true;
+
+                string canonicalKey = NormalizeQuarantineDirectoryKey(canonicalDir);
+                if (!String.IsNullOrEmpty(canonicalKey) && inProcessQuarantinedDirectories.Contains(canonicalKey))
+                    return true;
+
+                return false;
+            }
+        }
+
         private static bool HasPendingOrQuarantinedStorageJournal(string maDir)
         {
             return Path.Exists(Path.Combine(maDir, StorageJournalFilename)) ||
-                   Path.Exists(Path.Combine(maDir, StorageJournalQuarantineFilename));
+                   IsStorageDirectoryQuarantined(maDir);
         }
 
         private static bool TryRecoverPendingJournalBeforeReadLocked(
@@ -801,14 +851,13 @@ namespace Steam_Desktop_Authenticator
             bool allowLockedCompletedJournal = false)
         {
             string journalFilename = Path.Combine(maDir, StorageJournalFilename);
-            string quarantinedFilename = Path.Combine(maDir, StorageJournalQuarantineFilename);
             lock (storageLock)
             {
-                if (Path.Exists(quarantinedFilename))
+                if (IsStorageDirectoryQuarantined(maDir, expectedCanonicalDir))
                 {
                     DiagnosticErrorLogger.Log(
                         "Authenticator storage",
-                        new InvalidDataException("A rejected or tampered storage transaction journal is quarantined on disk."),
+                        new InvalidDataException("A rejected or tampered storage transaction journal is quarantined."),
                         "Storage recovery failed closed because a previous storage journal integrity check failed.");
                     return false;
                 }
@@ -917,9 +966,21 @@ namespace Steam_Desktop_Authenticator
                     string effectiveManifestContents = null;
                     bool needsManifestRestore = false;
                     string settingsBackupToDelete = null;
+                    bool isRebasedSettingsBackupEligible =
+                        backupFilename == null &&
+                        !String.IsNullOrWhiteSpace(journal.PreviousManifestHash) &&
+                        replaced.Count == 0 &&
+                        created.Count == 0 &&
+                        obsolete.Count == 0 &&
+                        retainedObsolete.Count > 0;
+                    string settingsBackupPath = isRebasedSettingsBackupEligible
+                        ? Path.Combine(maDir, SettingsBackupFilename)
+                        : null;
                     if (File.Exists(manifestFilename))
                     {
                         effectiveManifestContents = StoragePathGuard.ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes, canonicalDir);
+                        if (settingsBackupPath != null && File.Exists(settingsBackupPath))
+                            settingsBackupToDelete = settingsBackupPath;
                     }
                     else if (backupFilename != null && File.Exists(backupFilename))
                     {
@@ -930,28 +991,19 @@ namespace Steam_Desktop_Authenticator
                             root);
                         needsManifestRestore = true;
                     }
-                    else if (backupFilename == null &&
-                             !String.IsNullOrWhiteSpace(journal.PreviousManifestHash) &&
-                             replaced.Count == 0 &&
-                             created.Count == 0 &&
-                             obsolete.Count == 0 &&
-                             retainedObsolete.Count > 0)
+                    else if (settingsBackupPath != null && File.Exists(settingsBackupPath))
                     {
                         // SaveWithResult rebases a cleanup-only journal with PreviousManifestHash before
                         // replacing manifest.json with SettingsBackupFilename. If ReplaceFileW failed
                         // after renaming manifest.json to .manifest.settings.bak, validate and restore
                         // it against PreviousManifestHash before resuming retained cleanup.
-                        string settingsBackupPath = Path.Combine(maDir, SettingsBackupFilename);
-                        if (File.Exists(settingsBackupPath))
-                        {
-                            effectiveManifestContents = ReadAndValidateManifestBackupContents(
-                                settingsBackupPath,
-                                journal.PreviousManifestHash,
-                                canonicalDir,
-                                root);
-                            needsManifestRestore = true;
-                            settingsBackupToDelete = settingsBackupPath;
-                        }
+                        effectiveManifestContents = ReadAndValidateManifestBackupContents(
+                            settingsBackupPath,
+                            journal.PreviousManifestHash,
+                            canonicalDir,
+                            root);
+                        needsManifestRestore = true;
+                        settingsBackupToDelete = settingsBackupPath;
                     }
 
                     string currentManifestHash = effectiveManifestContents != null
@@ -995,6 +1047,7 @@ namespace Steam_Desktop_Authenticator
                     bool isRetainedCleanupOnlyJournal =
                         currentManifestHash != null &&
                         !needsManifestRestore &&
+                        settingsBackupToDelete == null &&
                         isVersion2 &&
                         backupFilename == null &&
                         created.Count == 0 &&
@@ -1065,6 +1118,12 @@ namespace Steam_Desktop_Authenticator
                                 DeleteFileBestEffort(backupFilename, "A completed manifest backup could not be removed during storage recovery.", canonicalDir);
                             if (!committedBackupDeleted)
                                 return false;
+
+                            if (settingsBackupToDelete != null &&
+                                !DeleteFileBestEffort(settingsBackupToDelete, "A completed settings manifest backup could not be removed during storage recovery.", canonicalDir))
+                            {
+                                return false;
+                            }
 
                             bool committedReplacedBackupsDeleted = DeleteFilesBestEffort(
                                 maDir,
@@ -1285,6 +1344,7 @@ namespace Steam_Desktop_Authenticator
 
                         if (!scrubbed)
                         {
+                            RecordInProcessQuarantineLocked(maDir, canonicalDir);
                             Interlocked.Increment(ref storageMutationEpoch);
                             try
                             {

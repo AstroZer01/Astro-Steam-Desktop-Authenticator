@@ -701,7 +701,7 @@ namespace Steam_Desktop_Authenticator
                 lock (storageLock)
                 {
                     bool unexpectedNewJournal =
-                        Path.Exists(Path.Combine(maDir, StorageJournalQuarantineFilename)) ||
+                        IsStorageDirectoryQuarantined(maDir) ||
                         (!retainedCleanupJournalPresent && File.Exists(Path.Combine(maDir, StorageJournalFilename)));
                     if (this.storageRevision == revisionBefore &&
                         Interlocked.Read(ref storageMutationEpoch) == mutationEpochBefore &&
@@ -1557,7 +1557,7 @@ namespace Steam_Desktop_Authenticator
                             return true;
 
                         bool unexpectedNewJournal =
-                            Path.Exists(Path.Combine(maDir, StorageJournalQuarantineFilename)) ||
+                            IsStorageDirectoryQuarantined(maDir) ||
                             (!retainedCleanupJournalPresent && File.Exists(Path.Combine(maDir, StorageJournalFilename)));
                         if (this.storageRevision != revisionBefore ||
                             Interlocked.Read(ref storageMutationEpoch) != mutationEpochBefore ||

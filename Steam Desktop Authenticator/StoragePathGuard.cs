@@ -58,6 +58,7 @@ namespace Steam_Desktop_Authenticator
         internal static long CanonicalDirectoryVerificationCount => Interlocked.Read(ref canonicalDirectoryVerificationCount);
         internal static Action<string> OnBeforeFlushReplacementForTest { get; set; }
         internal static Action<string> OnBeforePublishRestoredMissingTargetForTest { get; set; }
+        internal static Action<string> OnBeforeCreateQuarantineMarkerForTest { get; set; }
 
         internal sealed class PinnedStorageDirectory : IDisposable
         {
@@ -1490,6 +1491,8 @@ namespace Steam_Desktop_Authenticator
 
             string fullPath = Path.GetFullPath(markerPath);
             string win32Path = ToWin32OpenPath(fullPath);
+
+            OnBeforeCreateQuarantineMarkerForTest?.Invoke(fullPath);
 
             // Publish the quarantine marker directly with a single CREATE_NEW call so there is
             // no temporary-file rename window between creation and visibility on disk.

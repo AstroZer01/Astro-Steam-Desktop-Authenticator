@@ -2261,6 +2261,20 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 File.WriteAllText(journalPath, rebasedJournal.ToString(Formatting.None));
                 File.Move(manifestPath, settingsBackupPath);
 
+                // First recovery attempt while .manifest.settings.bak is read-locked: manifest.json
+                // is restored, deleting .manifest.settings.bak fails, so recovery fails closed without
+                // dropping the journal.
+                using (new FileStream(settingsBackupPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+                    Assert.True(File.Exists(manifestPath));
+                    Assert.True(File.Exists(settingsBackupPath));
+                    Assert.True(File.Exists(journalPath));
+                }
+
+                // Next recovery attempt after .manifest.settings.bak unlocks sees manifest.json already
+                // present, deletes .manifest.settings.bak before compacting/clearing the journal, and
+                // preserves the locked obsolete entry.
                 Manifest recoveredWhileLocked = Manifest.GetManifest(true);
                 Assert.Equal(2, recoveredWhileLocked.Entries.Count);
                 Assert.True(File.Exists(manifestPath));
@@ -2272,8 +2286,71 @@ namespace SteamAuth.PhoneEnrollment.Tests
             // Once unlocked, next startup finishes deleting the retained obsolete file and removes the journal.
             Manifest finalReload = Manifest.GetManifest(true);
             Assert.Equal(2, finalReload.Entries.Count);
+            Assert.False(File.Exists(settingsBackupPath));
             Assert.False(File.Exists(obsoletePath));
             Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void SaveWithResult_RejectedRebaseWithFailedQuarantineMarkerStillQuarantinesInProcess()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000034000UL;
+            ulong secondId = 76561198000034001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string quarantinePath = Path.Combine(maDirectory, ".asda-storage-transaction.quarantined");
+            string lockedSourceFilename = "inproc-quarantine-obsolete.maFile";
+            string lockedSourcePath = Path.Combine(maDirectory, lockedSourceFilename);
+            File.WriteAllText(lockedSourcePath, JsonConvert.SerializeObject(CreateAccount(secondId)));
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Single(candidates);
+
+            string injectedFilename = "injected-must-survive-inproc-quarantine.maFile";
+            string injectedPath = Path.Combine(maDirectory, injectedFilename);
+            File.WriteAllText(injectedPath, "{\"untracked\":\"must-survive-in-process\"}");
+
+            FileStream journalReadLock = null;
+            using (new FileStream(lockedSourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Assert.True(manifest.ImportUnmanagedMaFiles(candidates).Succeeded);
+                Assert.True(File.Exists(journalPath));
+
+                // Inject an unvalidated entry, hold a read lock on the journal so scrubbing fails,
+                // AND fail CREATE_NEW on the quarantine marker file.
+                Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = () =>
+                {
+                    JObject injected = JObject.Parse(File.ReadAllText(journalPath));
+                    ((JArray)injected["retained_obsolete_filenames"]).Add(injectedFilename);
+                    File.WriteAllText(journalPath, injected.ToString(Formatting.None));
+                    journalReadLock = new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                };
+                StoragePathGuard.OnBeforeCreateQuarantineMarkerForTest = _ =>
+                    throw new IOException("Simulated disk full while creating quarantine marker.");
+                try
+                {
+                    manifest.MinimizeToTray = !manifest.MinimizeToTray;
+                    StorageResult result = manifest.SaveWithResult();
+                    Assert.False(result.Succeeded);
+                    Assert.False(File.Exists(quarantinePath));
+                }
+                finally
+                {
+                    Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = null;
+                    StoragePathGuard.OnBeforeCreateQuarantineMarkerForTest = null;
+                    journalReadLock?.Dispose();
+                    journalReadLock = null;
+                }
+            }
+
+            // Even after all locks release and without an on-disk marker, later recovery and writes
+            // in the same process must STILL fail closed and never delete the injected file.
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.False(manifest.MoveEntryWithResult(1, 0).Succeeded);
+            Assert.True(File.Exists(injectedPath));
+            Assert.Equal("{\"untracked\":\"must-survive-in-process\"}", File.ReadAllText(injectedPath));
         }
 
         [Fact]
@@ -2405,8 +2482,10 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Manifest.BeforeDeleteFileForTesting = null;
             Manifest.OnAfterReplaceFilesBeforeManifestCommitForTest = null;
             Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = null;
+            Manifest.ClearInProcessQuarantineForTest();
             StoragePathGuard.OnBeforeFlushReplacementForTest = null;
             StoragePathGuard.OnBeforePublishRestoredMissingTargetForTest = null;
+            StoragePathGuard.OnBeforeCreateQuarantineMarkerForTest = null;
             Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);
             if (Directory.Exists(dataDirectory))
                 Directory.Delete(dataDirectory, true);
