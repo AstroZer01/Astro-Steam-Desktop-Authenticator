@@ -44,6 +44,7 @@ namespace Steam_Desktop_Authenticator
         public string DeviceName { get; set; }
         public string RequestedPersistence { get; set; }
         public string SecurityHistory { get; set; }
+        public bool IsNewLogin { get; set; }
         public bool LocationMismatch { get; set; }
         public bool HighUsageLogin { get; set; }
     }
@@ -58,6 +59,7 @@ namespace Steam_Desktop_Authenticator
     internal sealed class LoginApprovalActionResult
     {
         public bool Succeeded { get; set; }
+        public bool Skipped { get; set; }
         public LoginApprovalErrorKind ErrorKind { get; set; }
         public string ErrorMessage { get; set; }
     }
@@ -190,7 +192,8 @@ namespace Steam_Desktop_Authenticator
             SteamGuardAccount account,
             PendingLoginRequest request,
             LoginApprovalDecision decision,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            Func<bool> shouldSubmitDecision = null)
         {
             try
             {
@@ -200,7 +203,11 @@ namespace Steam_Desktop_Authenticator
                 {
                     throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The login request is invalid or belongs to another account.");
                 }
+                if (shouldSubmitDecision != null && !shouldSubmitDecision())
+                    return new LoginApprovalActionResult() { Succeeded = false, Skipped = true };
                 await EnsureAccessTokenAsync(account, false, cancellationToken);
+                if (shouldSubmitDecision != null && !shouldSubmitDecision())
+                    return new LoginApprovalActionResult() { Succeeded = false, Skipped = true };
                 await SubmitDecisionAsync(account, request, decision, cancellationToken);
                 return new LoginApprovalActionResult() { Succeeded = true };
             }
@@ -212,7 +219,11 @@ namespace Steam_Desktop_Authenticator
             {
                 try
                 {
+                    if (shouldSubmitDecision != null && !shouldSubmitDecision())
+                        return new LoginApprovalActionResult() { Succeeded = false, Skipped = true };
                     await EnsureAccessTokenAsync(account, true, cancellationToken);
+                    if (shouldSubmitDecision != null && !shouldSubmitDecision())
+                        return new LoginApprovalActionResult() { Succeeded = false, Skipped = true };
                     await SubmitDecisionAsync(account, request, decision, cancellationToken);
                     return new LoginApprovalActionResult() { Succeeded = true };
                 }
@@ -275,6 +286,7 @@ namespace Steam_Desktop_Authenticator
                 DeviceName = ValidateResponseText(details.DeviceFriendlyName, MaximumLoginTextLength, "device name"),
                 RequestedPersistence = PersistenceName((int)details.RequestedPersistence),
                 SecurityHistory = SecurityHistoryName((int)details.LoginHistory),
+                IsNewLogin = details.LoginHistory == EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory,
                 LocationMismatch = details.RequestorLocationMismatch,
                 HighUsageLogin = details.HighUsageLogin
             };
