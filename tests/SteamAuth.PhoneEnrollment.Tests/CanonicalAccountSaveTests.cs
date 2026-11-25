@@ -2212,10 +2212,68 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             // Even if the journal file itself is removed while the quarantine marker remains, direct
             // CommitStorageTransaction callers (such as MoveEntryWithResult) must still fail closed.
+            // Calling CreateExclusiveMarkerFileIfMissing again on the existing marker must also be a no-op (ERROR_FILE_EXISTS = 80).
+            string canonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDirectory);
+            StoragePathGuard.CreateExclusiveMarkerFileIfMissing(quarantinePath, canonicalDir, "duplicate-marker-noop");
             File.Delete(journalPath);
             StorageResult reorderWhileQuarantined = manifest.MoveEntryWithResult(1, 0);
             Assert.False(reorderWhileQuarantined.Succeeded);
             Assert.Equal(manifestBeforeRejectedSave, File.ReadAllText(Path.Combine(maDirectory, "manifest.json")));
+        }
+
+        [Fact]
+        public void StartupRecovery_RestoresSettingsBackupMatchingPreviousManifestHashAfterPreWriteRebaseCrash()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000033000UL;
+            ulong secondId = 76561198000033001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string settingsBackupPath = Path.Combine(maDirectory, ".manifest.settings.bak");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string obsoleteFilename = "settings-crash-retained-obsolete.maFile";
+            string obsoletePath = Path.Combine(maDirectory, obsoleteFilename);
+            File.WriteAllText(obsoletePath, JsonConvert.SerializeObject(CreateAccount(secondId)));
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Single(candidates);
+
+            using (new FileStream(obsoletePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Assert.True(manifest.ImportUnmanagedMaFiles(candidates).Succeeded);
+                Assert.True(File.Exists(journalPath));
+
+                // Simulate SaveWithResult completing pre-write rebase (PreviousManifestHash = old manifest,
+                // BackupFilename = null) and crashing mid-ReplaceFileW after manifest.json was moved to
+                // .manifest.settings.bak and before the replacement temp file was renamed into place.
+                string oldManifestContents = File.ReadAllText(manifestPath);
+                JObject rebasedJournal = new JObject
+                {
+                    ["journal_version"] = 2,
+                    ["manifest_hash"] = ComputeContentHash(oldManifestContents + "-new-settings"),
+                    ["previous_manifest_hash"] = ComputeContentHash(oldManifestContents),
+                    ["created_filenames"] = new JArray(),
+                    ["obsolete_filenames"] = new JArray(),
+                    ["retained_obsolete_filenames"] = new JArray(obsoleteFilename),
+                    ["backup_filename"] = null
+                };
+                File.WriteAllText(journalPath, rebasedJournal.ToString(Formatting.None));
+                File.Move(manifestPath, settingsBackupPath);
+
+                Manifest recoveredWhileLocked = Manifest.GetManifest(true);
+                Assert.Equal(2, recoveredWhileLocked.Entries.Count);
+                Assert.True(File.Exists(manifestPath));
+                Assert.False(File.Exists(settingsBackupPath));
+                Assert.True(File.Exists(obsoletePath));
+                Assert.True(File.Exists(journalPath));
+            }
+
+            // Once unlocked, next startup finishes deleting the retained obsolete file and removes the journal.
+            Manifest finalReload = Manifest.GetManifest(true);
+            Assert.Equal(2, finalReload.Entries.Count);
+            Assert.False(File.Exists(obsoletePath));
+            Assert.False(File.Exists(journalPath));
         }
 
         [Fact]
@@ -2315,11 +2373,22 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     Assert.Equal(3, manifest.GetAllAccounts("multi-cleanup-key").Length);
 
                     // Even if manifest.json settings change (causing a hash mismatch against the
-                    // read-locked cleanup-only journal), VerifyPasskey and GetAllAccounts still succeed.
+                    // read-locked cleanup-only journal), VerifyPasskey succeeds on the FIRST optimistic
+                    // attempt without bumping storageMutationEpoch or spinning retries.
                     JObject updatedManifest = JObject.Parse(File.ReadAllText(manifestPath));
                     updatedManifest["minimize_to_tray"] = !(updatedManifest["minimize_to_tray"]?.Value<bool>() ?? true);
                     File.WriteAllText(manifestPath, updatedManifest.ToString(Formatting.None));
-                    Assert.True(manifest.VerifyPasskey("multi-cleanup-key"));
+                    int optimisticAttempts = 0;
+                    manifest.OnBeforeVerifyPasskeyProofPublishForTest = () => optimisticAttempts++;
+                    try
+                    {
+                        Assert.True(manifest.VerifyPasskey("multi-cleanup-key"));
+                        Assert.Equal(1, optimisticAttempts);
+                    }
+                    finally
+                    {
+                        manifest.OnBeforeVerifyPasskeyProofPublishForTest = null;
+                    }
                     Assert.Equal(3, manifest.GetAllAccounts("multi-cleanup-key").Length);
                 }
             }

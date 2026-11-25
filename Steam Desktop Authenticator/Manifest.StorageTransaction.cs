@@ -702,8 +702,7 @@ namespace Steam_Desktop_Authenticator
             string manifestFilename,
             string journalFilename,
             IReadOnlyList<string> retainedObsoleteFilenames,
-            string expectedCanonicalDir,
-            bool allowLockedJournal = false)
+            string expectedCanonicalDir)
         {
             try
             {
@@ -722,17 +721,7 @@ namespace Steam_Desktop_Authenticator
                     RetainedObsoleteFilenames = retainedObsoleteFilenames.ToList(),
                     BackupFilename = null
                 };
-                try
-                {
-                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
-                }
-                catch (Exception ex) when (allowLockedJournal && (ex is IOException || ex is UnauthorizedAccessException))
-                {
-                    DiagnosticErrorLogger.Log(
-                        "Authenticator storage",
-                        ex,
-                        "The retained cleanup journal could not be rewritten during read recovery because it is currently in use.");
-                }
+                WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
                 return true;
             }
             catch (Exception ex)
@@ -927,6 +916,7 @@ namespace Steam_Desktop_Authenticator
                     // and validate ownership BEFORE publishing any restored manifest to disk.
                     string effectiveManifestContents = null;
                     bool needsManifestRestore = false;
+                    string settingsBackupToDelete = null;
                     if (File.Exists(manifestFilename))
                     {
                         effectiveManifestContents = StoragePathGuard.ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes, canonicalDir);
@@ -939,6 +929,29 @@ namespace Steam_Desktop_Authenticator
                             canonicalDir,
                             root);
                         needsManifestRestore = true;
+                    }
+                    else if (backupFilename == null &&
+                             !String.IsNullOrWhiteSpace(journal.PreviousManifestHash) &&
+                             replaced.Count == 0 &&
+                             created.Count == 0 &&
+                             obsolete.Count == 0 &&
+                             retainedObsolete.Count > 0)
+                    {
+                        // SaveWithResult rebases a cleanup-only journal with PreviousManifestHash before
+                        // replacing manifest.json with SettingsBackupFilename. If ReplaceFileW failed
+                        // after renaming manifest.json to .manifest.settings.bak, validate and restore
+                        // it against PreviousManifestHash before resuming retained cleanup.
+                        string settingsBackupPath = Path.Combine(maDir, SettingsBackupFilename);
+                        if (File.Exists(settingsBackupPath))
+                        {
+                            effectiveManifestContents = ReadAndValidateManifestBackupContents(
+                                settingsBackupPath,
+                                journal.PreviousManifestHash,
+                                canonicalDir,
+                                root);
+                            needsManifestRestore = true;
+                            settingsBackupToDelete = settingsBackupPath;
+                        }
                     }
 
                     string currentManifestHash = effectiveManifestContents != null
@@ -975,11 +988,12 @@ namespace Steam_Desktop_Authenticator
                         manifestOwnership,
                         manifestCommitted);
 
-                    // Fast path for a committed retained-obsolete-only cleanup journal:
-                    // do not bump storageMutationEpoch when locked obsolete files remain unchanged
-                    // so concurrent readers and VerifyPasskey do not spin or fail.
+                    // Fast path for a retained-obsolete-only cleanup journal (committed, rebased, or
+                    // hash-mismatched after a settings save): do not bump storageMutationEpoch when no
+                    // manifest or live account files are mutated so concurrent readers and VerifyPasskey
+                    // succeed on the first optimistic attempt without spinning.
                     bool isRetainedCleanupOnlyJournal =
-                        manifestCommitted &&
+                        currentManifestHash != null &&
                         !needsManifestRestore &&
                         isVersion2 &&
                         backupFilename == null &&
@@ -988,7 +1002,6 @@ namespace Steam_Desktop_Authenticator
                         (journal.CreatedFileIdentities == null || journal.CreatedFileIdentities.Count == 0) &&
                         replaced.Count == 0 &&
                         obsolete.Count == 0 &&
-                        String.IsNullOrWhiteSpace(journal.PreviousManifestHash) &&
                         retainedObsolete.Count > 0;
 
                     if (isRetainedCleanupOnlyJournal)
@@ -1000,8 +1013,14 @@ namespace Steam_Desktop_Authenticator
                                 .ToList();
                             if (remainingObsolete.Count > 0)
                             {
-                                if (remainingObsolete.Count != retainedObsolete.Count)
+                                bool needsJournalRewrite =
+                                    remainingObsolete.Count != retainedObsolete.Count ||
+                                    !manifestCommitted ||
+                                    !String.IsNullOrWhiteSpace(journal.PreviousManifestHash);
+                                if (needsJournalRewrite)
                                 {
+                                    journal.ManifestHash = currentManifestHash;
+                                    journal.PreviousManifestHash = null;
                                     journal.RetainedObsoleteFilenames = remainingObsolete;
                                     try
                                     {
@@ -1012,7 +1031,7 @@ namespace Steam_Desktop_Authenticator
                                         DiagnosticErrorLogger.Log(
                                             "Authenticator storage",
                                             ex,
-                                            "The retained cleanup journal could not be compacted during read recovery because it is currently in use.");
+                                            "The retained cleanup journal could not be rewritten during read recovery because it is currently in use.");
                                     }
                                 }
                                 if (retainedObsoleteFilenames != null)
@@ -1124,11 +1143,11 @@ namespace Steam_Desktop_Authenticator
                         if (!uncommittedBackupDeleted)
                             return false;
 
-                        bool isCleanupOnlyUncommittedJournal =
-                            replaced.Count == 0 &&
-                            created.Count == 0 &&
-                            backupFilename == null &&
-                            retainedObsolete.Count > 0;
+                        if (settingsBackupToDelete != null &&
+                            !DeleteFileBestEffort(settingsBackupToDelete, "A restored settings manifest backup could not be removed during storage recovery.", canonicalDir))
+                        {
+                            return false;
+                        }
 
                         if (retainedObsolete.Count > 0 &&
                             !DeleteFilesBestEffort(maDir, retainedObsolete, "A retained obsolete authenticator file could not be removed during storage recovery.", canonicalDir))
@@ -1138,15 +1157,8 @@ namespace Steam_Desktop_Authenticator
                                 .ToList();
                             if (remainingRetainedObsolete.Count > 0)
                             {
-                                if (!PreserveRetainedObsoleteJournal(
-                                    manifestFilename,
-                                    journalFilename,
-                                    remainingRetainedObsolete,
-                                    canonicalDir,
-                                    allowLockedJournal: allowLockedCompletedJournal && isCleanupOnlyUncommittedJournal))
-                                {
+                                if (!PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, remainingRetainedObsolete, canonicalDir))
                                     return false;
-                                }
                                 if (retainedObsoleteFilenames != null)
                                 {
                                     foreach (string filename in remainingRetainedObsolete)
@@ -1157,9 +1169,7 @@ namespace Steam_Desktop_Authenticator
                         }
 
                         bool journalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.", canonicalDir);
-                        if (journalDeleted && !File.Exists(journalFilename))
-                            return true;
-                        return allowLockedCompletedJournal && isCleanupOnlyUncommittedJournal;
+                        return journalDeleted && !File.Exists(journalFilename);
                     }
                     finally
                     {

@@ -37,6 +37,7 @@ namespace Steam_Desktop_Authenticator
         private const int FileDispositionInfoClass = 4;
         private const int ErrorFileNotFound = 2;
         private const int ErrorPathNotFound = 3;
+        private const int ErrorFileExists = 80;
         private const int ErrorAlreadyExists = 183;
         private const int Win32LongPathThreshold = 248;
         private const byte InPlaceOverwriteSentinelByte = 0xFF;
@@ -1505,7 +1506,7 @@ namespace Steam_Desktop_Authenticator
             {
                 int error = Marshal.GetLastWin32Error();
                 handle?.Dispose();
-                if (error == ErrorAlreadyExists)
+                if (error == ErrorFileExists || error == ErrorAlreadyExists)
                     return;
 
                 throw new IOException(
