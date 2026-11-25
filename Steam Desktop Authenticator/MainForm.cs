@@ -2208,7 +2208,7 @@ namespace Steam_Desktop_Authenticator
                         isBackgroundMonitor ? "Login action monitor" : "Login action refresh",
                         new InvalidOperationException(actionResult.ErrorMessage),
                         "Steam rate limited an automatic login action.");
-                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
+                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests: true);
                     return LoginAccountScanOutcome.RateLimited;
                 }
                 if (actionResult.ErrorKind == LoginApprovalErrorKind.SessionExpired || actionResult.ErrorKind == LoginApprovalErrorKind.Unauthorized)

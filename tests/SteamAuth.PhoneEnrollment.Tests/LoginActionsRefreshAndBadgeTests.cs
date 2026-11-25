@@ -702,8 +702,10 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
-        [Fact]
-        public async Task MonitorLoginActionsAsync_NotifiesManualApprovalWhenRateLimitedTokenRefreshFollowsSwitchToManual()
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task LoginScan_NotifiesManualApprovalWhenRateLimitedTokenRefreshFollowsSwitchToManual(bool viaMonitor)
         {
             var transport = new StubLoginTransport();
             SteamGuardAccount account = CreateAccount(76561198000016001UL, "acct_rl_manual_notice", transport);
@@ -733,15 +735,20 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 notifyLoginAction: (title, message, icon) => notifications.Add(title + "|" + message),
                 initialAccounts: new[] { account }))
             {
-                await form.MonitorLoginActionsAsync();
+                if (viaMonitor)
+                    await form.MonitorLoginActionsAsync();
+                else
+                    await form.RefreshLoginActionsAsync("all");
 
                 Assert.Single(transport.ActionDecisions);
                 Assert.Equal(1, transport.TokenRefreshCount);
                 string notice = Assert.Single(notifications);
                 Assert.StartsWith("Steam login approval needed|", notice, StringComparison.Ordinal);
 
-                // Global rate limit remains active so an immediate follow-up monitor pass makes no extra requests.
+                // Global rate limit remains active so an immediate follow-up monitor or refresh makes no extra requests.
+                ClearLoginMonitorSchedules(form);
                 await form.MonitorLoginActionsAsync();
+                await form.RefreshLoginActionsAsync("all");
                 Assert.Equal(1, transport.SessionListFetchCount);
             }
         }
