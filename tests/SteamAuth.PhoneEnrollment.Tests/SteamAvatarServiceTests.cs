@@ -241,45 +241,46 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 int miniProfileCalls = 0;
                 int imageCalls = 0;
                 int hookEntered = 0;
-                var caller1PausedBeforeClaim = new ManualResetEventSlim(false);
-                var allowCaller1ToClaim = new ManualResetEventSlim(false);
-
-                SteamAvatarService service = new SteamAvatarService(
-                    tempDir,
-                    (url, maxBytes, ct) =>
-                    {
-                        if (url.Contains("/miniprofile/", StringComparison.Ordinal))
-                        {
-                            Interlocked.Increment(ref miniProfileCalls);
-                            return Task.FromResult(Encoding.UTF8.GetBytes("{\"avatar_url\":\"https://avatars.fastly.steamstatic.com/toctou_medium.png\"}"));
-                        }
-
-                        Interlocked.Increment(ref imageCalls);
-                        return Task.FromResult(ValidPngBytes);
-                    });
-
-                service.BeforeInflightClaimHook = () =>
+                using (var caller1PausedBeforeClaim = new ManualResetEventSlim(false))
+                using (var allowCaller1ToClaim = new ManualResetEventSlim(false))
                 {
-                    if (Interlocked.Increment(ref hookEntered) == 1)
+                    SteamAvatarService service = new SteamAvatarService(
+                        tempDir,
+                        (url, maxBytes, ct) =>
+                        {
+                            if (url.Contains("/miniprofile/", StringComparison.Ordinal))
+                            {
+                                Interlocked.Increment(ref miniProfileCalls);
+                                return Task.FromResult(Encoding.UTF8.GetBytes("{\"avatar_url\":\"https://avatars.fastly.steamstatic.com/toctou_medium.png\"}"));
+                            }
+
+                            Interlocked.Increment(ref imageCalls);
+                            return Task.FromResult(ValidPngBytes);
+                        });
+
+                    service.BeforeInflightClaimHook = () =>
                     {
-                        caller1PausedBeforeClaim.Set();
-                        allowCaller1ToClaim.Wait(TimeSpan.FromSeconds(5));
-                    }
-                };
+                        if (Interlocked.Increment(ref hookEntered) == 1)
+                        {
+                            caller1PausedBeforeClaim.Set();
+                            allowCaller1ToClaim.Wait(TimeSpan.FromSeconds(5));
+                        }
+                    };
 
-                Task<string> caller1 = Task.Run(() => service.GetOrFetchAvatarDataUrlAsync(steamId, CancellationToken.None));
-                Assert.True(caller1PausedBeforeClaim.Wait(TimeSpan.FromSeconds(5)));
+                    Task<string> caller1 = Task.Run(() => service.GetOrFetchAvatarDataUrlAsync(steamId, CancellationToken.None));
+                    Assert.True(caller1PausedBeforeClaim.Wait(TimeSpan.FromSeconds(5)));
 
-                // Caller 2 runs to completion (fetching and populating cache, then removing its inflight entry)
-                // while Caller 1 is paused between its initial cache check and inflightFetches.GetOrAdd.
-                string result2 = await service.GetOrFetchAvatarDataUrlAsync(steamId, CancellationToken.None);
-                allowCaller1ToClaim.Set();
-                string result1 = await caller1;
+                    // Caller 2 runs to completion (fetching and populating cache, then removing its inflight entry)
+                    // while Caller 1 is paused between its initial cache check and inflightFetches.GetOrAdd.
+                    string result2 = await service.GetOrFetchAvatarDataUrlAsync(steamId, CancellationToken.None);
+                    allowCaller1ToClaim.Set();
+                    string result1 = await caller1;
 
-                Assert.Equal(ValidPngDataUrl, result1);
-                Assert.Equal(ValidPngDataUrl, result2);
-                Assert.Equal(1, miniProfileCalls);
-                Assert.Equal(1, imageCalls);
+                    Assert.Equal(ValidPngDataUrl, result1);
+                    Assert.Equal(ValidPngDataUrl, result2);
+                    Assert.Equal(1, miniProfileCalls);
+                    Assert.Equal(1, imageCalls);
+                }
             }
             finally
             {
