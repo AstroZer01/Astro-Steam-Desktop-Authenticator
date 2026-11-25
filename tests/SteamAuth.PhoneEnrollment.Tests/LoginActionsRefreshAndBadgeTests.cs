@@ -557,6 +557,110 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
+        [Fact]
+        public async Task RefreshLoginActionsAsync_DoesNotSubmitAutomaticDecisionWhenSwitchedToManualWhileWaitingForAccountLock()
+        {
+            var transport = new StubLoginTransport();
+            SteamGuardAccount account = CreateAccount(76561198000013001UL, "acct_lock_manual", transport);
+            transport.SetPendingRequest(account.Session.AccessToken, 17001UL, CreateSessionInfo("Desktop PC", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory));
+
+            var accountLockHeld = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseAccountLock = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.LoginActionMonitoringEnabled = true;
+            manifest.LoginActionMode = LoginActionModes.Deny;
+            manifest.LoginActionAutoAllowIpEnabled = true;
+            manifest.LoginActionAutoAllowCurrentDeviceIp = true;
+
+            var notifications = new List<string>();
+            var service = new LoginApprovalService(_ => true, transport);
+            MainForm form = null;
+            Task blockerTask = null;
+            using (form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                loginApprovalService: service,
+                notifyLoginAction: (title, message, icon) => notifications.Add(title + "|" + message),
+                initialAccounts: new[] { account },
+                getCurrentPublicIpv4Async: async _ =>
+                {
+                    // Acquire the per-account operation lock before the refresh proceeds to RespondAsync.
+                    var coordField = typeof(MainForm).GetField("steamAccountOperationCoordinator", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    Assert.NotNull(coordField);
+                    var coordinator = (SteamAccountOperationCoordinator)coordField.GetValue(form);
+                    blockerTask = coordinator.RunAsync(account.Session.SteamID, async () =>
+                    {
+                        accountLockHeld.TrySetResult(true);
+                        await releaseAccountLock.Task;
+                        return true;
+                    }, null);
+                    await accountLockHeld.Task;
+                    return "203.0.113.99";
+                }))
+            {
+                Task refreshTask = form.RefreshLoginActionsAsync("all");
+                await accountLockHeld.Task;
+
+                // Wait briefly so refreshTask queues on the per-account operation lock, then switch to Manual.
+                await Task.Delay(50);
+                manifest.LoginActionMode = LoginActionModes.Manual;
+                releaseAccountLock.SetResult(true);
+
+                await Task.WhenAll(refreshTask, blockerTask);
+
+                Assert.Empty(transport.ActionDecisions);
+                Assert.Empty(notifications);
+                JObject payload = JObject.Parse(form.BuildCachedLoginActionsPayloadJson());
+                JToken pending = Assert.Single((JArray)payload["requests"]);
+                Assert.Equal("17001", pending.Value<string>("clientId"));
+            }
+        }
+
+        [Fact]
+        public async Task RefreshLoginActionsAsync_DoesNotSubmitAutomaticRetryWhenSwitchedToManualDuringUnauthorizedTokenRefresh()
+        {
+            var transport = new StubLoginTransport();
+            SteamGuardAccount account = CreateAccount(76561198000014001UL, "acct_retry_manual", transport);
+            transport.SetPendingRequest(account.Session.AccessToken, 18001UL, CreateSessionInfo("Desktop PC", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory));
+            transport.ActionResultOverride = 21; // Unauthorized -> triggers GenerateAccessTokenForApp retry
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.LoginActionMonitoringEnabled = true;
+            manifest.LoginActionMode = LoginActionModes.Deny;
+
+            transport.OnTokenRefreshAsync = () =>
+            {
+                // User switches to Manual while the unauthorized retry is refreshing the access token.
+                manifest.LoginActionMode = LoginActionModes.Manual;
+                return Task.CompletedTask;
+            };
+
+            var notifications = new List<string>();
+            var service = new LoginApprovalService(_ => true, transport);
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                loginApprovalService: service,
+                notifyLoginAction: (title, message, icon) => notifications.Add(title + "|" + message),
+                initialAccounts: new[] { account }))
+            {
+                await form.RefreshLoginActionsAsync("all");
+
+                // Initial attempt hit Unauthorized (result 21), token refresh ran, and retry submission was skipped.
+                Assert.Single(transport.ActionDecisions);
+                Assert.Equal(1, transport.TokenRefreshCount);
+                Assert.Empty(notifications);
+                JObject payload = JObject.Parse(form.BuildCachedLoginActionsPayloadJson());
+                JToken pending = Assert.Single((JArray)payload["requests"]);
+                Assert.Equal("18001", pending.Value<string>("clientId"));
+            }
+        }
+
         private static void ClearLoginMonitorSchedules(MainForm form)
         {
             var lockField = typeof(MainForm).GetField("sessionStateLock", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
@@ -634,10 +738,14 @@ namespace SteamAuth.PhoneEnrollment.Tests
             private readonly ConcurrentDictionary<string, int> sessionListFetchCountByToken =
                 new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
             private int totalSessionListFetches;
+            private int tokenRefreshCount;
 
             public Func<string, int, CancellationToken, Task> OnSessionListFetchAsync { get; set; }
+            public Func<Task> OnTokenRefreshAsync { get; set; }
+            public int ActionResultOverride { get; set; } = 1;
             public List<(ulong ClientId, bool Confirm)> ActionDecisions { get; } = new List<(ulong, bool)>();
             public int SessionListFetchCount => Volatile.Read(ref totalSessionListFetches);
+            public int TokenRefreshCount => Volatile.Read(ref tokenRefreshCount);
 
             public int GetSessionListFetchCount(string accessToken)
             {
@@ -700,6 +808,21 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     return new SteamProtocolResponse<TResponse> { Result = 27 };
                 }
 
+                if (method == "GenerateAccessTokenForApp")
+                {
+                    Interlocked.Increment(ref tokenRefreshCount);
+                    if (OnTokenRefreshAsync != null)
+                        await OnTokenRefreshAsync();
+                    return new SteamProtocolResponse<TResponse>
+                    {
+                        Result = 1,
+                        Body = new CAuthentication_AccessToken_GenerateForApp_Response
+                        {
+                            AccessToken = CreateUnexpiredToken(999999UL)
+                        } as TResponse
+                    };
+                }
+
                 if (method == "UpdateAuthSessionWithMobileConfirmation" &&
                     request is CAuthentication_UpdateAuthSessionWithMobileConfirmation_Request updateRequest)
                 {
@@ -709,7 +832,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     }
                     return new SteamProtocolResponse<TResponse>
                     {
-                        Result = 1,
+                        Result = ActionResultOverride,
                         Body = new CAuthentication_UpdateAuthSessionWithMobileConfirmation_Response() as TResponse
                     };
                 }

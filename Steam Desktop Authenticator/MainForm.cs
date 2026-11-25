@@ -1989,6 +1989,55 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private void NotifyManualLoginRequestIfNeeded(
+            SteamGuardAccount account,
+            PendingLoginRequest request,
+            string requestKey,
+            bool notifyManualRequests)
+        {
+            if (notifyManualRequests &&
+                manifest?.LoginActionMonitoringEnabled == true &&
+                manifest.LoginActionMode == LoginActionModes.Manual &&
+                notifiedLoginRequests.Add(requestKey))
+            {
+                string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
+                NotifyLoginAction("Steam login approval needed", account.AccountName + ": " + device, ToolTipIcon.Info);
+            }
+        }
+
+        private bool TryEvaluateAutomaticLoginDecision(
+            PendingLoginRequest request,
+            LoginScanContext scanContext,
+            out string actionMode,
+            out LoginApprovalDecision decision,
+            out bool allowWhitelistedIp)
+        {
+            actionMode = manifest?.LoginActionMode ?? LoginActionModes.Manual;
+            decision = LoginApprovalDecision.Deny;
+            allowWhitelistedIp = false;
+            if (manifest == null || !manifest.LoginActionMonitoringEnabled || actionMode == LoginActionModes.Manual)
+                return false;
+
+            if (actionMode == LoginActionModes.Deny && manifest.LoginActionAutoAllowIpEnabled)
+            {
+                bool allowAdditionalIp = !String.IsNullOrWhiteSpace(manifest.LoginActionAutoAllowIp) &&
+                    AreSameIpv4Address(request.IPAddress, manifest.LoginActionAutoAllowIp);
+                bool allowCurrentDeviceIp = false;
+                if (!allowAdditionalIp && manifest.LoginActionAutoAllowCurrentDeviceIp && IsValidIpv4Address(request.IPAddress))
+                {
+                    if (!scanContext.CurrentDeviceIpChecked)
+                        return false;
+                    allowCurrentDeviceIp = AreSameIpv4Address(request.IPAddress, scanContext.CurrentDeviceIp);
+                }
+                allowWhitelistedIp = allowAdditionalIp || allowCurrentDeviceIp;
+            }
+
+            decision = actionMode == LoginActionModes.ApprovePersistent || allowWhitelistedIp
+                ? LoginApprovalDecision.ApprovePersistent
+                : LoginApprovalDecision.Deny;
+            return true;
+        }
+
         private async Task<LoginAccountScanOutcome> ScanLoginAccountAsync(
             SteamGuardAccount account,
             bool useKnownRequestsCache,
@@ -2071,11 +2120,7 @@ namespace Steam_Desktop_Authenticator
 
                 if (!manifest.LoginActionMonitoringEnabled || manifest.LoginActionMode == LoginActionModes.Manual)
                 {
-                    if (notifyManualRequests && manifest.LoginActionMonitoringEnabled && notifiedLoginRequests.Add(requestKey))
-                    {
-                        string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
-                        NotifyLoginAction("Steam login approval needed", account.AccountName + ": " + device, ToolTipIcon.Info);
-                    }
+                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
                     continue;
                 }
 
@@ -2094,30 +2139,16 @@ namespace Steam_Desktop_Authenticator
                 // Re-evaluate live rules and session availability after any async public-IP lookup.
                 if (!IsSessionAvailableForAccountOperations(account))
                     break;
-                string currentActionMode = manifest.LoginActionMode;
-                if (!manifest.LoginActionMonitoringEnabled || currentActionMode == LoginActionModes.Manual)
+                if (!TryEvaluateAutomaticLoginDecision(
+                    request,
+                    scanContext,
+                    out string currentActionMode,
+                    out LoginApprovalDecision decision,
+                    out bool allowWhitelistedIp))
                 {
-                    if (notifyManualRequests && manifest.LoginActionMonitoringEnabled && notifiedLoginRequests.Add(requestKey))
-                    {
-                        string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
-                        NotifyLoginAction("Steam login approval needed", account.AccountName + ": " + device, ToolTipIcon.Info);
-                    }
+                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
                     continue;
                 }
-
-                bool allowWhitelistedIp = false;
-                if (currentActionMode == LoginActionModes.Deny && manifest.LoginActionAutoAllowIpEnabled)
-                {
-                    bool allowAdditionalIp = !String.IsNullOrWhiteSpace(manifest.LoginActionAutoAllowIp) &&
-                        AreSameIpv4Address(request.IPAddress, manifest.LoginActionAutoAllowIp);
-                    bool allowCurrentDeviceIp = !allowAdditionalIp &&
-                        manifest.LoginActionAutoAllowCurrentDeviceIp &&
-                        AreSameIpv4Address(request.IPAddress, scanContext.CurrentDeviceIp);
-                    allowWhitelistedIp = allowAdditionalIp || allowCurrentDeviceIp;
-                }
-                LoginApprovalDecision decision = currentActionMode == LoginActionModes.ApprovePersistent || allowWhitelistedIp
-                    ? LoginApprovalDecision.ApprovePersistent
-                    : LoginApprovalDecision.Deny;
                 string actionKey = requestKey + "|" + currentActionMode + "|" + decision;
                 if (completedAutomatedLoginActions.Contains(actionKey))
                     continue;
@@ -2126,7 +2157,38 @@ namespace Steam_Desktop_Authenticator
                 try
                 {
                     actionResult = await RunAvailableSteamAccountOperationAsync(account,
-                        () => loginApprovalService.RespondAsync(account, request, decision, cancellationToken), cancellationToken,
+                        () =>
+                        {
+                            if (!TryEvaluateAutomaticLoginDecision(
+                                request,
+                                scanContext,
+                                out string lockedActionMode,
+                                out LoginApprovalDecision lockedDecision,
+                                out bool lockedAllowWhitelistedIp) ||
+                                !String.Equals(lockedActionMode, currentActionMode, StringComparison.Ordinal) ||
+                                lockedDecision != decision ||
+                                lockedAllowWhitelistedIp != allowWhitelistedIp)
+                            {
+                                return Task.FromResult(new LoginApprovalActionResult { Succeeded = false, Skipped = true });
+                            }
+
+                            return loginApprovalService.RespondAsync(
+                                account,
+                                request,
+                                lockedDecision,
+                                cancellationToken,
+                                shouldSubmitDecision: () =>
+                                    TryEvaluateAutomaticLoginDecision(
+                                        request,
+                                        scanContext,
+                                        out string liveActionMode,
+                                        out LoginApprovalDecision liveDecision,
+                                        out bool liveAllowWhitelistedIp) &&
+                                    String.Equals(liveActionMode, lockedActionMode, StringComparison.Ordinal) &&
+                                    liveDecision == lockedDecision &&
+                                    liveAllowWhitelistedIp == lockedAllowWhitelistedIp);
+                        },
+                        cancellationToken,
                         response =>
                         {
                             if (response.ErrorKind == LoginApprovalErrorKind.SessionExpired || response.ErrorKind == LoginApprovalErrorKind.Unauthorized)
@@ -2136,6 +2198,12 @@ namespace Steam_Desktop_Authenticator
                 catch (SessionUnavailableException)
                 {
                     break;
+                }
+
+                if (actionResult.Skipped)
+                {
+                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
+                    continue;
                 }
 
                 if (actionResult.ErrorKind == LoginApprovalErrorKind.RateLimited)
