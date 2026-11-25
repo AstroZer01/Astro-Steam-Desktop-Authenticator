@@ -79,6 +79,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 await form.MonitorLoginActionsAsync();
                 await form.MonitorLoginActionsAsync();
                 Assert.Equal(2, transport.SessionListFetchCount);
+                Assert.Equal(2, notifications.Count);
 
                 // A third monitor pass skips both accounts while on cooldown.
                 await form.MonitorLoginActionsAsync();
@@ -94,6 +95,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.Equal(4, transport.SessionListFetchCount);
                 Assert.Equal(2, transport.GetSessionListFetchCount(account1.Session.AccessToken));
                 Assert.Equal(2, transport.GetSessionListFetchCount(account2.Session.AccessToken));
+                Assert.Equal(2, notifications.Count);
 
                 JObject payload = JObject.Parse(form.BuildCachedLoginActionsPayloadJson());
                 JArray requests = (JArray)payload["requests"];
@@ -154,7 +156,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             var monitorEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseMonitor = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            transport.OnSessionListFetchAsync = async (token, count) =>
+            transport.OnSessionListFetchAsync = async (token, count, _) =>
             {
                 if (token == account1.Session.AccessToken && count == 1)
                 {
@@ -201,7 +203,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             var firstRefreshEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseFirstRefresh = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            transport.OnSessionListFetchAsync = async (token, count) =>
+            transport.OnSessionListFetchAsync = async (token, count, _) =>
             {
                 if (token == account1.Session.AccessToken && count == 1)
                 {
@@ -314,6 +316,164 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public async Task RefreshLoginActionsAsync_DoesNotSuppressFirstMonitoringNotificationForPendingRequest()
+        {
+            var transport = new StubLoginTransport();
+            SteamGuardAccount account = CreateAccount(76561198000008001UL, "acct_notify_once", transport);
+            transport.SetPendingRequest(account.Session.AccessToken, 12001UL, CreateSessionInfo("Laptop", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory));
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.LoginActionMonitoringEnabled = true;
+            manifest.LoginActionMode = LoginActionModes.Manual;
+
+            var notifications = new List<string>();
+            var service = new LoginApprovalService(_ => true, transport);
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                loginApprovalService: service,
+                notifyLoginAction: (title, message, icon) => notifications.Add(title + "|" + message),
+                initialAccounts: new[] { account }))
+            {
+                // Manual refresh discovers the request without popping a notification or suppressing future monitoring notification.
+                await form.RefreshLoginActionsAsync("all");
+                Assert.Empty(notifications);
+
+                // Expire the account's monitor schedule and run two monitor passes.
+                ClearLoginMonitorSchedules(form);
+                await form.MonitorLoginActionsAsync();
+                Assert.Single(notifications);
+
+                ClearLoginMonitorSchedules(form);
+                await form.MonitorLoginActionsAsync();
+                Assert.Single(notifications);
+            }
+        }
+
+        [Fact]
+        public async Task RefreshLoginActionsAsync_RefreshQueuedDuringPublishRunsWithoutBeingClobbered()
+        {
+            var transport = new StubLoginTransport();
+            SteamGuardAccount account1 = CreateAccount(76561198000009001UL, "acct_pub_1", transport);
+            SteamGuardAccount account2 = CreateAccount(76561198000009002UL, "acct_pub_2", transport);
+            transport.SetPendingRequest(account1.Session.AccessToken, 13001UL, CreateSessionInfo("PC-1", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryUsedPreviously));
+            transport.SetPendingRequest(account2.Session.AccessToken, 13002UL, CreateSessionInfo("PC-2", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory));
+
+            int publishCount = 0;
+            var firstPublishEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstPublish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.LoginActionMonitoringEnabled = true;
+
+            var service = new LoginApprovalService(_ => true, transport);
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                loginApprovalService: service,
+                notifyLoginAction: (_, __, ___) => { },
+                initialAccounts: new[] { account1, account2 },
+                publishLoginActionsAsync: async () =>
+                {
+                    if (Interlocked.Increment(ref publishCount) == 1)
+                    {
+                        firstPublishEntered.TrySetResult(true);
+                        await releaseFirstPublish.Task;
+                    }
+                }))
+            {
+                string account1Key = account1.Session.SteamID.ToString(CultureInfo.InvariantCulture);
+                string account2Key = account2.Session.SteamID.ToString(CultureInfo.InvariantCulture);
+
+                Task firstRefresh = form.RefreshLoginActionsAsync(account1Key);
+                await firstPublishEntered.Task;
+
+                // While pass 1 is awaiting WebView publication, a refresh for account2 and a repeat refresh for account1 arrive.
+                Task refreshDuringPublishAccount2 = form.RefreshLoginActionsAsync(account2Key);
+                Task refreshDuringPublishAccount1 = form.RefreshLoginActionsAsync(account1Key);
+
+                releaseFirstPublish.SetResult(true);
+                await Task.WhenAll(firstRefresh, refreshDuringPublishAccount2, refreshDuringPublishAccount1);
+
+                Assert.Equal(2, transport.GetSessionListFetchCount(account1.Session.AccessToken));
+                Assert.Equal(1, transport.GetSessionListFetchCount(account2.Session.AccessToken));
+                Assert.Equal(2, Volatile.Read(ref publishCount));
+            }
+        }
+
+        [Fact]
+        public async Task RefreshLoginActionsAsync_CancellationCompletesActiveAndQueuedCallersAndReleasesSemaphore()
+        {
+            var transport = new StubLoginTransport();
+            SteamGuardAccount account1 = CreateAccount(76561198000010001UL, "acct_cancel_1", transport);
+            SteamGuardAccount account2 = CreateAccount(76561198000010002UL, "acct_cancel_2", transport);
+            transport.SetPendingRequest(account1.Session.AccessToken, 14001UL, CreateSessionInfo("PC-1", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryUsedPreviously));
+            transport.SetPendingRequest(account2.Session.AccessToken, 14002UL, CreateSessionInfo("PC-2", EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory));
+
+            var firstEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            transport.OnSessionListFetchAsync = async (token, count, ct) =>
+            {
+                if (token == account1.Session.AccessToken && count == 1)
+                {
+                    firstEntered.TrySetResult(true);
+                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                }
+            };
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.LoginActionMonitoringEnabled = true;
+
+            var service = new LoginApprovalService(_ => true, transport);
+            using (MainForm form = new MainForm(
+                manifest,
+                new UpdatePreferenceRevisionTracker(),
+                null,
+                _ => { },
+                loginApprovalService: service,
+                notifyLoginAction: (_, __, ___) => { },
+                initialAccounts: new[] { account1, account2 }))
+            {
+                string account1Key = account1.Session.SteamID.ToString(CultureInfo.InvariantCulture);
+                string account2Key = account2.Session.SteamID.ToString(CultureInfo.InvariantCulture);
+
+                Task activeRefresh = form.RefreshLoginActionsAsync(account1Key);
+                await firstEntered.Task;
+                Task queuedRefresh = form.RefreshLoginActionsAsync(account2Key);
+
+                // Cancel form lifetime token while activeRefresh is in flight and queuedRefresh is waiting.
+                var ctsField = typeof(MainForm).GetField("lifetimeCancellationSource", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.NotNull(ctsField);
+                ((CancellationTokenSource)ctsField.GetValue(form)).Cancel();
+
+                Task allRefreshes = Task.WhenAll(activeRefresh, queuedRefresh);
+                Task completed = await Task.WhenAny(allRefreshes, Task.Delay(TimeSpan.FromSeconds(5)));
+                Assert.Same(allRefreshes, completed);
+                await allRefreshes;
+
+                var semField = typeof(MainForm).GetField("loginActionsSemaphore", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.NotNull(semField);
+                Assert.Equal(1, ((SemaphoreSlim)semField.GetValue(form)).CurrentCount);
+            }
+        }
+
+        private static void ClearLoginMonitorSchedules(MainForm form)
+        {
+            var lockField = typeof(MainForm).GetField("sessionStateLock", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var schedulesField = typeof(MainForm).GetField("loginMonitorSchedules", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(lockField);
+            Assert.NotNull(schedulesField);
+            lock (lockField.GetValue(form))
+            {
+                var schedules = schedulesField.GetValue(form);
+                schedules.GetType().GetMethod("Clear").Invoke(schedules, null);
+            }
+        }
+
+        [Fact]
         public void LoginActionsUi_ChecksStructuredNewLoginFlagAndSendsAccountSelectionOnRefresh()
         {
             string uiPath = Path.GetFullPath(Path.Combine(
@@ -378,7 +538,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
             private int totalSessionListFetches;
 
-            public Func<string, int, Task> OnSessionListFetchAsync { get; set; }
+            public Func<string, int, CancellationToken, Task> OnSessionListFetchAsync { get; set; }
             public List<(ulong ClientId, bool Confirm)> ActionDecisions { get; } = new List<(ulong, bool)>();
             public int SessionListFetchCount => Volatile.Read(ref totalSessionListFetches);
 
@@ -415,7 +575,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     Interlocked.Increment(ref totalSessionListFetches);
                     int perAccountCount = sessionListFetchCountByToken.AddOrUpdate(accessToken, 1, (_, existing) => existing + 1);
                     if (OnSessionListFetchAsync != null)
-                        await OnSessionListFetchAsync(accessToken, perAccountCount);
+                        await OnSessionListFetchAsync(accessToken, perAccountCount, cancellationToken);
 
                     int resultCode = sessionListResultByToken.TryGetValue(accessToken, out int overrideResult) ? overrideResult : 1;
                     var listResponse = new CAuthentication_GetAuthSessionsForAccount_Response();

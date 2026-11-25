@@ -70,6 +70,9 @@ namespace Steam_Desktop_Authenticator
         private readonly object manualLoginRefreshLock = new object();
         private bool manualLoginRefreshActive;
         private bool manualLoginRefreshScanStarted;
+        private bool manualLoginRefreshPublishing;
+        private long manualLoginRefreshRunnerSequence;
+        private long manualLoginRefreshOwnerId;
         private ManualLoginRefreshScope activeManualLoginRefreshScope;
         private ManualLoginRefreshScope queuedManualLoginRefreshScope;
         private TaskCompletionSource<bool> activeManualLoginRefreshCompletion;
@@ -109,6 +112,7 @@ namespace Steam_Desktop_Authenticator
         private readonly Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate;
         private readonly Func<bool, string, string, Task> publishUpdateCheckStateAsync;
         private readonly Action<string, string, ToolTipIcon> notifyLoginAction;
+        private readonly Func<Task> publishLoginActionsAsync;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -515,7 +519,8 @@ namespace Steam_Desktop_Authenticator
             Func<bool, string, string, Task> publishUpdateCheckStateAsync = null,
             LoginApprovalService loginApprovalService = null,
             Action<string, string, ToolTipIcon> notifyLoginAction = null,
-            SteamGuardAccount[] initialAccounts = null)
+            SteamGuardAccount[] initialAccounts = null,
+            Func<Task> publishLoginActionsAsync = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
@@ -532,6 +537,7 @@ namespace Steam_Desktop_Authenticator
             this.publishUpdateCheckStateAsync = publishUpdateCheckStateAsync;
             this.loginApprovalService = loginApprovalService;
             this.notifyLoginAction = notifyLoginAction ?? ShowLoginActionNotification;
+            this.publishLoginActionsAsync = publishLoginActionsAsync ?? PublishCachedLoginActionsToWebViewAsync;
         }
 
         private static (DialogResult Result, bool DisableStartupChecks) ShowUpdateAvailablePrompt(Version latestVersion, string checkboxText)
@@ -2062,16 +2068,12 @@ namespace Steam_Desktop_Authenticator
                     continue;
                 pendingLoginRequests[requestKey] = request;
 
-                if (!applyAutomatedActions || manifest.LoginActionMode == LoginActionModes.Manual)
+                if (!applyAutomatedActions || !manifest.LoginActionMonitoringEnabled || manifest.LoginActionMode == LoginActionModes.Manual)
                 {
-                    if (manifest.LoginActionMonitoringEnabled)
+                    if (notifyManualRequests && manifest.LoginActionMonitoringEnabled && notifiedLoginRequests.Add(requestKey))
                     {
-                        bool newlySeen = notifiedLoginRequests.Add(requestKey);
-                        if (notifyManualRequests && newlySeen)
-                        {
-                            string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
-                            NotifyLoginAction("Steam login approval needed", account.AccountName + ": " + device, ToolTipIcon.Info);
-                        }
+                        string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
+                        NotifyLoginAction("Steam login approval needed", account.AccountName + ": " + device, ToolTipIcon.Info);
                     }
                     continue;
                 }
@@ -3052,7 +3054,12 @@ namespace Steam_Desktop_Authenticator
             }, jsonSettings);
         }
 
-        private async Task PublishCachedLoginActionsAsync()
+        private Task PublishCachedLoginActionsAsync()
+        {
+            return publishLoginActionsAsync();
+        }
+
+        private async Task PublishCachedLoginActionsToWebViewAsync()
         {
             CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
             if (coreWebView == null)
@@ -3072,24 +3079,26 @@ namespace Steam_Desktop_Authenticator
         internal async Task RefreshLoginActionsAsync(string selectionKey = null)
         {
             Task waitTask = null;
-            bool isRunner = false;
+            long runnerId = 0;
             lock (manualLoginRefreshLock)
             {
                 if (!manualLoginRefreshActive)
                 {
                     manualLoginRefreshActive = true;
                     manualLoginRefreshScanStarted = false;
+                    manualLoginRefreshPublishing = false;
+                    runnerId = ++manualLoginRefreshRunnerSequence;
+                    manualLoginRefreshOwnerId = runnerId;
                     activeManualLoginRefreshScope = new ManualLoginRefreshScope();
                     activeManualLoginRefreshScope.Add(selectionKey);
                     activeManualLoginRefreshCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    isRunner = true;
                 }
                 else if (!manualLoginRefreshScanStarted)
                 {
                     activeManualLoginRefreshScope.Add(selectionKey);
                     waitTask = activeManualLoginRefreshCompletion.Task;
                 }
-                else if (activeManualLoginRefreshScope.Covers(selectionKey))
+                else if (!manualLoginRefreshPublishing && activeManualLoginRefreshScope.Covers(selectionKey))
                 {
                     waitTask = activeManualLoginRefreshCompletion.Task;
                 }
@@ -3105,7 +3114,7 @@ namespace Steam_Desktop_Authenticator
                 }
             }
 
-            if (!isRunner)
+            if (runnerId == 0)
             {
                 try
                 {
@@ -3120,28 +3129,33 @@ namespace Steam_Desktop_Authenticator
 
             try
             {
-                await RunCoalescedManualLoginRefreshesAsync();
+                await RunCoalescedManualLoginRefreshesAsync(runnerId);
             }
             finally
             {
                 List<TaskCompletionSource<bool>> remainingCompletions = null;
                 lock (manualLoginRefreshLock)
                 {
-                    manualLoginRefreshActive = false;
-                    manualLoginRefreshScanStarted = false;
-                    activeManualLoginRefreshScope = null;
-                    queuedManualLoginRefreshScope = null;
-                    if (activeManualLoginRefreshCompletion != null)
+                    if (manualLoginRefreshOwnerId == runnerId)
                     {
-                        remainingCompletions = remainingCompletions ?? new List<TaskCompletionSource<bool>>();
-                        remainingCompletions.Add(activeManualLoginRefreshCompletion);
-                        activeManualLoginRefreshCompletion = null;
-                    }
-                    if (queuedManualLoginRefreshCompletion != null)
-                    {
-                        remainingCompletions = remainingCompletions ?? new List<TaskCompletionSource<bool>>();
-                        remainingCompletions.Add(queuedManualLoginRefreshCompletion);
-                        queuedManualLoginRefreshCompletion = null;
+                        manualLoginRefreshActive = false;
+                        manualLoginRefreshScanStarted = false;
+                        manualLoginRefreshPublishing = false;
+                        manualLoginRefreshOwnerId = 0;
+                        activeManualLoginRefreshScope = null;
+                        queuedManualLoginRefreshScope = null;
+                        if (activeManualLoginRefreshCompletion != null)
+                        {
+                            remainingCompletions = remainingCompletions ?? new List<TaskCompletionSource<bool>>();
+                            remainingCompletions.Add(activeManualLoginRefreshCompletion);
+                            activeManualLoginRefreshCompletion = null;
+                        }
+                        if (queuedManualLoginRefreshCompletion != null)
+                        {
+                            remainingCompletions = remainingCompletions ?? new List<TaskCompletionSource<bool>>();
+                            remainingCompletions.Add(queuedManualLoginRefreshCompletion);
+                            queuedManualLoginRefreshCompletion = null;
+                        }
                     }
                 }
                 if (remainingCompletions != null)
@@ -3152,7 +3166,7 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private async Task RunCoalescedManualLoginRefreshesAsync()
+        private async Task RunCoalescedManualLoginRefreshesAsync(long runnerId)
         {
             CancellationToken cancellationToken = lifetimeCancellationSource.Token;
             while (true)
@@ -3202,12 +3216,43 @@ namespace Steam_Desktop_Authenticator
                     DiagnosticErrorLogger.Log("Login action refresh", ex, "The manual login-request refresh did not complete.");
                 }
 
-                bool continueLoop = false;
+                if (cancellationToken.IsCancellationRequested)
+                    break;
+
+                bool shouldPublish = false;
                 lock (manualLoginRefreshLock)
                 {
                     if (currentCompletion == null)
                         currentCompletion = activeManualLoginRefreshCompletion;
 
+                    if (queuedManualLoginRefreshScope == null)
+                    {
+                        manualLoginRefreshPublishing = true;
+                        shouldPublish = true;
+                    }
+                }
+
+                if (shouldPublish && !cancellationToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await PublishCachedLoginActionsAsync();
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Login actions UI", ex, "The login-action list could not be returned to the UI.");
+                    }
+                }
+
+                bool continueLoop = false;
+                TaskCompletionSource<bool> canceledQueuedCompletion = null;
+                lock (manualLoginRefreshLock)
+                {
+                    manualLoginRefreshPublishing = false;
                     if (!cancellationToken.IsCancellationRequested && queuedManualLoginRefreshScope != null)
                     {
                         activeManualLoginRefreshScope = queuedManualLoginRefreshScope;
@@ -3217,24 +3262,21 @@ namespace Steam_Desktop_Authenticator
                         manualLoginRefreshScanStarted = false;
                         continueLoop = true;
                     }
-                    else
+                    else if (manualLoginRefreshOwnerId == runnerId)
                     {
                         manualLoginRefreshActive = false;
                         manualLoginRefreshScanStarted = false;
+                        manualLoginRefreshOwnerId = 0;
                         activeManualLoginRefreshScope = null;
                         activeManualLoginRefreshCompletion = null;
+                        queuedManualLoginRefreshScope = null;
+                        canceledQueuedCompletion = queuedManualLoginRefreshCompletion;
+                        queuedManualLoginRefreshCompletion = null;
                     }
                 }
 
-                try
-                {
-                    if (!continueLoop && !cancellationToken.IsCancellationRequested)
-                        await PublishCachedLoginActionsAsync();
-                }
-                finally
-                {
-                    currentCompletion?.TrySetResult(true);
-                }
+                currentCompletion?.TrySetResult(true);
+                canceledQueuedCompletion?.TrySetResult(true);
 
                 if (!continueLoop)
                     break;
@@ -3461,11 +3503,11 @@ namespace Steam_Desktop_Authenticator
                 RebindTradeConfirmationCache();
                 foreach (ulong steamId in pendingTradeConfirmationCounts.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
                     pendingTradeConfirmationCounts.Remove(steamId);
-                foreach (ulong steamId in loginMonitorSchedules.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
-                    loginMonitorSchedules.Remove(steamId);
                 loadedTradeConfirmationAccounts.RemoveWhere(steamId => !activeSteamIds.Contains(steamId));
                 lock (sessionStateLock)
                 {
+                    foreach (ulong steamId in loginMonitorSchedules.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
+                        loginMonitorSchedules.Remove(steamId);
                     sessionRenewalRequired.RemoveWhere(steamId => !activeSteamIds.Contains(steamId));
                 }
                 foreach (string accountName in unavailableLoginAccounts.Keys.Where(accountName => !activeAccountNames.Contains(accountName)).ToArray())
