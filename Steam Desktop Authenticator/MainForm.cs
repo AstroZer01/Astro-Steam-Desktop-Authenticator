@@ -6243,7 +6243,7 @@ namespace Steam_Desktop_Authenticator
 
         private async void SetupModernUI()
         {
-            this.MinimumSize = new Size(720, 517);
+            this.MinimumSize = new Size(600, 430);
             this.MaximumSize = Size.Empty;
             this.Size = new Size(DefaultModernWindowWidth, DefaultModernWindowHeight);
             this.MaximizeBox = false;
@@ -6262,7 +6262,7 @@ namespace Steam_Desktop_Authenticator
             lblLoading.AutoSize = false;
             lblLoading.Size = new Size(400, 30);
             lblLoading.TextAlign = ContentAlignment.MiddleCenter;
-            lblLoading.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
+            lblLoading.Font = AstroTheme.FontInput;
             loadingPanel.Controls.Add(lblLoading);
 
             int spinnerAngle = 0;

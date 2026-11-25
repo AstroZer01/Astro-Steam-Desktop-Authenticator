@@ -12,30 +12,6 @@
     <div class="loader"></div>
   </div>
 
-  <!-- + Add Popover Menu (mounted at shell root so it remains visible in compact mode when desktop sidebar is hidden) -->
-  <div id="add-account-popover" role="menu" class="hidden fixed w-52 z-[60] astro-card-elevated rounded-lg p-1.5 flex-col gap-0.5">
-    <button id="btn-setup-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
-      <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-      <span class="min-w-0"><span class="block font-medium">Setup New Account</span><span class="block text-[10px] text-on-surface-subtle">Enable Steam Guard</span></span>
-    </button>
-    <button id="btn-transfer-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
-      <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h12m0 0-3-3m3 3-3 3M19 16H7m0 0 3-3m-3 3 3 3"/></svg>
-      <span class="min-w-0"><span class="block font-medium">Transfer Authenticator</span><span class="block text-[10px] text-on-surface-subtle">Move from Steam Mobile</span></span>
-    </button>
-    <button id="btn-import-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
-      <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-      <span class="min-w-0"><span class="block font-medium">Import .maFile</span><span class="block text-[10px] text-on-surface-subtle">Existing SDA account</span></span>
-    </button>
-  </div>
-
-  <!-- Account Overflow Menu (mounted at shell root so both desktop and compact headers share it) -->
-  <div id="guard-more-menu" role="menu" class="hidden fixed w-48 z-[60] astro-card-elevated rounded-lg p-1.5 flex-col gap-0.5">
-    <button id="btn-guard-renew" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Renew Session</button>
-    <button id="btn-guard-export-menu" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Backup &amp; Export…</button>
-    <div class="h-px bg-white/[0.075] my-1"></div>
-    <button id="btn-guard-remove" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-error hover:bg-error-strong/15 transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Remove Account…</button>
-  </div>
-
   <!-- ==================== DESKTOP LEFT VAULT SIDEBAR (>= 680px) ==================== -->
   <aside id="desktop-sidebar" class="astro-sidebar flex-col bg-surface-container-lowest border-r border-white/[0.075] min-h-0 relative">
     <!-- Aligned 44px Header Seam -->
@@ -642,6 +618,30 @@
       </button>
     </nav>
   </div>
+
+  <!-- + Add Popover Menu (mounted at end of shell root so it remains visible in compact mode and follows triggers in DOM order) -->
+  <div id="add-account-popover" role="menu" class="hidden fixed w-52 z-[60] astro-card-elevated rounded-lg p-1.5 flex-col gap-0.5">
+    <button id="btn-setup-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
+      <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      <span class="min-w-0"><span class="block font-medium">Setup New Account</span><span class="block text-[10px] text-on-surface-subtle">Enable Steam Guard</span></span>
+    </button>
+    <button id="btn-transfer-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
+      <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h12m0 0-3-3m3 3-3 3M19 16H7m0 0 3-3m-3 3 3 3"/></svg>
+      <span class="min-w-0"><span class="block font-medium">Transfer Authenticator</span><span class="block text-[10px] text-on-surface-subtle">Move from Steam Mobile</span></span>
+    </button>
+    <button id="btn-import-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
+      <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <span class="min-w-0"><span class="block font-medium">Import .maFile</span><span class="block text-[10px] text-on-surface-subtle">Existing SDA account</span></span>
+    </button>
+  </div>
+
+  <!-- Account Overflow Menu (mounted at end of shell root so both desktop and compact headers share it) -->
+  <div id="guard-more-menu" role="menu" class="hidden fixed w-48 z-[60] astro-card-elevated rounded-lg p-1.5 flex-col gap-0.5">
+    <button id="btn-guard-renew" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Renew Session</button>
+    <button id="btn-guard-export-menu" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Backup &amp; Export…</button>
+    <div class="h-px bg-white/[0.075] my-1"></div>
+    <button id="btn-guard-remove" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-error hover:bg-error-strong/15 transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Remove Account…</button>
+  </div>
 </div>
 
 <!-- ==================== MODAL 7: RECENT LOGIN ATTEMPT AUDIT ==================== -->
@@ -789,8 +789,8 @@
   const validSettingsSubTabs = new Set(['confirmations', 'logins', 'proxy', 'app']);
   const ACCOUNT_SCOPE_STORAGE_KEY = 'astro.confirmationsScope';
   let hasExplicitScopePreference = false;
-  let hasHydratedCurrentAccountScope = false;
   let hasInitializedCurrentAccount = false;
+  let activePopoverTrigger = null;
 
   let allAccs = [];
   let currentAcc = "";
@@ -919,7 +919,10 @@
     popover.style.right = 'auto';
   }
 
-  function closeAllPopovers() {
+  function closeAllPopovers(restoreFocus = false) {
+    const triggerToRestore = restoreFocus ? activePopoverTrigger : null;
+    activePopoverTrigger = null;
+
     const addPop = document.getElementById('add-account-popover');
     if (addPop) {
       addPop.classList.add('hidden');
@@ -941,20 +944,59 @@
       const btn = document.getElementById(id);
       if (btn) btn.setAttribute('aria-expanded', 'false');
     });
+
+    if (triggerToRestore && triggerToRestore.isConnected && !triggerToRestore.disabled) {
+      triggerToRestore.focus();
+    }
+  }
+
+  function handlePopoverKeydown(e) {
+    const menu = e.currentTarget;
+    if (!menu || menu.classList.contains('hidden')) return;
+    const items = Array.from(menu.querySelectorAll('[role="menuitem"]:not([disabled])'));
+    if (items.length === 0) return;
+
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const idx = items.indexOf(document.activeElement);
+      const next = idx === -1
+        ? (e.key === 'ArrowDown' ? 0 : items.length - 1)
+        : (idx + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      items[next].focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      items[0].focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      items[items.length - 1].focus();
+    } else if (e.key === 'Tab') {
+      const idx = items.indexOf(document.activeElement);
+      if ((e.shiftKey && idx <= 0) || (!e.shiftKey && idx === items.length - 1)) {
+        closeAllPopovers(false);
+      }
+    }
   }
 
   function toggleAnchoredPopover(popoverId, triggerBtn) {
     const pop = document.getElementById(popoverId);
     if (!pop || !triggerBtn || triggerBtn.disabled) return;
     const wasOpenOnSameTrigger = !pop.classList.contains('hidden') && triggerBtn.getAttribute('aria-expanded') === 'true';
-    closeAllPopovers();
+    closeAllPopovers(false);
     if (!wasOpenOnSameTrigger) {
+      activePopoverTrigger = triggerBtn;
       pop.classList.remove('hidden');
       pop.classList.add('flex');
       positionAnchoredPopover(pop, triggerBtn);
       triggerBtn.setAttribute('aria-expanded', 'true');
+      const firstItem = pop.querySelector('[role="menuitem"]:not([disabled])');
+      if (firstItem) firstItem.focus();
     }
   }
+
+  ['add-account-popover', 'guard-more-menu'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', handlePopoverKeydown);
+  });
 
   document.getElementById('btn-add-menu').addEventListener('click', e => {
     e.stopPropagation();
@@ -972,8 +1014,8 @@
     e.stopPropagation();
     toggleAnchoredPopover('guard-more-menu', e.currentTarget);
   });
-  document.addEventListener('click', () => closeAllPopovers());
-  window.addEventListener('resize', () => closeAllPopovers());
+  document.addEventListener('click', () => closeAllPopovers(false));
+  window.addEventListener('resize', () => closeAllPopovers(false));
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
@@ -988,7 +1030,7 @@
         compactFilter.select();
       }
     } else if (e.key === 'Escape') {
-      closeAllPopovers();
+      closeAllPopovers(true);
     }
   });
 
@@ -1417,21 +1459,18 @@
     const loginSelect = document.getElementById('login-account-select');
     const previousTradeSelection = tradeSelect ? (tradeSelect.value || 'all') : 'all';
     const savedScopePref = getSavedAccountScopePreference();
-    const shouldHydrateSelectedScope = !hasHydratedCurrentAccountScope && hasExplicitScopePreference && savedScopePref === 'selected';
+    const wantsSelectedScope = hasExplicitScopePreference && savedScopePref === 'selected';
 
     if (currentAccExpired || currentAccPending) {
       if (tradeSelect) tradeSelect.value = 'all';
       if (loginSelect) loginSelect.value = 'all';
     } else if (currentAccSteamId) {
       const hasOption = select => Array.from(select.options).some(option => option.value === currentAccSteamId);
-      if (tradeSelect && (tradeSelect.value !== 'all' || shouldHydrateSelectedScope) && hasOption(tradeSelect)) {
+      if (tradeSelect && (tradeSelect.value !== 'all' || wantsSelectedScope) && hasOption(tradeSelect)) {
         tradeSelect.value = currentAccSteamId;
       }
-      if (loginSelect && (loginSelect.value !== 'all' || shouldHydrateSelectedScope) && hasOption(loginSelect)) {
+      if (loginSelect && (loginSelect.value !== 'all' || wantsSelectedScope) && hasOption(loginSelect)) {
         loginSelect.value = currentAccSteamId;
-      }
-      if ((tradeSelect && hasOption(tradeSelect)) || (loginSelect && hasOption(loginSelect))) {
-        hasHydratedCurrentAccountScope = true;
       }
     }
     syncScopeButtonsUI();
@@ -2172,7 +2211,6 @@
 
   function applyAccountScope(scopeValue) {
     saveAccountScopePreference(scopeValue);
-    hasHydratedCurrentAccountScope = true;
     const tradeSelect = document.getElementById('trade-account-select');
     const loginSelect = document.getElementById('login-account-select');
     const targetVal = scopeValue === 'selected' && currentAccSteamId && !currentAccExpired && !currentAccPending
@@ -2204,6 +2242,7 @@
   });
   document.getElementById('trade-account-select').addEventListener('change', e => {
     const selectedAccount = e.target.value;
+    saveAccountScopePreference(selectedAccount === 'all' ? 'all' : 'selected');
     const loginSelect = document.getElementById('login-account-select');
     if (loginSelect) {
       loginSelect.value = selectedAccount;

@@ -90,6 +90,41 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void WarningYesNoCancelOverwritePrompt_DefaultsEnterAndEscapeToCancel()
+        {
+            RunOnStaThread(() =>
+            {
+                using (AstroMessageBoxForm enterForm = CreateOffscreenHiddenForm(
+                    "The recovery code file already exists. Overwrite it?",
+                    "Recovery Code File Exists",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Warning))
+                {
+                    Button acceptButton = Assert.IsType<Button>(enterForm.AcceptButton);
+                    Button cancelButton = Assert.IsType<Button>(enterForm.CancelButton);
+                    Assert.Equal("Cancel", acceptButton.Text);
+                    Assert.Equal("Cancel", cancelButton.Text);
+                    Assert.Same(acceptButton, enterForm.ActiveControl);
+
+                    bool handled = enterForm.ProcessDialogKeyForTests(Keys.Enter);
+                    Assert.True(handled);
+                    Assert.Equal(DialogResult.Cancel, enterForm.Result);
+                }
+
+                using (AstroMessageBoxForm escapeForm = CreateOffscreenHiddenForm(
+                    "The recovery code file already exists. Overwrite it?",
+                    "Recovery Code File Exists",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Warning))
+                {
+                    bool handled = escapeForm.ProcessDialogKeyForTests(Keys.Escape);
+                    Assert.True(handled);
+                    Assert.Equal(DialogResult.Cancel, escapeForm.Result);
+                }
+            });
+        }
+
+        [Fact]
         public void UnsavedSettingsYesNoCancelWarning_KeepsSaveChangesAsPrimaryNonDestructiveAction()
         {
             RunOnStaThread(() =>

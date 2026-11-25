@@ -7,8 +7,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
     public sealed class MainFormAspectRatioResizeTests
     {
         private const double Ratio = 920.0 / 660.0;
-        private const int MinWidth = 720;
-        private const int MinHeight = 517;
+        private const int MinWidth = 600;
+        private const int MinHeight = 430;
 
         [Theory]
         [InlineData(1)] // WMSZ_LEFT

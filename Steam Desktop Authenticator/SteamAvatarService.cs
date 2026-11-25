@@ -37,6 +37,7 @@ namespace Steam_Desktop_Authenticator
         private readonly string cacheDirectory;
         private readonly Func<string, int, CancellationToken, Task<byte[]>> downloadBytesAsync;
         private readonly Func<DateTime> utcNowProvider;
+        internal Action BeforeInflightClaimHook;
         private readonly ConcurrentDictionary<ulong, CacheEntry> memoryCache = new ConcurrentDictionary<ulong, CacheEntry>();
         private readonly ConcurrentDictionary<ulong, DateTime> failedUntilUtc = new ConcurrentDictionary<ulong, DateTime>();
         private readonly ConcurrentDictionary<ulong, Lazy<Task<string>>> inflightFetches = new ConcurrentDictionary<ulong, Lazy<Task<string>>>();
@@ -122,6 +123,8 @@ namespace Steam_Desktop_Authenticator
             if (failedUntilUtc.TryGetValue(steamId, out DateTime retryAfter) && utcNowProvider() < retryAfter)
                 return Task.FromResult(cached);
 
+            BeforeInflightClaimHook?.Invoke();
+
             // Publish the Lazy entry into inflightFetches BEFORE invoking FetchAndCacheCoreAsync
             // so even a synchronous throw (e.g. blocked proxy) always cleans up its own entry,
             // and concurrent callers share a single execution.
@@ -141,6 +144,15 @@ namespace Steam_Desktop_Authenticator
         {
             try
             {
+                // Recheck cache freshness and failure backoff after winning the in-flight slot so an
+                // overlapping caller preempted before GetOrAdd cannot trigger a duplicate network fetch.
+                string freshCached = TryGetCachedAvatarDataUrl(steamId);
+                if (!String.IsNullOrEmpty(freshCached) && IsCacheFresh(steamId))
+                    return freshCached;
+
+                if (failedUntilUtc.TryGetValue(steamId, out DateTime retryAfter) && utcNowProvider() < retryAfter)
+                    return freshCached ?? fallbackCached;
+
                 string avatarUrl = await ResolveAvatarUrlAsync(steamId, cancellationToken).ConfigureAwait(false);
                 if (String.IsNullOrEmpty(avatarUrl))
                 {

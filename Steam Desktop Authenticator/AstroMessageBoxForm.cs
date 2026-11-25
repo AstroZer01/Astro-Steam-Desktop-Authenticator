@@ -35,11 +35,13 @@ namespace Steam_Desktop_Authenticator
             this.secondaryButtonText = secondaryButtonText;
             this.tertiaryButtonText = tertiaryButtonText;
             this.centerContent = centerContent;
-            // Only treat Warning/Error YesNo (or AbortRetryIgnore) prompts as destructive by default,
-            // avoiding mis-styling safe custom actions like "Save Changes" on YesNoCancel exit prompts.
+            // Treat Warning/Error YesNo, AbortRetryIgnore, and standard YesNoCancel (without custom safe
+            // primary label like "Save Changes") as destructive so Enter/Escape resolve to the safe button.
             this.useDestructivePrimary = destructivePrimary ??
                 ((icon == MessageBoxIcon.Warning || icon == MessageBoxIcon.Error) &&
-                 (buttons == MessageBoxButtons.YesNo || buttons == MessageBoxButtons.AbortRetryIgnore));
+                 (buttons == MessageBoxButtons.YesNo ||
+                  buttons == MessageBoxButtons.AbortRetryIgnore ||
+                  (buttons == MessageBoxButtons.YesNoCancel && string.IsNullOrWhiteSpace(primaryButtonText))));
 
             this.Text = caption;
             this.StartPosition = FormStartPosition.CenterParent;
