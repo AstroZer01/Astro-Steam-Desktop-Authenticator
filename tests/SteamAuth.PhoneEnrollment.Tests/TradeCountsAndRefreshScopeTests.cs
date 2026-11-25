@@ -388,6 +388,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 SharedSecret = Convert.ToBase64String(new byte[20]),
                 IdentitySecret = Convert.ToBase64String(new byte[20]),
                 DeviceID = "android:00000000-0000-0000-0000-000000000001",
+                FullyEnrolled = true,
                 Session = new SessionData
                 {
                     SteamID = steamId,

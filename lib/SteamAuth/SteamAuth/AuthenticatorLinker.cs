@@ -49,6 +49,12 @@ namespace SteamAuth
             }
         }
 
+        /// <summary>
+        /// True if Steam accepted FinalizeAddAuthenticator for this enrollment, even if
+        /// follow-up activation verification could not confirm or disagreed on identity.
+        /// </summary>
+        public bool FinalizationAcceptedBySteam { get; private set; }
+
         private PhoneLinkStep phoneLinkStep;
 
         public AuthenticatorLinker(SessionData sessionData)
@@ -300,6 +306,8 @@ namespace SteamAuth
                     return FinalizeResult.GeneralFailure;
                 }
 
+                FinalizationAcceptedBySteam = true;
+
                 FinalizeResult statusResult;
                 try
                 {
@@ -317,9 +325,11 @@ namespace SteamAuth
 
                 if (statusResult == FinalizeResult.GeneralFailure || statusResult == FinalizeResult.RateLimited)
                 {
-                    LinkedAccount.FullyEnrolled = true;
-                    Finalized = true;
-                    LastErrorMessage = "Steam accepted authenticator finalization, but its activation status could not be verified. The authenticator will be saved locally.";
+                    // Preserve the pending record until Steam activation can be verified
+                    // on startup or through interactive activation verification.
+                    LinkedAccount.FullyEnrolled = false;
+                    Finalized = false;
+                    LastErrorMessage = "Steam accepted authenticator finalization, but its activation status could not be verified yet. The record will remain pending activation until Steam confirms it.";
                     return FinalizeResult.FinalizedStatusUnverified;
                 }
 
@@ -344,15 +354,29 @@ namespace SteamAuth
                 LastErrorMessage = DescribeFailure(response, "verify authenticator activation");
                 return FinalizeResult.GeneralFailure;
             }
-            if (response.Body.State == 0)
-            {
-                LastErrorMessage = "Steam has not confirmed that the authenticator is active yet. Enter a newer confirmation code to try again.";
-                return FinalizeResult.NotFinalized;
-            }
 
-            LinkedAccount.FullyEnrolled = true;
-            Finalized = true;
-            return FinalizeResult.Success;
+            AuthenticatorActivationStatus activationStatus = SteamGuardAccount.EvaluateActivationStatusResponse(LinkedAccount, response);
+            switch (activationStatus)
+            {
+                case AuthenticatorActivationStatus.ActiveForThisRecord:
+                    LinkedAccount.FullyEnrolled = true;
+                    Finalized = true;
+                    return FinalizeResult.Success;
+
+                case AuthenticatorActivationStatus.NotActive:
+                    LastErrorMessage = "Steam has not confirmed that the authenticator is active yet. Enter a newer confirmation code to try again.";
+                    return FinalizeResult.NotFinalized;
+
+                case AuthenticatorActivationStatus.ActiveForDifferentAuthenticator:
+                    LinkedAccount.FullyEnrolled = false;
+                    Finalized = false;
+                    LastErrorMessage = "Steam accepted authenticator finalization, but reported a different authenticator identity. Your saved pending record and recovery code were preserved without activating it.";
+                    return FinalizeResult.FinalizedIdentityMismatch;
+
+                default:
+                    LastErrorMessage = "Steam accepted authenticator finalization, but its activation status could not be verified yet.";
+                    return FinalizeResult.GeneralFailure;
+            }
         }
 
         public async Task<TransferStartStatus> StartAuthenticatorTransferAsync(CancellationToken cancellationToken = default)
@@ -744,7 +768,8 @@ namespace SteamAuth
             GeneralFailure,
             RateLimited,
             NotFinalized,
-            FinalizedStatusUnverified
+            FinalizedStatusUnverified,
+            FinalizedIdentityMismatch
         }
 
         public enum ConfirmationCodeType

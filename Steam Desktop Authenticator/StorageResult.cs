@@ -24,24 +24,27 @@ namespace Steam_Desktop_Authenticator
             StorageFailureKind failureKind,
             string userMessage,
             Exception exception,
-            bool obsoleteCleanupPending)
+            bool obsoleteCleanupPending,
+            long? committedStorageRevision = null)
         {
             Succeeded = succeeded;
             FailureKind = failureKind;
             UserMessage = userMessage;
             Exception = exception;
             ObsoleteCleanupPending = obsoleteCleanupPending;
+            CommittedStorageRevision = committedStorageRevision;
         }
 
         public bool Succeeded { get; }
         public StorageFailureKind FailureKind { get; }
         public string UserMessage { get; }
         public bool ObsoleteCleanupPending { get; }
+        public long? CommittedStorageRevision { get; }
         internal Exception Exception { get; }
 
-        public static StorageResult Success(bool obsoleteCleanupPending = false)
+        public static StorageResult Success(bool obsoleteCleanupPending = false, long? committedStorageRevision = null)
         {
-            return new StorageResult(true, StorageFailureKind.None, null, null, obsoleteCleanupPending);
+            return new StorageResult(true, StorageFailureKind.None, null, null, obsoleteCleanupPending, committedStorageRevision);
         }
 
         public static StorageResult Failure(StorageFailureKind failureKind, string userMessage, Exception exception = null)

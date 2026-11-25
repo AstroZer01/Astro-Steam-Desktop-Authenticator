@@ -41,6 +41,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 SharedSecret = Convert.ToBase64String(Enumerable.Repeat((byte)0x2A, 20).ToArray()),
                 IdentitySecret = Convert.ToBase64String(Enumerable.Repeat((byte)0x3B, 20).ToArray()),
                 DeviceID = "android:" + Guid.NewGuid().ToString("D"),
+                FullyEnrolled = true,
                 Session = new SessionData
                 {
                     SteamID = steamId,

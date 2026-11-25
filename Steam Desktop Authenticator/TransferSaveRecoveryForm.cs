@@ -148,7 +148,7 @@ namespace Steam_Desktop_Authenticator
                 using (InputForm passForm = new InputForm("Enter a passkey to encrypt this emergency backup ZIP:", true))
                 {
                     passForm.ShowInputDialog(this);
-                    if (passForm.Canceled || String.IsNullOrEmpty(passForm.txtBox.Text))
+                    if (passForm.Canceled || !passForm.UiReady || passForm.LoadFailed || String.IsNullOrEmpty(passForm.txtBox.Text))
                         return;
                     exportPassKey = passForm.txtBox.Text;
                 }

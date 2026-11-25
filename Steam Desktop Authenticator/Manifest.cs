@@ -310,6 +310,11 @@ namespace Steam_Desktop_Authenticator
 
         public static Manifest GenerateNewManifest(bool scanDir = false)
         {
+            return GenerateNewManifest(scanDir, promptForEncryption: true);
+        }
+
+        internal static Manifest GenerateNewManifest(bool scanDir, bool promptForEncryption)
+        {
             // No directory means no manifest file anyways.
             Manifest newManifest = new Manifest();
             newManifest.Encrypted = false;
@@ -359,7 +364,7 @@ namespace Steam_Desktop_Authenticator
                 string contents = StoragePathGuard.ReadTextWithLimit(file.FullName, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                 try
                 {
-                    SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
+                    SteamGuardAccount account = DeserializeAccountJson(contents, storageJsonSettings);
                     if (account?.Session == null || account.Session.SteamID == 0 ||
                         newManifest.Entries.Any(entry => entry.SteamID == account.Session.SteamID))
                         throw new InvalidDataException("The account file identity is invalid or duplicated.");
@@ -380,7 +385,10 @@ namespace Steam_Desktop_Authenticator
             if (newManifest.Entries.Count > 0)
             {
                 newManifest.Save();
-                newManifest.PromptSetupPassKey("This version of SDA has encryption. Please enter a passkey below, or hit cancel to remain unencrypted");
+                if (promptForEncryption)
+                {
+                    newManifest.PromptSetupPassKey("This version of SDA has encryption. Please enter a passkey below, or hit cancel to remain unencrypted");
+                }
             }
 
             if (newManifest.Save())
@@ -408,7 +416,7 @@ namespace Steam_Desktop_Authenticator
                 using (InputForm passKeyForm = new InputForm("Please enter your encryption passkey.", true))
                 {
                     passKeyForm.ShowInputDialog();
-                    if (!passKeyForm.Canceled)
+                    if (!passKeyForm.Canceled && passKeyForm.UiReady && !passKeyForm.LoadFailed)
                     {
                         passKey = passKeyForm.txtBox.Text;
                         passKeyValid = this.VerifyPasskey(passKey);
@@ -426,59 +434,204 @@ namespace Steam_Desktop_Authenticator
             return passKey;
         }
 
+        internal enum SetupPassKeyStatus
+        {
+            Set,
+            DeclinedUnencrypted,
+            Failed
+        }
+
+        internal readonly struct PassKeyPromptResult
+        {
+            public PassKeyPromptResult(bool canceled, string value, bool uiReady, bool loadFailed, bool accepted, bool explicitCancel = false)
+            {
+                Canceled = canceled;
+                Value = value;
+                UiReady = uiReady;
+                LoadFailed = loadFailed;
+                Accepted = accepted;
+                ExplicitCancel = explicitCancel;
+            }
+
+            public bool Canceled { get; }
+            public string Value { get; }
+            public bool UiReady { get; }
+            public bool LoadFailed { get; }
+            public bool Accepted { get; }
+            public bool ExplicitCancel { get; }
+        }
+
         public string PromptSetupPassKey(string initialPrompt = "Enter passkey, or hit cancel to remain unencrypted.")
         {
-            string newPassKey;
-            using (InputForm newPassKeyForm = new InputForm(initialPrompt, true))
-            {
-                newPassKeyForm.ShowInputDialog();
-                if (newPassKeyForm.Canceled || newPassKeyForm.txtBox.Text.Length == 0)
-                {
-                    AstroMessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
-                    return null;
-                }
+            TryPromptSetupPassKey(initialPrompt, commitImmediately: true, out string passKey);
+            return passKey;
+        }
 
-                newPassKey = newPassKeyForm.txtBox.Text;
+        internal SetupPassKeyStatus TryPromptSetupPassKey(string initialPrompt, bool commitImmediately, out string passKey)
+        {
+            return TryPromptSetupPassKey(
+                initialPrompt,
+                commitImmediately,
+                (promptLabel, isPassword) =>
+                {
+                    using (InputForm passKeyForm = new InputForm(promptLabel, isPassword))
+                    {
+                        passKeyForm.ShowInputDialog();
+                        return passKeyForm.ToPassKeyPromptResult();
+                    }
+                },
+                message => AstroMessageBox.Show(message),
+                out passKey);
+        }
+
+        internal SetupPassKeyStatus TryPromptSetupPassKey(
+            string initialPrompt,
+            bool commitImmediately,
+            Func<string, bool, PassKeyPromptResult> promptForPassKey,
+            Action<string> showMessage,
+            out string passKey)
+        {
+            if (promptForPassKey == null)
+                throw new ArgumentNullException(nameof(promptForPassKey));
+            if (showMessage == null)
+                throw new ArgumentNullException(nameof(showMessage));
+
+            passKey = null;
+
+            PassKeyPromptResult initialResponse = promptForPassKey(initialPrompt, true);
+            if (initialResponse.LoadFailed)
+            {
+                showMessage("The passkey prompt could not be loaded. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
+            }
+            if (!initialResponse.UiReady)
+            {
+                showMessage("The passkey prompt closed before it finished loading. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
+            }
+            if (initialResponse.ExplicitCancel || (initialResponse.Accepted && String.IsNullOrEmpty(initialResponse.Value)))
+            {
+                showMessage("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
+                return SetupPassKeyStatus.DeclinedUnencrypted;
+            }
+            if (!initialResponse.Accepted || initialResponse.Canceled || String.IsNullOrEmpty(initialResponse.Value))
+            {
+                showMessage("Passkey setup was closed before an option was selected. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
             }
 
-            string confirmPassKey;
-            using (InputForm newPassKeyForm2 = new InputForm("Confirm new passkey.", true))
-            {
-                newPassKeyForm2.ShowInputDialog();
-                if (newPassKeyForm2.Canceled)
-                {
-                    AstroMessageBox.Show("WARNING: You chose to not encrypt your files. Doing so imposes a security risk for yourself. If an attacker were to gain access to your computer, they could completely lock you out of your account and steal all your items.");
-                    return null;
-                }
+            string newPassKey = initialResponse.Value;
 
-                confirmPassKey = newPassKeyForm2.txtBox.Text;
+            PassKeyPromptResult confirmResponse = promptForPassKey("Confirm new passkey.", true);
+            if (confirmResponse.LoadFailed)
+            {
+                showMessage("The passkey confirmation prompt could not be loaded. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
+            }
+            if (!confirmResponse.UiReady)
+            {
+                showMessage("The passkey confirmation prompt closed before it finished loading. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
+            }
+            if (!confirmResponse.Accepted)
+            {
+                showMessage("Passkey setup was canceled. No encryption changes were applied.");
+                return SetupPassKeyStatus.Failed;
             }
 
-            if (newPassKey != confirmPassKey)
+            string confirmPassKey = confirmResponse.Value ?? String.Empty;
+            if (!String.Equals(newPassKey, confirmPassKey, StringComparison.Ordinal))
             {
-                AstroMessageBox.Show("Passkeys do not match.");
-                return null;
+                showMessage("Passkeys do not match.");
+                return SetupPassKeyStatus.Failed;
+            }
+
+            if (!commitImmediately)
+            {
+                passKey = newPassKey;
+                return SetupPassKeyStatus.Set;
             }
 
             StorageResult encryptionResult = this.ChangeEncryptionKey(null, newPassKey);
             if (!encryptionResult.Succeeded)
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", encryptionResult.Exception, "Setting an encryption passkey failed.");
-                AstroMessageBox.Show(encryptionResult.UserMessage ?? "Unable to set passkey.");
-                return null;
+                showMessage(encryptionResult.UserMessage ?? "Unable to set passkey.");
+                return SetupPassKeyStatus.Failed;
             }
             else
             {
-                AstroMessageBox.Show("Passkey successfully set.");
+                showMessage("Passkey successfully set.");
             }
 
-            return newPassKey;
+            passKey = newPassKey;
+            return SetupPassKeyStatus.Set;
         }
 
         internal Action OnBeforeVerifyPasskeyProofPublishForTest { get; set; }
         internal Action OnBeforeGetAllAccountsFileReadForTest { get; set; }
 
+        internal static SteamGuardAccount DeserializeAccountJson(string json, JsonSerializerSettings settings)
+        {
+            if (String.IsNullOrWhiteSpace(json))
+                return null;
+
+            JsonSerializerSettings effectiveSettings = settings ?? storageJsonSettings;
+            JObject root;
+            using (StringReader stringReader = new StringReader(json))
+            using (JsonTextReader jsonReader = new JsonTextReader(stringReader)
+            {
+                MaxDepth = effectiveSettings.MaxDepth ?? 32,
+                DateParseHandling = DateParseHandling.None
+            })
+            {
+                root = JObject.Load(jsonReader);
+                while (jsonReader.Read())
+                {
+                    if (jsonReader.TokenType != JsonToken.Comment)
+                        throw new JsonReaderException("Additional text encountered after finished reading JSON content.");
+                }
+            }
+
+            // Remove any null `fully_enrolled` property before converting to non-nullable bool,
+            // while preserving explicit `"fully_enrolled": false` as pending activation.
+            bool hasExplicitFullyEnrolled = false;
+            foreach (JProperty property in root.Properties()
+                .Where(p => String.Equals(p.Name, "fully_enrolled", StringComparison.OrdinalIgnoreCase))
+                .ToList())
+            {
+                if (property.Value == null || property.Value.Type == JTokenType.Null)
+                {
+                    property.Remove();
+                }
+                else
+                {
+                    hasExplicitFullyEnrolled = true;
+                }
+            }
+
+            SteamGuardAccount account = root.ToObject<SteamGuardAccount>(JsonSerializer.Create(effectiveSettings));
+            if (account != null && !hasExplicitFullyEnrolled && !String.IsNullOrWhiteSpace(account.SharedSecret))
+            {
+                account.FullyEnrolled = true;
+            }
+
+            return account;
+        }
+
         public SteamAuth.SteamGuardAccount[] GetAllAccounts(string passKey = null, int limit = -1)
+        {
+            (SteamAuth.SteamGuardAccount Account, long StorageRevision)[] snapshots = GetAllAccountsWithRevisions(passKey, limit);
+            if (snapshots.Length == 0)
+                return Array.Empty<SteamGuardAccount>();
+
+            SteamAuth.SteamGuardAccount[] accounts = new SteamAuth.SteamGuardAccount[snapshots.Length];
+            for (int i = 0; i < snapshots.Length; i++)
+                accounts[i] = snapshots[i].Account;
+            return accounts;
+        }
+
+        internal (SteamAuth.SteamGuardAccount Account, long StorageRevision)[] GetAllAccountsWithRevisions(string passKey = null, int limit = -1)
         {
             if (limit < -1)
                 throw new ArgumentOutOfRangeException(nameof(limit));
@@ -486,6 +639,7 @@ namespace Steam_Desktop_Authenticator
             for (int attempt = 0; attempt < 3; attempt++)
             {
                 ManifestEntry[] entriesSnapshot;
+                long[] entryRevisionsSnapshot;
                 bool isEncrypted;
                 string credentialsStoreFilenameSnapshot;
                 long revisionBefore;
@@ -493,16 +647,24 @@ namespace Steam_Desktop_Authenticator
                 {
                     isEncrypted = this.Encrypted;
                     if (limit == 0 || (passKey == null && isEncrypted))
-                        return Array.Empty<SteamGuardAccount>();
+                        return Array.Empty<(SteamGuardAccount, long)>();
                     if (this.Entries == null)
                         throw new InvalidDataException("The account manifest contains an invalid entries list.");
                     entriesSnapshot = this.Entries.ToArray();
+                    entryRevisionsSnapshot = new long[entriesSnapshot.Length];
+                    for (int i = 0; i < entriesSnapshot.Length; i++)
+                    {
+                        entryRevisionsSnapshot[i] = entriesSnapshot[i] != null
+                            ? GetAccountStorageRevisionLocked(entriesSnapshot[i].SteamID)
+                            : 0L;
+                    }
                     credentialsStoreFilenameSnapshot = this.CredentialsStoreFilename;
                     revisionBefore = this.storageRevision;
                 }
 
-                SteamAuth.SteamGuardAccount[] accounts = ReadAccountsFromSnapshot(
+                (SteamAuth.SteamGuardAccount Account, long StorageRevision)[] accounts = ReadAccountsFromSnapshot(
                     entriesSnapshot,
+                    entryRevisionsSnapshot,
                     isEncrypted,
                     credentialsStoreFilenameSnapshot,
                     passKey,
@@ -519,12 +681,22 @@ namespace Steam_Desktop_Authenticator
             lock (storageLock)
             {
                 if (limit == 0 || (passKey == null && this.Encrypted))
-                    return Array.Empty<SteamGuardAccount>();
+                    return Array.Empty<(SteamGuardAccount, long)>();
                 if (this.Entries == null)
                     throw new InvalidDataException("The account manifest contains an invalid entries list.");
 
+                ManifestEntry[] entriesSnapshot = this.Entries.ToArray();
+                long[] entryRevisionsSnapshot = new long[entriesSnapshot.Length];
+                for (int i = 0; i < entriesSnapshot.Length; i++)
+                {
+                    entryRevisionsSnapshot[i] = entriesSnapshot[i] != null
+                        ? GetAccountStorageRevisionLocked(entriesSnapshot[i].SteamID)
+                        : 0L;
+                }
+
                 return ReadAccountsFromSnapshot(
-                    this.Entries.ToArray(),
+                    entriesSnapshot,
+                    entryRevisionsSnapshot,
                     this.Encrypted,
                     this.CredentialsStoreFilename,
                     passKey,
@@ -532,8 +704,9 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private SteamAuth.SteamGuardAccount[] ReadAccountsFromSnapshot(
+        private (SteamAuth.SteamGuardAccount Account, long StorageRevision)[] ReadAccountsFromSnapshot(
             ManifestEntry[] entriesSnapshot,
+            long[] entryRevisionsSnapshot,
             bool isEncrypted,
             string credentialsStoreFilenameSnapshot,
             string passKey,
@@ -547,12 +720,12 @@ namespace Steam_Desktop_Authenticator
                 validatedRoot,
                 credentialsStoreFilenameSnapshot);
             if (entriesSnapshot.Length == 0 || !Directory.Exists(maDir))
-                return Array.Empty<SteamGuardAccount>();
+                return Array.Empty<(SteamGuardAccount, long)>();
 
             string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
             OnBeforeGetAllAccountsFileReadForTest?.Invoke();
 
-            List<SteamAuth.SteamGuardAccount> accounts = new List<SteamAuth.SteamGuardAccount>();
+            List<(SteamAuth.SteamGuardAccount Account, long StorageRevision)> accounts = new List<(SteamAuth.SteamGuardAccount, long)>();
             for (int i = 0; i < entriesSnapshot.Length; i++)
             {
                 ManifestEntry entry = entriesSnapshot[i];
@@ -562,11 +735,11 @@ namespace Steam_Desktop_Authenticator
                     if (isEncrypted)
                     {
                         string decryptedText = FileEncryptor.DecryptData(passKey, entry.Salt, entry.IV, fileText);
-                        if (decryptedText == null) return Array.Empty<SteamGuardAccount>();
+                        if (decryptedText == null) return Array.Empty<(SteamGuardAccount, long)>();
                         fileText = decryptedText;
                     }
 
-                    SteamAuth.SteamGuardAccount account = JsonConvert.DeserializeObject<SteamAuth.SteamGuardAccount>(fileText, storageJsonSettings);
+                    SteamAuth.SteamGuardAccount account = DeserializeAccountJson(fileText, storageJsonSettings);
                     if (account?.Session == null || account.Session.SteamID == 0 || account.Session.SteamID != entry.SteamID)
                     {
                         DiagnosticErrorLogger.Log(
@@ -576,7 +749,7 @@ namespace Steam_Desktop_Authenticator
                         continue;
                     }
 
-                    accounts.Add(account);
+                    accounts.Add((account, entryRevisionsSnapshot[i]));
 
                     if (limit != -1 && accounts.Count >= limit)
                         break;
@@ -765,7 +938,7 @@ namespace Steam_Desktop_Authenticator
                     try
                     {
                         string contents = StoragePathGuard.ReadTextWithLimit(path, MaximumAccountFileSizeBytes, expectedCanonicalDir);
-                        SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
+                        SteamGuardAccount account = DeserializeAccountJson(contents, storageJsonSettings);
                         ulong steamId = account?.Session?.SteamID ?? 0;
                         if (steamId == 0 || managedSteamIds.Contains(steamId))
                             continue;
@@ -842,7 +1015,7 @@ namespace Steam_Desktop_Authenticator
                         if (!String.Equals(GetContentHash(contents), candidate.ContentHash, StringComparison.Ordinal))
                             return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files changed before it could be imported.");
 
-                        SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
+                        SteamGuardAccount account = DeserializeAccountJson(contents, storageJsonSettings);
                         if (account?.Session == null || account.Session.SteamID == 0 || account.Session.SteamID != candidate.SteamID ||
                             !IsValidAutomaticImportAccount(account))
                             return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files is no longer valid.");
@@ -958,7 +1131,7 @@ namespace Steam_Desktop_Authenticator
                             return StorageResult.Failure(StorageFailureKind.Encryption, "The existing authenticator files could not be decrypted. Encryption settings were not changed.");
                         }
                     }
-                    SteamGuardAccount existingAccount = JsonConvert.DeserializeObject<SteamGuardAccount>(fileContents, storageJsonSettings);
+                    SteamGuardAccount existingAccount = DeserializeAccountJson(fileContents, storageJsonSettings);
                     if (existingAccount?.Session == null || existingAccount.Session.SteamID != existingEntry.SteamID)
                     {
                         return StorageResult.Failure(StorageFailureKind.Validation, "One of the local authenticator files is invalid. Encryption settings were not changed.");
@@ -1156,7 +1329,7 @@ namespace Steam_Desktop_Authenticator
 
                 try
                 {
-                    SteamGuardAccount parsed = JsonConvert.DeserializeObject<SteamGuardAccount>(decrypted, storageJsonSettings);
+                    SteamGuardAccount parsed = DeserializeAccountJson(decrypted, storageJsonSettings);
                     if (parsed?.Session != null && parsed.Session.SteamID == entry.SteamID)
                     {
                         RecordVerifiedPasskeyProofLocked(passKey);
@@ -1223,10 +1396,10 @@ namespace Steam_Desktop_Authenticator
 
         public bool RemoveAccount(SteamGuardAccount account, bool deleteMaFile = true)
         {
-            return RemoveAccount(account, null, deleteMaFile);
+            return RemoveAccount(account, null, deleteMaFile, null);
         }
 
-        public bool RemoveAccount(SteamGuardAccount account, string passKey, bool deleteMaFile = true)
+        public bool RemoveAccount(SteamGuardAccount account, string passKey, bool deleteMaFile = true, long? expectedStorageRevision = null)
         {
             lock (storageLock)
             {
@@ -1234,8 +1407,16 @@ namespace Steam_Desktop_Authenticator
                     return false;
 
                 ManifestEntry entry = FindEntryForRemoval(account, passKey);
-                if (entry == null)
+                if (expectedStorageRevision.HasValue)
+                {
+                    ulong targetSteamId = entry?.SteamID ?? account.Session?.SteamID ?? 0;
+                    if (entry == null || targetSteamId == 0 || GetAccountStorageRevisionLocked(targetSteamId) != expectedStorageRevision.Value)
+                        return false;
+                }
+                else if (entry == null)
+                {
                     return account.Session != null; // If a session-backed account never existed, did you do what they asked?
+                }
 
                 try
                 {
@@ -1353,7 +1534,7 @@ namespace Steam_Desktop_Authenticator
                         if (contents == null)
                             return null;
                     }
-                    SteamGuardAccount storedAccount = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
+                    SteamGuardAccount storedAccount = DeserializeAccountJson(contents, storageJsonSettings);
                     if (storedAccount?.Session != null && storedAccount.Session.SteamID == candidate.SteamID &&
                         String.Equals(storedAccount.AccountName, account.AccountName, StringComparison.Ordinal))
                         matchingEntries.Add(candidate);
@@ -1408,7 +1589,7 @@ namespace Steam_Desktop_Authenticator
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account data changed while the session was being refreshed.");
                 if (encrypt && String.IsNullOrEmpty(passKey))
                     return StorageResult.Failure(StorageFailureKind.Validation, "An encryption passkey is required to save this account.");
-                if (!encrypt && this.Encrypted)
+                if (!encrypt && this.Encrypted && this.Entries.Count > 0)
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account must be saved using the existing encryption passkey.");
                 if (requireAllowSavedPasswords && (!this.Encrypted || !this.AllowSavedSteamPasswords))
                     return StorageResult.Failure(StorageFailureKind.Validation, "Saved Steam passwords are no longer enabled.");
@@ -1439,7 +1620,7 @@ namespace Steam_Desktop_Authenticator
                 string salt = null;
                 string iV = null;
                 string jsonAccount = JsonConvert.SerializeObject(account, storageJsonSettings);
-                SteamGuardAccount validatedAccount = JsonConvert.DeserializeObject<SteamGuardAccount>(jsonAccount, storageJsonSettings);
+                SteamGuardAccount validatedAccount = DeserializeAccountJson(jsonAccount, storageJsonSettings);
                 if (validatedAccount?.Session == null || validatedAccount.Session.SteamID != account.Session.SteamID)
                     return StorageResult.Failure(StorageFailureKind.Serialization, "The account data could not be validated before saving.");
                 if (encrypt)
@@ -1473,7 +1654,7 @@ namespace Steam_Desktop_Authenticator
                     IV = iV,
                     Salt = salt,
                     Filename = filename,
-                    SessionNeedsRenewal = account.Session.IsRefreshTokenExpired(),
+                    SessionNeedsRenewal = account.FullyEnrolled && account.Session.IsRefreshTokenExpired(),
                     AutoConfirmOverrideEnabled = previousEntry?.AutoConfirmOverrideEnabled ?? false,
                     AutoConfirmTrades = previousEntry?.AutoConfirmTrades ?? false,
                     AutoConfirmMarketTransactions = previousEntry?.AutoConfirmMarketTransactions ?? false,
@@ -1492,11 +1673,29 @@ namespace Steam_Desktop_Authenticator
                     stagedManifest.Entries[index] = newEntry;
                 }
 
-                stagedManifest.Encrypted = encrypt || stagedManifest.Encrypted;
+                List<string> obsoleteFiles = new List<string>();
+                if (previousEntry != null)
+                    obsoleteFiles.Add(previousEntry.Filename);
+
+                if (this.Entries.Count == 0 && !encrypt)
+                {
+                    stagedManifest.Encrypted = false;
+                    stagedManifest.AllowSavedSteamPasswords = false;
+                    if (!String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                        obsoleteFiles.Add(this.CredentialsStoreFilename);
+                    stagedManifest.CredentialsStoreFilename = null;
+                }
+                else
+                {
+                    stagedManifest.Encrypted = this.Entries.Count == 0
+                        ? encrypt
+                        : (encrypt || stagedManifest.Encrypted);
+                }
+
                 StorageResult result = CommitStorageTransaction(
                     stagedManifest,
                     new Dictionary<string, string> { { filename, jsonAccount } },
-                    previousEntry == null ? Enumerable.Empty<string>() : new[] { previousEntry.Filename });
+                    obsoleteFiles);
                 if (result.Succeeded)
                 {
                     CopyStorageStateFrom(stagedManifest);
@@ -1505,6 +1704,8 @@ namespace Steam_Desktop_Authenticator
                     StorageResult normalizationResult = NormalizeAccountFilenames();
                     if (!normalizationResult.Succeeded)
                         DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "The account was saved, but its canonical filename could not be completed.");
+                    long committedRevision = GetAccountStorageRevisionLocked(account.Session.SteamID);
+                    return StorageResult.Success(result.ObsoleteCleanupPending, committedRevision);
                 }
                 return result;
                 }
@@ -1683,10 +1884,9 @@ namespace Steam_Desktop_Authenticator
                 if (AreManifestEntriesEquivalent(previousEntry, nextEntry))
                     continue;
 
-                if (nextEntry == null)
-                    accountStorageRevisions.Remove(steamId);
-                else
-                    accountStorageRevisions[steamId] = GetAccountStorageRevisionLocked(steamId) + 1;
+                // Keep per-account storage revisions strictly monotonic across removal and reimport
+                // so a delete + reimport sequence can never collide with a previously captured revision.
+                accountStorageRevisions[steamId] = GetAccountStorageRevisionLocked(steamId) + 1;
             }
 
             Entries = source.Entries;
@@ -1727,13 +1927,14 @@ namespace Steam_Desktop_Authenticator
 
         private static bool AreManifestEntriesEquivalent(ManifestEntry first, ManifestEntry second)
         {
+            // Compare the backing storage record identity (excluding SessionNeedsRenewal metadata
+            // flips, which do not modify the .maFile and are recomputed on SaveAccount).
             return first == null
                 ? second == null
                 : second != null && first.SteamID == second.SteamID &&
                     String.Equals(first.IV, second.IV, StringComparison.Ordinal) &&
                     String.Equals(first.Salt, second.Salt, StringComparison.Ordinal) &&
-                    String.Equals(first.Filename, second.Filename, StringComparison.Ordinal) &&
-                    first.SessionNeedsRenewal == second.SessionNeedsRenewal;
+                    String.Equals(first.Filename, second.Filename, StringComparison.Ordinal);
         }
 
         private void CopySettingsInto(Manifest destination)
@@ -2579,8 +2780,40 @@ namespace Steam_Desktop_Authenticator
             public string BackupFilename { get; set; }
         }
 
+        internal static bool IsManifestFileConfirmedMissing(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+                return false;
+
+            try
+            {
+                return (File.GetAttributes(path) & FileAttributes.Directory) != 0;
+            }
+            catch (FileNotFoundException)
+            {
+                return true;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return true;
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException || ex is PathTooLongException || ex is NotSupportedException)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "An authenticator file could not be verified on disk; keeping its manifest entry.");
+                return false;
+            }
+        }
+
         private void RecomputeExistingEntries(string validatedRoot = null)
         {
+            RecomputeExistingEntries(IsManifestFileConfirmedMissing, validatedRoot);
+        }
+
+        internal void RecomputeExistingEntries(Func<string, bool> isFileConfirmedMissing, string validatedRoot = null)
+        {
+            if (isFileConfirmedMissing == null)
+                throw new ArgumentNullException(nameof(isFileConfirmedMissing));
+
             List<ManifestEntry> newEntries = new List<ManifestEntry>();
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
             string root = validatedRoot ?? StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
@@ -2588,7 +2821,7 @@ namespace Steam_Desktop_Authenticator
             foreach (var entry in this.Entries)
             {
                 string filename = ResolveValidatedManifestFilePath(root, entry);
-                if (File.Exists(filename))
+                if (!isFileConfirmedMissing(filename))
                 {
                     newEntries.Add(entry);
                 }

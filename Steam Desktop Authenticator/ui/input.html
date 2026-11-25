@@ -32,7 +32,7 @@ input::-ms-reveal { display: none; }
     
     <div class="flex flex-col gap-2">
         <div id="password-field" class="password-field">
-            <input type="text" id="input-box" aria-labelledby="label-text" placeholder="..." />
+            <input type="password" id="input-box" aria-labelledby="label-text" placeholder="..." disabled />
             <button id="password-toggle" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" style="display: none;">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
             </button>
@@ -40,22 +40,26 @@ input::-ms-reveal { display: none; }
     </div>
 
     <div class="flex gap-4 mt-2">
-        <button id="btn-cancel" class="btn-secondary flex-1 shadow-lg">CANCEL</button>
-        <button id="btn-accept" class="btn-primary flex-1 shadow-lg shadow-[#00E5FF]/20">ACCEPT</button>
+        <button id="btn-cancel" class="btn-secondary flex-1 shadow-lg" disabled>CANCEL</button>
+        <button id="btn-accept" class="btn-primary flex-1 shadow-lg shadow-[#00E5FF]/20" disabled>ACCEPT</button>
     </div>
 </div>
 <script>
     document.getElementById('btn-accept').addEventListener('click', () => {
-        let val = document.getElementById('input-box').value;
+        const input = document.getElementById('input-box');
+        if (input.disabled) return;
+        let val = input.value;
         window.chrome.webview.postMessage({ action: 'accept', value: val });
     });
     
     document.getElementById('btn-cancel').addEventListener('click', () => {
+        const cancelButton = document.getElementById('btn-cancel');
+        if (cancelButton.disabled) return;
         window.chrome.webview.postMessage({ action: 'cancel' });
     });
 
     document.getElementById('input-box').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
+        if (e.key === 'Enter' && !this.disabled) {
             document.getElementById('btn-accept').click();
         }
     });
@@ -70,16 +74,22 @@ input::-ms-reveal { display: none; }
     function setupInput(label, isPassword) {
         document.getElementById('label-text').innerText = label;
         const input = document.getElementById('input-box');
+        const cancelButton = document.getElementById('btn-cancel');
+        const acceptButton = document.getElementById('btn-accept');
         const toggle = document.getElementById('password-toggle');
         const passwordField = document.getElementById('password-field');
+        const panel = document.querySelector('.glass-panel');
         input.type = isPassword ? 'password' : 'text';
         passwordField.classList.toggle('password-field', isPassword);
         toggle.style.display = isPassword ? 'block' : 'none';
         toggle.setAttribute('aria-label', 'Show password');
         toggle.setAttribute('aria-pressed', 'false');
+        resizeObserver.observe(panel);
+        input.disabled = false;
+        cancelButton.disabled = false;
+        acceptButton.disabled = false;
         input.focus();
-        
-        resizeObserver.observe(document.querySelector('.glass-panel'));
+        return true;
     }
 
     document.getElementById('password-toggle').addEventListener('click', () => {

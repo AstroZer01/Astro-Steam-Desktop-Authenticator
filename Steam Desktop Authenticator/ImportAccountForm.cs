@@ -127,7 +127,7 @@ namespace Steam_Desktop_Authenticator
                         using (InputForm passKeyForm = new InputForm("Enter the passkey for the imported account.", true))
                         {
                             passKeyForm.ShowInputDialog(dialogOwner);
-                            if (passKeyForm.Canceled) return;
+                            if (passKeyForm.Canceled || !passKeyForm.UiReady || passKeyForm.LoadFailed) return;
                             importedPassKey = passKeyForm.txtBox.Text;
                         }
                         decryptedText = FileEncryptor.DecryptData(importedPassKey, salt, iv, fileContents);
@@ -145,7 +145,7 @@ namespace Steam_Desktop_Authenticator
                 if (Encoding.UTF8.GetByteCount(fileContents ?? String.Empty) > MaximumImportFileSizeBytes)
                     throw new InvalidDataException("The decrypted account file is larger than the supported size limit.");
 
-                maFile = JsonConvert.DeserializeObject<SteamGuardAccount>(fileContents, ImportJsonSettings);
+                maFile = Manifest.DeserializeAccountJson(fileContents, ImportJsonSettings);
                 if (maFile == null) throw new InvalidDataException("The selected file did not contain a Steam Guard account.");
 
                 expectedSteamId = ResolveExpectedSteamId(expectedSteamId, maFile);

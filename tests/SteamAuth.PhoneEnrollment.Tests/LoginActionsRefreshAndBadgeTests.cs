@@ -788,6 +788,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             {
                 AccountName = accountName,
                 SharedSecret = Convert.ToBase64String(new byte[20]),
+                FullyEnrolled = true,
                 Session = new SessionData(transport)
                 {
                     SteamID = steamId,

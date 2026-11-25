@@ -353,7 +353,7 @@ namespace Steam_Desktop_Authenticator
             CancellationToken cancellationToken)
         {
             ulong steamId = account?.Session?.SteamID ?? 0;
-            if (manifest == null || account == null || steamId == 0 || String.IsNullOrEmpty(passKey))
+            if (manifest == null || account == null || !account.FullyEnrolled || steamId == 0 || String.IsNullOrEmpty(passKey))
                 return new SilentReloginResult { Kind = SilentReloginOutcomeKind.NotEligible, SteamId = steamId };
 
             if (!manifest.Encrypted || !manifest.AllowSavedSteamPasswords)
@@ -421,7 +421,6 @@ namespace Steam_Desktop_Authenticator
                         }
 
                         account.Session = transportResult.Session;
-                        account.FullyEnrolled = true;
                         cooldownUntilUtc.TryRemove(steamId, out _);
                         return new SilentReloginResult
                         {
@@ -493,7 +492,7 @@ namespace Steam_Desktop_Authenticator
             string json = Newtonsoft.Json.JsonConvert.SerializeObject(source);
             SteamGuardAccount clone = Newtonsoft.Json.JsonConvert.DeserializeObject<SteamGuardAccount>(json);
             clone.Session = newSession;
-            clone.FullyEnrolled = true;
+            clone.FullyEnrolled = source.FullyEnrolled;
             return clone;
         }
     }
