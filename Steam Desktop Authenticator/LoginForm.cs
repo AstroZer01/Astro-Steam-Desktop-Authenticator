@@ -76,6 +76,53 @@ namespace Steam_Desktop_Authenticator
             public bool DeviceCodeAffirmativelyAccepted { get; }
         }
 
+        internal static bool TryApplyVerifiedIdentifiers(
+            SteamGuardAccount account,
+            AuthenticatorActivationVerificationResult verification,
+            out string previousTokenGid,
+            out string previousDeviceId)
+        {
+            previousTokenGid = account?.TokenGID;
+            previousDeviceId = account?.DeviceID;
+            if (account == null)
+                return false;
+
+            if (String.IsNullOrWhiteSpace(account.TokenGID) &&
+                !String.IsNullOrWhiteSpace(verification.RemoteTokenGid))
+            {
+                account.TokenGID = verification.RemoteTokenGid.Trim();
+            }
+
+            if (String.IsNullOrWhiteSpace(account.DeviceID) &&
+                !String.IsNullOrWhiteSpace(verification.RemoteDeviceIdentifier))
+            {
+                account.DeviceID = verification.RemoteDeviceIdentifier.Trim();
+            }
+
+            // Steam trade confirmations require DeviceID. If neither the local record nor
+            // Steam's verified QueryStatus response supplied one, keep the record pending
+            // instead of promoting an incomplete authenticator that fails on confirmations.
+            if (String.IsNullOrWhiteSpace(account.DeviceID))
+            {
+                RestoreVerifiedIdentifiers(account, previousTokenGid, previousDeviceId);
+                return false;
+            }
+
+            return true;
+        }
+
+        internal static void RestoreVerifiedIdentifiers(
+            SteamGuardAccount account,
+            string previousTokenGid,
+            string previousDeviceId)
+        {
+            if (account == null)
+                return;
+
+            account.TokenGID = previousTokenGid;
+            account.DeviceID = previousDeviceId;
+        }
+
         internal static async Task<LegacyDeviceCodeLoginResult> CompleteLegacyDeviceCodeLoginAsync(
             Func<CancellationToken, Task<string>> generateDeviceCodeAsync,
             Func<string, CancellationToken, Task<EResult>> submitDeviceCodeAsync,
@@ -89,18 +136,21 @@ namespace Steam_Desktop_Authenticator
             if (generateDeviceCodeAsync == null || submitDeviceCodeAsync == null || pollAuthSessionStatusAsync == null)
                 return new LegacyDeviceCodeLoginResult(null, false);
 
-            TimeSpan effectiveDeadline = deadline.HasValue && deadline.Value > TimeSpan.Zero
+            int effectiveMaxMismatchSubmissions = Math.Max(1, maxMismatchSubmissions);
+            TimeSpan effectiveOverallDeadline = deadline.HasValue && deadline.Value > TimeSpan.Zero
+                ? deadline.Value
+                : TimeSpan.FromSeconds(Math.Max(30, 35 * effectiveMaxMismatchSubmissions));
+            TimeSpan effectivePollDeadline = deadline.HasValue && deadline.Value > TimeSpan.Zero
                 ? deadline.Value
                 : TimeSpan.FromSeconds(30);
             TimeSpan effectiveInterval = pollingInterval > TimeSpan.Zero
                 ? pollingInterval
                 : TimeSpan.FromSeconds(1);
-            int effectiveMaxMismatchSubmissions = Math.Max(1, maxMismatchSubmissions);
             Func<TimeSpan, CancellationToken, Task> effectiveDelayAsync = delayAsync ?? ((delay, ct) => Task.Delay(delay, ct));
 
             using (CancellationTokenSource deadlineCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                deadlineCts.CancelAfter(effectiveDeadline);
+                deadlineCts.CancelAfter(effectiveOverallDeadline);
                 CancellationToken effectiveToken = deadlineCts.Token;
 
                 try
@@ -122,7 +172,7 @@ namespace Steam_Desktop_Authenticator
                             AuthPollResult racedPoll = await pollAuthSessionStatusAsync(effectiveToken);
                             if (racedPoll != null)
                             {
-                                effectiveToken.ThrowIfCancellationRequested();
+                                cancellationToken.ThrowIfCancellationRequested();
                                 return new LegacyDeviceCodeLoginResult(racedPoll, deviceCodeAffirmativelyAccepted: false);
                             }
 
@@ -156,7 +206,7 @@ namespace Steam_Desktop_Authenticator
                             AuthPollResult racedPoll = await pollAuthSessionStatusAsync(effectiveToken);
                             if (racedPoll != null)
                             {
-                                effectiveToken.ThrowIfCancellationRequested();
+                                cancellationToken.ThrowIfCancellationRequested();
                                 return new LegacyDeviceCodeLoginResult(racedPoll, deviceCodeAffirmativelyAccepted: false);
                             }
 
@@ -167,22 +217,41 @@ namespace Steam_Desktop_Authenticator
                             continue;
                         }
 
+                        if (submitResult == EResult.RateLimitExceeded ||
+                            submitResult == EResult.AccountLoginDeniedThrottle)
+                        {
+                            throw new AuthenticationException("Steam rate-limited this sign-in attempt.", submitResult);
+                        }
+
                         // Steam returned a non-device-code error (for example when the account uses EmailCode or has no mobile authenticator).
                         // Fall back to standard SteamKit polling without marking local device-code proof.
                         return new LegacyDeviceCodeLoginResult(null, deviceCodeAffirmativelyAccepted: false);
                     }
 
-                    while (true)
+                    using (CancellationTokenSource pollDeadlineCts = CancellationTokenSource.CreateLinkedTokenSource(effectiveToken))
                     {
-                        effectiveToken.ThrowIfCancellationRequested();
-                        AuthPollResult pollResult = await pollAuthSessionStatusAsync(effectiveToken);
-                        if (pollResult != null)
-                        {
-                            effectiveToken.ThrowIfCancellationRequested();
-                            return new LegacyDeviceCodeLoginResult(pollResult, deviceCodeAffirmativelyAccepted);
-                        }
+                        pollDeadlineCts.CancelAfter(effectivePollDeadline);
+                        CancellationToken pollToken = pollDeadlineCts.Token;
 
-                        await effectiveDelayAsync(effectiveInterval, effectiveToken);
+                        try
+                        {
+                            while (true)
+                            {
+                                pollToken.ThrowIfCancellationRequested();
+                                AuthPollResult pollResult = await pollAuthSessionStatusAsync(pollToken);
+                                if (pollResult != null)
+                                {
+                                    cancellationToken.ThrowIfCancellationRequested();
+                                    return new LegacyDeviceCodeLoginResult(pollResult, deviceCodeAffirmativelyAccepted);
+                                }
+
+                                await effectiveDelayAsync(effectiveInterval, pollToken);
+                            }
+                        }
+                        catch (OperationCanceledException) when (pollDeadlineCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                        {
+                            throw new TimeoutException("Steam did not finalize authentication before the deadline.");
+                        }
                     }
                 }
                 catch (OperationCanceledException) when (deadlineCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
@@ -602,6 +671,11 @@ namespace Steam_Desktop_Authenticator
                 ResetLoginButton(cancellationToken);
                 return;
             }
+            catch (LoginPromptCanceledException)
+            {
+                ResetLoginButton(cancellationToken);
+                return;
+            }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 ResetLoginButton(cancellationToken);
@@ -676,6 +750,11 @@ namespace Steam_Desktop_Authenticator
                 }
             }
             catch (AuthenticatorAlreadyLinkedException)
+            {
+                ResetLoginButton(cancellationToken);
+                return;
+            }
+            catch (LoginPromptCanceledException)
             {
                 ResetLoginButton(cancellationToken);
                 return;
@@ -762,6 +841,17 @@ namespace Steam_Desktop_Authenticator
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
+                        ResetLoginButton(cancellationToken);
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Authenticator recovery", ex, "Unexpected failure while verifying pending authenticator activation.");
+                        AstroMessageBox.Show(
+                            "Steam could not verify whether this pending authenticator is active right now. Your pending record was kept safely; try again later.",
+                            "Steam Guard Setup",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
                         ResetLoginButton(cancellationToken);
                         return;
                     }
@@ -889,6 +979,17 @@ namespace Steam_Desktop_Authenticator
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
+                        ResetLoginButton(cancellationToken);
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Authenticator recovery", ex, "Unexpected failure while checking for an existing pending authenticator.");
+                        AstroMessageBox.Show(
+                            "Steam could not verify whether your existing pending authenticator is active right now. Your pending record was kept safely; try again later.",
+                            "Steam Guard Setup",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
                         ResetLoginButton(cancellationToken);
                         return;
                     }
@@ -1550,25 +1651,8 @@ namespace Steam_Desktop_Authenticator
                     activationStatus: activationStatus);
             }
 
-            if (String.IsNullOrWhiteSpace(pendingAccount.TokenGID) &&
-                !String.IsNullOrWhiteSpace(verification.RemoteTokenGid))
+            if (!TryApplyVerifiedIdentifiers(pendingAccount, verification, out previousTokenGid, out previousDeviceId))
             {
-                pendingAccount.TokenGID = verification.RemoteTokenGid.Trim();
-            }
-
-            if (String.IsNullOrWhiteSpace(pendingAccount.DeviceID) &&
-                !String.IsNullOrWhiteSpace(verification.RemoteDeviceIdentifier))
-            {
-                pendingAccount.DeviceID = verification.RemoteDeviceIdentifier.Trim();
-            }
-
-            // Steam trade confirmations require DeviceID. If neither the local record nor
-            // Steam's verified QueryStatus response supplied one, keep the record pending
-            // instead of promoting an incomplete authenticator that fails on confirmations.
-            if (String.IsNullOrWhiteSpace(pendingAccount.DeviceID))
-            {
-                pendingAccount.TokenGID = previousTokenGid;
-                pendingAccount.DeviceID = previousDeviceId;
                 pendingAccount.Session = previousSession;
                 return new PendingAuthenticatorRecoveryResult(
                     PendingAuthenticatorRecoveryStatus.Inconclusive,
@@ -1586,8 +1670,7 @@ namespace Steam_Desktop_Authenticator
             if (!saveResult.Succeeded)
             {
                 pendingAccount.FullyEnrolled = false;
-                pendingAccount.TokenGID = previousTokenGid;
-                pendingAccount.DeviceID = previousDeviceId;
+                RestoreVerifiedIdentifiers(pendingAccount, previousTokenGid, previousDeviceId);
                 pendingAccount.Session = previousSession;
                 return new PendingAuthenticatorRecoveryResult(
                     PendingAuthenticatorRecoveryStatus.SaveFailed,

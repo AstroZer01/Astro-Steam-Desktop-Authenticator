@@ -47,7 +47,7 @@ namespace Steam_Desktop_Authenticator
                     "Cancel");
 
                 if (choice == DialogResult.Cancel)
-                    throw new OperationCanceledException(cancellationToken);
+                    throw new LoginPromptCanceledException();
 
                 return choice == DialogResult.Yes;
             });
@@ -89,7 +89,7 @@ namespace Steam_Desktop_Authenticator
                         }
                         cancellationToken.ThrowIfCancellationRequested();
                         if (codeForm.Canceled || !codeForm.UiReady || codeForm.LoadFailed)
-                            throw new OperationCanceledException(cancellationToken);
+                            throw new LoginPromptCanceledException();
                         return (codeForm.txtBox.Text ?? String.Empty).Trim().ToUpperInvariant();
                     }
                 });
@@ -167,7 +167,7 @@ namespace Steam_Desktop_Authenticator
                     }
                     cancellationToken.ThrowIfCancellationRequested();
                     if (emailForm.Canceled || !emailForm.UiReady || emailForm.LoadFailed)
-                        throw new OperationCanceledException(cancellationToken);
+                        throw new LoginPromptCanceledException();
                     return emailForm.txtBox.Text;
                 }
             });
@@ -283,6 +283,14 @@ namespace Steam_Desktop_Authenticator
     {
         public AuthenticatorAlreadyLinkedException()
             : base("This account already has an authenticator linked, so SDA cannot provide a device code.")
+        {
+        }
+    }
+
+    internal sealed class LoginPromptCanceledException : Exception
+    {
+        public LoginPromptCanceledException()
+            : base("The user canceled the Steam Guard confirmation prompt.")
         {
         }
     }

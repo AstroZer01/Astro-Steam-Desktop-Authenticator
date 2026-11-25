@@ -1172,20 +1172,41 @@ namespace Steam_Desktop_Authenticator
             Func<SteamGuardAccount, bool> persistActivatedAccount,
             CancellationToken cancellationToken)
         {
-            if (verifyActivationAsync == null)
+            if (verifyActivationAsync == null || persistActivatedAccount == null)
                 return Task.FromResult(false);
 
             return TryRecoverPendingAccountActivationAsync(
                 pendingAccount,
                 async ct => new AuthenticatorActivationVerificationResult(await verifyActivationAsync(ct)),
-                persistActivatedAccount,
+                (activated, verification) =>
+                {
+                    if (!LoginForm.TryApplyVerifiedIdentifiers(activated, verification, out string previousTokenGid, out string previousDeviceId))
+                        return false;
+                    activated.FullyEnrolled = true;
+                    try
+                    {
+                        if (!persistActivatedAccount(activated))
+                        {
+                            activated.FullyEnrolled = false;
+                            LoginForm.RestoreVerifiedIdentifiers(activated, previousTokenGid, previousDeviceId);
+                            return false;
+                        }
+                        return true;
+                    }
+                    catch
+                    {
+                        activated.FullyEnrolled = false;
+                        LoginForm.RestoreVerifiedIdentifiers(activated, previousTokenGid, previousDeviceId);
+                        throw;
+                    }
+                },
                 cancellationToken);
         }
 
         internal static async Task<bool> TryRecoverPendingAccountActivationAsync(
             SteamGuardAccount pendingAccount,
             Func<CancellationToken, Task<AuthenticatorActivationVerificationResult>> verifyActivationAsync,
-            Func<SteamGuardAccount, bool> persistActivatedAccount,
+            Func<SteamGuardAccount, AuthenticatorActivationVerificationResult, bool> persistActivatedAccount,
             CancellationToken cancellationToken)
         {
             if (pendingAccount == null || pendingAccount.FullyEnrolled ||
@@ -1196,54 +1217,22 @@ namespace Steam_Desktop_Authenticator
             if (verification.Status != AuthenticatorActivationStatus.ActiveForThisRecord)
                 return false;
 
-            string previousTokenGid = pendingAccount.TokenGID;
-            string previousDeviceId = pendingAccount.DeviceID;
-            if (String.IsNullOrWhiteSpace(pendingAccount.TokenGID) &&
-                !String.IsNullOrWhiteSpace(verification.RemoteTokenGid))
-            {
-                pendingAccount.TokenGID = verification.RemoteTokenGid.Trim();
-            }
-
+            // Keep original identifiers unmutated before persistence so revision/reload matching
+            // compares against the original in-memory secrets, then applies backfill atomically.
             if (String.IsNullOrWhiteSpace(pendingAccount.DeviceID) &&
-                !String.IsNullOrWhiteSpace(verification.RemoteDeviceIdentifier))
+                String.IsNullOrWhiteSpace(verification.RemoteDeviceIdentifier))
             {
-                pendingAccount.DeviceID = verification.RemoteDeviceIdentifier.Trim();
-            }
-
-            if (String.IsNullOrWhiteSpace(pendingAccount.DeviceID))
-            {
-                pendingAccount.TokenGID = previousTokenGid;
-                pendingAccount.DeviceID = previousDeviceId;
                 return false;
             }
 
-            pendingAccount.FullyEnrolled = true;
             try
             {
-                if (!persistActivatedAccount(pendingAccount))
-                {
-                    pendingAccount.FullyEnrolled = false;
-                    pendingAccount.TokenGID = previousTokenGid;
-                    pendingAccount.DeviceID = previousDeviceId;
-                    return false;
-                }
+                return persistActivatedAccount(pendingAccount, verification);
             }
             catch (StaleAccountGenerationException)
             {
-                pendingAccount.FullyEnrolled = false;
-                pendingAccount.TokenGID = previousTokenGid;
-                pendingAccount.DeviceID = previousDeviceId;
                 return false;
             }
-            catch
-            {
-                pendingAccount.FullyEnrolled = false;
-                pendingAccount.TokenGID = previousTokenGid;
-                pendingAccount.DeviceID = previousDeviceId;
-                throw;
-            }
-
-            return true;
         }
 
         internal static Task<bool> RecoverPendingAccountOnStartupAsync(
@@ -1257,7 +1246,7 @@ namespace Steam_Desktop_Authenticator
             Func<SteamGuardAccount, long, bool> persistActivatedAccount,
             CancellationToken cancellationToken)
         {
-            if (verifyActivationAsync == null)
+            if (verifyActivationAsync == null || persistActivatedAccount == null)
                 return Task.FromResult(false);
 
             return RecoverPendingAccountOnStartupAsync(
@@ -1268,7 +1257,28 @@ namespace Steam_Desktop_Authenticator
                 refreshAccessTokenAsync,
                 getCurrentStorageRevision,
                 async ct => new AuthenticatorActivationVerificationResult(await verifyActivationAsync(ct)),
-                persistActivatedAccount,
+                (activated, verification, expectedRevision) =>
+                {
+                    if (!LoginForm.TryApplyVerifiedIdentifiers(activated, verification, out string previousTokenGid, out string previousDeviceId))
+                        return false;
+                    activated.FullyEnrolled = true;
+                    try
+                    {
+                        if (!persistActivatedAccount(activated, expectedRevision))
+                        {
+                            activated.FullyEnrolled = false;
+                            LoginForm.RestoreVerifiedIdentifiers(activated, previousTokenGid, previousDeviceId);
+                            return false;
+                        }
+                        return true;
+                    }
+                    catch
+                    {
+                        activated.FullyEnrolled = false;
+                        LoginForm.RestoreVerifiedIdentifiers(activated, previousTokenGid, previousDeviceId);
+                        throw;
+                    }
+                },
                 cancellationToken);
         }
 
@@ -1280,7 +1290,7 @@ namespace Steam_Desktop_Authenticator
             Func<long, CancellationToken, Task<long>> refreshAccessTokenAsync,
             Func<long> getCurrentStorageRevision,
             Func<CancellationToken, Task<AuthenticatorActivationVerificationResult>> verifyActivationAsync,
-            Func<SteamGuardAccount, long, bool> persistActivatedAccount,
+            Func<SteamGuardAccount, AuthenticatorActivationVerificationResult, long, bool> persistActivatedAccount,
             CancellationToken cancellationToken)
         {
             if (pendingAccount == null || pendingAccount.FullyEnrolled ||
@@ -1320,7 +1330,7 @@ namespace Steam_Desktop_Authenticator
                     }
                     return verification;
                 },
-                activated => persistActivatedAccount(activated, boundStorageRevision),
+                (activated, verification) => persistActivatedAccount(activated, verification, boundStorageRevision),
                 cancellationToken);
         }
 
@@ -1388,7 +1398,7 @@ namespace Steam_Desktop_Authenticator
                             (expectedRevision, ct) => RefreshAndPersistPendingAccessTokenAsync(account, expectedRevision, ct),
                             () => manifest?.GetAccountStorageRevision(pendingSessionAtStart.SteamID) ?? 0,
                             ct => verifyPendingActivationAsync(account, ct),
-                            (activated, expectedRevision) => PersistRecoveredPendingActivation(activated, pendingSessionAtStart, expectedRevision),
+                            (activated, verification, expectedRevision) => PersistRecoveredPendingActivation(activated, pendingSessionAtStart, expectedRevision, verification),
                             lifetimeCancellationSource.Token), lifetimeCancellationSource.Token);
                     }
                     catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
@@ -3735,7 +3745,8 @@ namespace Steam_Desktop_Authenticator
         internal bool PersistRecoveredPendingActivation(
             SteamGuardAccount originalAccount,
             SessionData expectedSession,
-            long expectedStorageRevision)
+            long expectedStorageRevision,
+            AuthenticatorActivationVerificationResult? verification = null)
         {
             if (manifest == null || originalAccount == null || expectedSession == null || expectedSession.SteamID == 0)
                 return false;
@@ -3751,6 +3762,20 @@ namespace Steam_Desktop_Authenticator
                 if (targetAccount == null)
                     throw new StaleAccountGenerationException(originalAccount.AccountName);
 
+                AuthenticatorActivationVerificationResult effectiveVerification = verification
+                    ?? new AuthenticatorActivationVerificationResult(
+                        AuthenticatorActivationStatus.ActiveForThisRecord,
+                        originalAccount.TokenGID,
+                        originalAccount.DeviceID);
+                if (!LoginForm.TryApplyVerifiedIdentifiers(
+                    targetAccount,
+                    effectiveVerification,
+                    out string previousTargetTokenGid,
+                    out string previousTargetDeviceId))
+                {
+                    return false;
+                }
+
                 bool previousTargetEnrolled = targetAccount.FullyEnrolled;
                 targetAccount.FullyEnrolled = true;
                 saveResult = manifest.SaveAccount(
@@ -3762,6 +3787,13 @@ namespace Steam_Desktop_Authenticator
                 if (!saveResult.Succeeded)
                 {
                     targetAccount.FullyEnrolled = previousTargetEnrolled;
+                    LoginForm.RestoreVerifiedIdentifiers(targetAccount, previousTargetTokenGid, previousTargetDeviceId);
+                }
+                else if (!Object.ReferenceEquals(targetAccount, originalAccount))
+                {
+                    originalAccount.TokenGID = targetAccount.TokenGID;
+                    originalAccount.DeviceID = targetAccount.DeviceID;
+                    originalAccount.FullyEnrolled = true;
                 }
             }
 

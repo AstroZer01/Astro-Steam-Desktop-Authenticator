@@ -754,6 +754,97 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public async Task PersistRecoveredPendingActivation_BackfillsMissingDeviceIdAcrossUiOnlyReload()
+        {
+            const string passKey = "ui-reload-backfill-passkey";
+            const ulong steamId = 76561198000009021UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount originalAccount = CreateAccount(steamId, "ui-reload-backfill-user", fullyEnrolled: false);
+            originalAccount.TokenGID = "gid-ui-backfill";
+            originalAccount.DeviceID = null;
+            Assert.True(manifest.SaveAccount(originalAccount, encrypt: true, passKey: passKey).Succeeded);
+
+            SessionData originalSession = originalAccount.Session;
+            long revisionAtCheck = manifest.GetAccountStorageRevision(steamId);
+
+            using (MainForm form = new MainForm(manifest, null, null, null))
+            {
+                form.SetEncryptionKey(passKey);
+                FieldInfo allAccountsField = typeof(MainForm).GetField("allAccounts", BindingFlags.Instance | BindingFlags.NonPublic);
+                allAccountsField.SetValue(form, new[] { originalAccount });
+
+                bool recovered = await MainForm.TryRecoverPendingAccountActivationAsync(
+                    originalAccount,
+                    _ =>
+                    {
+                        // Simulate WebView2 NavigationCompleted -> loadAccountsList() replacing the in-memory object
+                        // while QueryStatus is in flight and the on-disk storage revision is unchanged.
+                        SteamGuardAccount[] reloadedInstances = manifest.GetAllAccounts(passKey);
+                        Assert.NotSame(originalAccount, reloadedInstances[0]);
+                        Assert.Null(reloadedInstances[0].DeviceID);
+                        allAccountsField.SetValue(form, reloadedInstances);
+                        return Task.FromResult(new AuthenticatorActivationVerificationResult(
+                            AuthenticatorActivationStatus.ActiveForThisRecord,
+                            remoteTokenGid: "gid-ui-backfill",
+                            remoteDeviceIdentifier: "android:backfilled-across-reload"));
+                    },
+                    (activated, verification) => form.PersistRecoveredPendingActivation(activated, originalSession, revisionAtCheck, verification),
+                    CancellationToken.None);
+
+                Assert.True(recovered);
+
+                SteamGuardAccount currentInMemory = Assert.Single((SteamGuardAccount[])allAccountsField.GetValue(form));
+                Assert.True(currentInMemory.FullyEnrolled);
+                Assert.Equal("android:backfilled-across-reload", currentInMemory.DeviceID);
+                Assert.True(originalAccount.FullyEnrolled);
+                Assert.Equal("android:backfilled-across-reload", originalAccount.DeviceID);
+
+                SteamGuardAccount persisted = Assert.Single(Manifest.GetManifest(true).GetAllAccounts(passKey));
+                Assert.True(persisted.FullyEnrolled);
+                Assert.Equal("android:backfilled-across-reload", persisted.DeviceID);
+                NameValueCollection queryParams = persisted.GenerateConfirmationQueryParamsAsNVC("conf");
+                Assert.Equal("android:backfilled-across-reload", queryParams["p"]);
+            }
+        }
+
+        [Fact]
+        public async Task CompleteLegacyDeviceCodeLoginAsync_PreservesRateLimitThrottleWithoutFallback()
+        {
+            int submitCalls = 0;
+            int pollCalls = 0;
+
+            SteamKit2.Authentication.AuthenticationException ex = await Assert.ThrowsAsync<SteamKit2.Authentication.AuthenticationException>(() =>
+                LoginForm.CompleteLegacyDeviceCodeLoginAsync(
+                    _ => Task.FromResult("ABCDE"),
+                    (_, _) =>
+                    {
+                        submitCalls++;
+                        return Task.FromResult(SteamKit2.EResult.RateLimitExceeded);
+                    },
+                    _ =>
+                    {
+                        pollCalls++;
+                        return Task.FromResult<SteamKit2.Authentication.AuthPollResult>(null);
+                    },
+                    TimeSpan.FromMilliseconds(5),
+                    CancellationToken.None,
+                    deadline: TimeSpan.FromSeconds(5),
+                    delayAsync: (_, _) => Task.CompletedTask));
+
+            Assert.Equal(SteamKit2.EResult.RateLimitExceeded, ex.Result);
+            Assert.Equal(1, submitCalls);
+            Assert.Equal(0, pollCalls);
+        }
+
+        [Fact]
+        public void LoginPromptCanceledException_IsDistinctFromOperationCanceledException()
+        {
+            var promptCanceled = new LoginPromptCanceledException();
+            Assert.False(typeof(OperationCanceledException).IsAssignableFrom(promptCanceled.GetType()));
+            Assert.Contains("canceled", promptCanceled.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
         public void ShouldDeletePendingOnExplicitCancel_PreservesPendingRecordAfterSteamAcceptsFinalization()
         {
             Assert.True(LoginForm.ShouldDeletePendingOnExplicitCancel(finalizationAcceptedBySteam: false));
