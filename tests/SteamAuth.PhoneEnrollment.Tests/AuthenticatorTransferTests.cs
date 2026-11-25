@@ -1175,7 +1175,37 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.True(appExitArgs.Cancel);
                 Assert.True(loginForm.ShouldCloseForDeferredExit());
                 loginForm.SetIrreversibleTransferInFlight(false);
+
+                // Completing a non-closing outcome while deferred exit is queued must close the form immediately
+                var completeOutcome = typeof(LoginForm).GetMethod(
+                    "CompleteTransferNonClosingOutcome",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.NotNull(completeOutcome);
+                IntPtr _ = loginForm.Handle;
+                bool closed = false;
+                loginForm.FormClosed += (s, e) => closed = true;
+                completeOutcome.Invoke(loginForm, new object[] { CancellationToken.None });
+                Assert.True(closed || loginForm.IsDisposed);
             }
+        }
+
+        [Fact]
+        public void DeleteMarkerBestEffort_ReturnsFalseWhenMarkerFileIsLockedAndCannotBeDeleted()
+        {
+            ulong steamId = 76561198000000095UL;
+            Assert.True(PendingTransferMarker.TryWriteMarker(steamId, "locked_marker", "android:lk", "attempt-lk1"));
+            string markerPath = PendingTransferMarker.GetMarkerPath(steamId);
+
+            // Hold an exclusive lock on the marker file to simulate a Windows sharing violation
+            using (var lockStream = new FileStream(markerPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                Assert.False(PendingTransferMarker.DeleteMarkerBestEffort(steamId, "attempt-lk1"));
+                Assert.True(PendingTransferMarker.HasMarker(steamId));
+            }
+
+            // Once unlocked, scoped deletion succeeds and returns true
+            Assert.True(PendingTransferMarker.DeleteMarkerBestEffort(steamId, "attempt-lk1"));
+            Assert.False(PendingTransferMarker.HasMarker(steamId));
         }
     }
 }

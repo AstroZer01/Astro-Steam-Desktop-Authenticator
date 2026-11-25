@@ -1144,8 +1144,8 @@ namespace Steam_Desktop_Authenticator
                                     enforceTransferAttemptBase: true);
                                 if (retryResult.Succeeded)
                                 {
-                                    PendingTransferMarker.DeleteMarkerBestEffort(candidate.Session.SteamID, outcome.TransferAttemptId);
-                                    PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(candidate.Session.SteamID);
+                                    if (PendingTransferMarker.DeleteMarkerBestEffort(candidate.Session.SteamID, outcome.TransferAttemptId))
+                                        PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(candidate.Session.SteamID);
                                     onAccountCommitted?.Invoke(candidate, resolvedPassKey);
                                 }
                                 return retryResult;
@@ -1187,11 +1187,14 @@ namespace Steam_Desktop_Authenticator
                     case TransferCoordinatorResultKind.BlockedByPendingTransfer:
                     case TransferCoordinatorResultKind.Failed:
                     default:
-                        AstroMessageBox.Show(
-                            outcome.ErrorMessage ?? "The authenticator transfer could not be completed.",
-                            "Authenticator Transfer",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Error);
+                        if (!ShouldCloseForDeferredExit())
+                        {
+                            AstroMessageBox.Show(
+                                outcome.ErrorMessage ?? "The authenticator transfer could not be completed.",
+                                "Authenticator Transfer",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Error);
+                        }
                         CompleteTransferNonClosingOutcome(cancellationToken);
                         return;
                 }
@@ -1203,7 +1206,10 @@ namespace Steam_Desktop_Authenticator
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Authenticator transfer", ex, "The authenticator transfer encountered an unexpected error.");
-                AstroMessageBox.Show("An unexpected error occurred during authenticator transfer.", "Authenticator Transfer", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!ShouldCloseForDeferredExit())
+                {
+                    AstroMessageBox.Show("An unexpected error occurred during authenticator transfer.", "Authenticator Transfer", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
                 CompleteTransferNonClosingOutcome(cancellationToken);
             }
             finally
@@ -1352,6 +1358,10 @@ namespace Steam_Desktop_Authenticator
 
             public void CleanupStagedReplacement(string stagedRecoveryPath)
             {
+                // Only purge staged recovery files once the pending marker is verified gone.
+                if (PendingTransferMarker.HasMarker(steamId))
+                    return;
+
                 if (!String.IsNullOrEmpty(stagedRecoveryPath))
                     PendingTransferMarker.DeleteStagedRecoveryBestEffort(stagedRecoveryPath);
                 PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(steamId);

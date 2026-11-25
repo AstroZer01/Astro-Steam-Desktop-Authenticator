@@ -207,11 +207,12 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        public static void DeleteMarkerBestEffort(ulong steamId, string expectedTransferAttemptId = null)
+        public static bool DeleteMarkerBestEffort(ulong steamId, string expectedTransferAttemptId = null)
         {
             if (steamId == 0)
-                return;
+                return true;
 
+            string markerPath = GetMarkerPath(steamId);
             if (!String.IsNullOrWhiteSpace(expectedTransferAttemptId))
             {
                 PendingTransferMarkerRecord current = TryReadMarker(steamId);
@@ -220,11 +221,12 @@ namespace Steam_Desktop_Authenticator
                 {
                     // Marker is missing, corrupt/unreadable, or belongs to a different transfer attempt;
                     // fail closed so scoped cleanup never removes another attempt's warning.
-                    return;
+                    return !File.Exists(markerPath);
                 }
             }
 
-            DeleteFileBestEffort(GetMarkerPath(steamId));
+            DeleteFileBestEffort(markerPath);
+            return !File.Exists(markerPath);
         }
 
         public static List<PendingTransferMarkerRecord> EnumerateMarkers()

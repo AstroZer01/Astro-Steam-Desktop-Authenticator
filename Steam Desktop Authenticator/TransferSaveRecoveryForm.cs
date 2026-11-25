@@ -127,9 +127,10 @@ namespace Steam_Desktop_Authenticator
             {
                 LocalSaveSucceeded = true;
                 savedOrBackedUp = true;
-                if (replacementAccount.Session != null && replacementAccount.Session.SteamID != 0)
+                bool markerCleared = replacementAccount.Session == null ||
+                    replacementAccount.Session.SteamID == 0 ||
                     PendingTransferMarker.DeleteMarkerBestEffort(replacementAccount.Session.SteamID, transferAttemptId);
-                if (!String.IsNullOrEmpty(stagedRecoveryPath))
+                if (markerCleared && !String.IsNullOrEmpty(stagedRecoveryPath))
                     PendingTransferMarker.DeleteStagedRecoveryBestEffort(stagedRecoveryPath);
                 DialogResult = DialogResult.OK;
                 Close();

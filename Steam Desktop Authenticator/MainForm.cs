@@ -416,8 +416,16 @@ namespace Steam_Desktop_Authenticator
 
             try
             {
+                await TimeAligner.GetSteamTimeAsync(cancellationToken);
                 await WaitForTradeConfirmationDispatchSlotAsync(cancellationToken);
-                return await action();
+                try
+                {
+                    return await action();
+                }
+                finally
+                {
+                    tradeConfirmationScheduler.RecordGlobalDispatch();
+                }
             }
             catch (Exception exception) when (IsTradeConfirmationTokenFailure(exception))
             {
@@ -425,8 +433,16 @@ namespace Steam_Desktop_Authenticator
                 // Refresh once and retry the same confirmation action before the
                 // coordinator classifies the session as requiring reauthentication.
                 await RefreshAndPersistAccessTokenAsync(account, cancellationToken);
+                await TimeAligner.GetSteamTimeAsync(cancellationToken);
                 await WaitForTradeConfirmationDispatchSlotAsync(cancellationToken);
-                return await action();
+                try
+                {
+                    return await action();
+                }
+                finally
+                {
+                    tradeConfirmationScheduler.RecordGlobalDispatch();
+                }
             }
         }
 
@@ -584,8 +600,16 @@ namespace Steam_Desktop_Authenticator
                             await RefreshAndPersistAccessTokenAsync(account, cancellationToken);
                             refreshAccessTokenBeforeRetry = false;
                         }
+                        await TimeAligner.GetSteamTimeAsync(cancellationToken);
                         await WaitForTradeConfirmationDispatchSlotAsync(cancellationToken);
-                        return await account.FetchConfirmationsAsync(cancellationToken);
+                        try
+                        {
+                            return await account.FetchConfirmationsAsync(cancellationToken);
+                        }
+                        finally
+                        {
+                            tradeConfirmationScheduler.RecordGlobalDispatch();
+                        }
                     };
 
                     if (nonBlocking)
@@ -1578,8 +1602,8 @@ namespace Steam_Desktop_Authenticator
                                 enforceTransferAttemptBase: true);
                             if (retryResult.Succeeded)
                             {
-                                PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId, resolvedStaged.TransferAttemptId);
-                                PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(resolvedStaged.SteamId);
+                                if (PendingTransferMarker.DeleteMarkerBestEffort(resolvedStaged.SteamId, resolvedStaged.TransferAttemptId))
+                                    PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(resolvedStaged.SteamId);
                                 OnTransferredAccountCommitted(candidate, effectivePassKey);
                             }
                             return retryResult;
