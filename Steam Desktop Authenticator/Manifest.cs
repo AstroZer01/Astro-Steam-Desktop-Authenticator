@@ -292,7 +292,11 @@ namespace Steam_Desktop_Authenticator
                             Path.Combine(maDir, SettingsBackupFilename),
                             "A stale manifest backup could not be removed after the settings were loaded.",
                             expectedCanonicalDir);
-                        SweepOrphanedCredentialStoresLocked(maDir, loadedManifest.CredentialsStoreFilename, expectedCanonicalDir);
+                        if (!File.Exists(Path.Combine(maDir, StorageJournalFilename)))
+                        {
+                            SweepOrphanedCredentialStoresLocked(maDir, loadedManifest.CredentialsStoreFilename, expectedCanonicalDir);
+                            SweepOrphanedAccountBackupsLocked(maDir, expectedCanonicalDir);
+                        }
                     }
 
                     _manifest = loadedManifest;
@@ -572,6 +576,7 @@ namespace Steam_Desktop_Authenticator
 
         internal Action OnBeforeVerifyPasskeyProofPublishForTest { get; set; }
         internal Action OnBeforeGetAllAccountsFileReadForTest { get; set; }
+        internal Action OnAfterReadAccountsFromSnapshotForTest { get; set; }
 
         internal static SteamGuardAccount DeserializeAccountJson(string json, JsonSerializerSettings settings)
         {
@@ -650,6 +655,7 @@ namespace Steam_Desktop_Authenticator
                 string credentialsStoreFilenameSnapshot;
                 long revisionBefore;
                 long mutationEpochBefore;
+                bool retainedCleanupJournalPresent;
                 lock (storageLock)
                 {
                     isEncrypted = this.Encrypted;
@@ -657,7 +663,7 @@ namespace Steam_Desktop_Authenticator
                         return Array.Empty<(SteamGuardAccount, long)>();
                     if (this.Entries == null)
                         throw new InvalidDataException("The account manifest contains an invalid entries list.");
-                    if (!TryRecoverPendingJournalBeforeReadLocked(maDir, manifestPath))
+                    if (!TryRecoverPendingJournalBeforeReadLocked(maDir, manifestPath, out retainedCleanupJournalPresent))
                     {
                         DiagnosticErrorLogger.Log(
                             "Authenticator storage",
@@ -685,12 +691,14 @@ namespace Steam_Desktop_Authenticator
                     credentialsStoreFilenameSnapshot,
                     passKey,
                     limit);
+                OnAfterReadAccountsFromSnapshotForTest?.Invoke();
 
                 lock (storageLock)
                 {
+                    bool unexpectedNewJournal = !retainedCleanupJournalPresent && File.Exists(journalPath);
                     if (this.storageRevision == revisionBefore &&
                         Interlocked.Read(ref storageMutationEpoch) == mutationEpochBefore &&
-                        !File.Exists(journalPath))
+                        !unexpectedNewJournal)
                     {
                         return accounts;
                     }
@@ -704,7 +712,7 @@ namespace Steam_Desktop_Authenticator
                     return Array.Empty<(SteamGuardAccount, long)>();
                 if (this.Entries == null)
                     throw new InvalidDataException("The account manifest contains an invalid entries list.");
-                if (!TryRecoverPendingJournalBeforeReadLocked(maDir, manifestPath))
+                if (!TryRecoverPendingJournalBeforeReadLocked(maDir, manifestPath, out _))
                 {
                     DiagnosticErrorLogger.Log(
                         "Authenticator storage",
@@ -1520,11 +1528,12 @@ namespace Steam_Desktop_Authenticator
                     long revisionBefore;
                     long mutationEpochBefore;
                     int expectedEntryCount;
+                    bool retainedCleanupJournalPresent;
                     lock (storageLock)
                     {
                         if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
                             return true;
-                        if (!TryRecoverPendingJournalBeforeReadLocked(maDir, manifestPath))
+                        if (!TryRecoverPendingJournalBeforeReadLocked(maDir, manifestPath, out retainedCleanupJournalPresent))
                             return false;
                         revisionBefore = this.storageRevision;
                         mutationEpochBefore = Interlocked.Read(ref storageMutationEpoch);
@@ -1541,9 +1550,10 @@ namespace Steam_Desktop_Authenticator
                         if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
                             return true;
 
+                        bool unexpectedNewJournal = !retainedCleanupJournalPresent && File.Exists(journalPath);
                         if (this.storageRevision != revisionBefore ||
                             Interlocked.Read(ref storageMutationEpoch) != mutationEpochBefore ||
-                            File.Exists(journalPath))
+                            unexpectedNewJournal)
                         {
                             // Storage mutated concurrently (e.g., passkey rotation, account update,
                             // or rolled-back in-place replacement); retry before publishing proof.
@@ -1557,7 +1567,22 @@ namespace Steam_Desktop_Authenticator
                     }
                 }
 
-                return false;
+                // Under sustained concurrent writes, hold storageLock for one consistent verification
+                // (mirroring GetAllAccountsWithRevisions) so a valid passkey is never falsely rejected.
+                lock (storageLock)
+                {
+                    if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
+                        return true;
+                    if (!TryRecoverPendingJournalBeforeReadLocked(maDir, manifestPath, out _))
+                        return false;
+
+                    var accounts = this.GetAllAccounts(passkey);
+                    bool valid = accounts != null && accounts.Length == this.Entries.Count;
+                    if (valid)
+                        RecordVerifiedPasskeyProofLocked(passkey);
+
+                    return valid;
+                }
             }
             catch (Exception ex)
             {
@@ -2008,6 +2033,7 @@ namespace Steam_Desktop_Authenticator
                     WriteAllTextAtomically(manifestFilename, contents, backupFilename, pinnedDir.CanonicalDirectoryPath);
                     if (retainedObsoleteFilenames.Count > 0)
                     {
+                        OnBeforeRebaseRetainedStorageTransactionForTest?.Invoke();
                         if (!RebaseRetainedStorageTransaction(maDir, contents, retainedObsoleteFilenames, pinnedDir.CanonicalDirectoryPath, pinnedDir.ValidatedRoot) ||
                             !RecoverPendingStorageTransaction(
                                 maDir,

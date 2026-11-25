@@ -33,6 +33,7 @@ namespace Steam_Desktop_Authenticator
         private const uint FileAttributeDirectory = 0x00000010;
         private const uint FileAttributeReparsePoint = 0x00000400;
         private const uint FileNameNormalized = 0x0;
+        private const int FileRenameInfoClass = 3;
         private const int FileDispositionInfoClass = 4;
         private const int ErrorFileNotFound = 2;
         private const int ErrorPathNotFound = 3;
@@ -49,6 +50,7 @@ namespace Steam_Desktop_Authenticator
 
         internal static long DirectoryValidationCount => Interlocked.Read(ref directoryValidationCount);
         internal static long CanonicalDirectoryVerificationCount => Interlocked.Read(ref canonicalDirectoryVerificationCount);
+        internal static Action<string> OnBeforeFlushReplacementForTest { get; set; }
 
         internal sealed class PinnedStorageDirectory : IDisposable
         {
@@ -128,7 +130,7 @@ namespace Steam_Desktop_Authenticator
                 FileIndex = fileIndex;
             }
 
-            public bool IsValid => VolumeSerialNumber != 0 || FileIndex != 0;
+            public bool IsValid => VolumeSerialNumber != 0 && FileIndex != 0;
 
             public string ToToken()
             {
@@ -199,11 +201,14 @@ namespace Steam_Desktop_Authenticator
                 if (replacementBytes == null)
                     throw new ArgumentNullException(nameof(replacementBytes));
 
+                // Mark overwritten before mutating any bytes so a mid-write, truncate, or flush
+                // failure always forces verified restoration from backup during rollback.
+                Overwritten = true;
                 targetStream.Seek(0, SeekOrigin.Begin);
                 targetStream.Write(replacementBytes, 0, replacementBytes.Length);
                 targetStream.SetLength(replacementBytes.Length);
+                OnBeforeFlushReplacementForTest?.Invoke(TargetPath);
                 targetStream.Flush(true);
-                Overwritten = true;
             }
 
             public void RestoreFromVerifiedBackup(string expectedCanonicalDirectory)
@@ -239,7 +244,7 @@ namespace Steam_Desktop_Authenticator
 
         internal sealed class StagedTempFile : IDisposable
         {
-            private readonly string expectedCanonicalDirectory;
+            private FileStream tempStream;
             private bool disposed;
 
             public string TargetPath { get; }
@@ -249,41 +254,37 @@ namespace Steam_Desktop_Authenticator
             public bool Published { get; private set; }
 
             internal StagedTempFile(
+                FileStream tempStream,
                 string targetPath,
                 string tempPath,
                 string contentHash,
-                StorageFileIdentity fileIdentity,
-                string expectedCanonicalDirectory)
+                StorageFileIdentity fileIdentity)
             {
+                this.tempStream = tempStream;
                 TargetPath = targetPath;
                 TempPath = tempPath;
                 ContentHash = contentHash;
                 FileIdentity = fileIdentity;
-                this.expectedCanonicalDirectory = expectedCanonicalDirectory;
             }
 
             public void PublishCreateNew(PinnedStorageDirectory pinnedDir)
             {
-                if (disposed)
+                if (disposed || tempStream == null)
                     throw new ObjectDisposedException(nameof(StagedTempFile));
                 if (pinnedDir == null)
                     throw new ArgumentNullException(nameof(pinnedDir));
 
                 pinnedDir.VerifyStillPinned();
-                string win32TempPath = ToWin32OpenPath(Path.GetFullPath(TempPath));
-                string win32TargetPath = ToWin32OpenPath(Path.GetFullPath(TargetPath));
 
-                // Passing dwFlags = 0 (without MOVEFILE_REPLACE_EXISTING) fails atomically if
-                // TargetPath already exists and preserves the staged file's VolumeSerialNumber/FileIndex.
-                if (!MoveFileExW(win32TempPath, win32TargetPath, 0))
-                {
-                    int error = Marshal.GetLastWin32Error();
-                    throw new IOException(
-                        "The staged authenticator file could not be published to its target path.",
-                        error != 0 ? new Win32Exception(error) : null);
-                }
-
+                // Bind publication directly to the still-open exclusive staged handle using
+                // SetFileInformationByHandle(FileRenameInfo) with ReplaceIfExists = 0 while
+                // pinnedDir holds the parent directory pinned, preventing source-path or
+                // parent-directory swaps and preserving the staged file's VolumeSerialNumber/FileIndex.
+                RenameHandleCreateNew(tempStream.SafeFileHandle, TargetPath);
                 Published = true;
+
+                FileStream streamToClose = Interlocked.Exchange(ref tempStream, null);
+                streamToClose?.Dispose();
             }
 
             public void Dispose()
@@ -292,16 +293,29 @@ namespace Steam_Desktop_Authenticator
                     return;
                 disposed = true;
 
-                if (!Published && !String.IsNullOrWhiteSpace(TempPath))
+                FileStream streamToClose = Interlocked.Exchange(ref tempStream, null);
+                if (streamToClose == null)
+                    return;
+
+                try
                 {
-                    try
+                    if (!Published)
                     {
-                        DeleteRegularFileWithinCanonicalDirectory(TempPath, expectedCanonicalDirectory);
+                        FileDispositionInfo disposition = new FileDispositionInfo { DeleteFile = 1 };
+                        SetFileInformationByHandle(
+                            streamToClose.SafeFileHandle,
+                            FileDispositionInfoClass,
+                            ref disposition,
+                            (uint)Marshal.SizeOf<FileDispositionInfo>());
                     }
-                    catch
-                    {
-                        // Best-effort cleanup of unreferenced staged temp file.
-                    }
+                }
+                catch
+                {
+                    // Best-effort handle-bound unlink of unreferenced staged temp file.
+                }
+                finally
+                {
+                    streamToClose.Dispose();
                 }
             }
         }
@@ -354,12 +368,13 @@ namespace Steam_Desktop_Authenticator
             ref FileDispositionInfo lpFileInformation,
             uint dwBufferSize);
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool MoveFileExW(
-            string lpExistingFileName,
-            string lpNewFileName,
-            uint dwFlags);
+        private static extern bool SetFileInformationByHandle(
+            SafeFileHandle hFile,
+            int fileInformationClass,
+            IntPtr lpFileInformation,
+            uint dwBufferSize);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
         private static extern uint GetFinalPathNameByHandleW(
@@ -803,9 +818,11 @@ namespace Steam_Desktop_Authenticator
             string tempFullPath = targetFullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
             string win32TempPath = ToWin32OpenPath(tempFullPath);
 
+            // Hold an exclusive handle with DELETE access across write, flush, and handle-bound
+            // FileRenameInfo publication so no external process can swap the temp file path.
             SafeFileHandle tempHandle = CreateFileW(
                 win32TempPath,
-                GenericWrite | FileReadAttributes,
+                GenericWrite | FileReadAttributes | DeleteAccess,
                 FileShareNone,
                 IntPtr.Zero,
                 CreateNew,
@@ -821,7 +838,7 @@ namespace Steam_Desktop_Authenticator
                     error != 0 ? new Win32Exception(error) : null);
             }
 
-            bool handleOwnedByStream = false;
+            FileStream tempStream = null;
             bool tempVerified = false;
             try
             {
@@ -847,31 +864,80 @@ namespace Steam_Desktop_Authenticator
                 using (SHA256 sha256 = SHA256.Create())
                     contentHash = Convert.ToBase64String(sha256.ComputeHash(utf8Bytes));
 
-                using (FileStream stream = new FileStream(tempHandle, FileAccess.Write, 81920, isAsync: false))
-                {
-                    handleOwnedByStream = true;
-                    stream.Write(utf8Bytes, 0, utf8Bytes.Length);
-                    stream.Flush(true);
-                }
+                tempStream = new FileStream(tempHandle, FileAccess.Write, 81920, isAsync: false);
+                tempHandle = null;
+                tempStream.Write(utf8Bytes, 0, utf8Bytes.Length);
+                tempStream.Flush(true);
 
-                return new StagedTempFile(targetFullPath, tempFullPath, contentHash, identity, expectedCanonicalDirectory);
+                return new StagedTempFile(tempStream, targetFullPath, tempFullPath, contentHash, identity);
             }
             catch
             {
-                if (!handleOwnedByStream)
-                    tempHandle.Dispose();
                 if (tempVerified)
                 {
                     try
                     {
-                        DeleteRegularFileWithinCanonicalDirectory(tempFullPath, expectedCanonicalDirectory);
+                        SafeFileHandle handleToDelete = tempStream != null ? tempStream.SafeFileHandle : tempHandle;
+                        if (handleToDelete != null && !handleToDelete.IsInvalid && !handleToDelete.IsClosed)
+                        {
+                            FileDispositionInfo disposition = new FileDispositionInfo { DeleteFile = 1 };
+                            SetFileInformationByHandle(
+                                handleToDelete,
+                                FileDispositionInfoClass,
+                                ref disposition,
+                                (uint)Marshal.SizeOf<FileDispositionInfo>());
+                        }
                     }
                     catch
                     {
-                        // Best-effort cleanup of failed temp file.
+                        // Best-effort handle-bound cleanup of failed temp file.
                     }
                 }
+                tempStream?.Dispose();
+                tempHandle?.Dispose();
                 throw;
+            }
+        }
+
+        private static void RenameHandleCreateNew(
+            SafeFileHandle handle,
+            string targetFullPath)
+        {
+            if (String.IsNullOrWhiteSpace(targetFullPath))
+                throw new InvalidDataException("The target storage file path is invalid.");
+
+            string win32TargetPath = ToWin32OpenPath(Path.GetFullPath(targetFullPath));
+            byte[] nameBytes = Encoding.Unicode.GetBytes(win32TargetPath);
+            int rootDirectoryOffset = IntPtr.Size;
+            int fileNameLengthOffset = IntPtr.Size * 2;
+            int fileNameOffset = fileNameLengthOffset + sizeof(uint);
+            int totalSize = fileNameOffset + nameBytes.Length + 2;
+
+            IntPtr buffer = Marshal.AllocHGlobal(totalSize);
+            try
+            {
+                for (int i = 0; i < totalSize; i++)
+                    Marshal.WriteByte(buffer, i, 0);
+
+                // ReplaceIfExists = 0 (strictly fail if destination already exists);
+                // Win32 SetFileInformationByHandle(FileRenameInfo) requires RootDirectory = NULL
+                // with a full destination path.
+                Marshal.WriteByte(buffer, 0, 0);
+                Marshal.WriteIntPtr(buffer, rootDirectoryOffset, IntPtr.Zero);
+                Marshal.WriteInt32(buffer, fileNameLengthOffset, nameBytes.Length);
+                Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, fileNameOffset), nameBytes.Length);
+
+                if (!SetFileInformationByHandle(handle, FileRenameInfoClass, buffer, (uint)totalSize))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    throw new IOException(
+                        "The staged authenticator file could not be published to its target path.",
+                        error != 0 ? new Win32Exception(error) : null);
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
             }
         }
 
@@ -881,7 +947,8 @@ namespace Steam_Desktop_Authenticator
             string expectedOriginalHash,
             string expectedReplacementHash,
             StorageFileIdentity? expectedTargetIdentity,
-            string expectedCanonicalDirectory)
+            string expectedCanonicalDirectory,
+            Func<Stream, bool> isIntactAccountFile = null)
         {
             if (String.IsNullOrWhiteSpace(expectedCanonicalDirectory))
                 throw new InvalidDataException("The account-data directory canonical path could not be verified.");
@@ -942,7 +1009,27 @@ namespace Steam_Desktop_Authenticator
                                 throw new InvalidDataException("A live authenticator file identity did not match the uncommitted replacement recorded in the storage journal.");
 
                             if (!String.Equals(targetHash, expectedReplacementHash, StringComparison.Ordinal))
-                                throw new InvalidDataException("A live authenticator file did not match the uncommitted replacement recorded in the storage journal.");
+                            {
+                                // Allow recovery of an interrupted partial/corrupt in-place write when
+                                // the exact locked target file identity matches and the on-disk bytes
+                                // are NOT a valid intact account file (never clobbering intact live data).
+                                bool isRecoverablePartialWrite = false;
+                                if (expectedTargetIdentity.HasValue && actualIdentity.Equals(expectedTargetIdentity.Value))
+                                {
+                                    if (targetStream.Length == 0)
+                                    {
+                                        isRecoverablePartialWrite = true;
+                                    }
+                                    else if (isIntactAccountFile != null)
+                                    {
+                                        targetStream.Seek(0, SeekOrigin.Begin);
+                                        isRecoverablePartialWrite = !isIntactAccountFile(targetStream);
+                                    }
+                                }
+
+                                if (!isRecoverablePartialWrite)
+                                    throw new InvalidDataException("A live authenticator file did not match the uncommitted replacement recorded in the storage journal.");
+                            }
 
                             backupStream.Seek(0, SeekOrigin.Begin);
                             targetStream.Seek(0, SeekOrigin.Begin);
@@ -981,18 +1068,17 @@ namespace Steam_Desktop_Authenticator
         internal static void VerifyFileMatchesOriginalHash(
             string filePath,
             string expectedOriginalHash,
-            StorageFileIdentity? expectedTargetIdentity,
             string expectedCanonicalDirectory)
         {
             using (FileStream stream = OpenVerifiedRegularFileForRead(
                 filePath,
                 expectedCanonicalDirectory,
                 requireSingleLink: true,
-                out ByHandleFileInformation fileInfo))
+                out _))
             {
-                if (expectedTargetIdentity.HasValue && !GetFileIdentity(fileInfo).Equals(expectedTargetIdentity.Value))
-                    throw new InvalidDataException("A replaced authenticator file identity could not be verified as original because its backup is missing.");
-
+                // Do not require the original FileIndex here: if an earlier interrupted recovery
+                // recreated a missing target from backup and deleted the backup before journal
+                // cleanup, the recreated file has a new FileIndex while matching OriginalHash.
                 string actualHash = ComputeStreamSha256(stream);
                 if (!String.Equals(actualHash, expectedOriginalHash, StringComparison.Ordinal))
                     throw new InvalidDataException("A replaced authenticator file could not be verified as original because its backup is missing.");

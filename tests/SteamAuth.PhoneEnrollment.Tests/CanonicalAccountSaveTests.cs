@@ -1095,6 +1095,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             using ManualResetEventSlim readerEnteredFileRead = new ManualResetEventSlim(false);
             using ManualResetEventSlim writerReplacedFile = new ManualResetEventSlim(false);
+            using ManualResetEventSlim readerFinishedFirstReadAttempt = new ManualResetEventSlim(false);
             using ManualResetEventSlim allowWriterToFailAndRollback = new ManualResetEventSlim(false);
             int readerHookCount = 0;
 
@@ -1104,6 +1105,14 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 {
                     readerEnteredFileRead.Set();
                     Assert.True(writerReplacedFile.Wait(TimeSpan.FromSeconds(10)));
+                }
+            };
+
+            manifest.OnAfterReadAccountsFromSnapshotForTest = () =>
+            {
+                if (Volatile.Read(ref readerHookCount) == 1)
+                {
+                    readerFinishedFirstReadAttempt.Set();
                 }
             };
 
@@ -1130,9 +1139,10 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 });
 
                 Assert.True(writerReplacedFile.Wait(TimeSpan.FromSeconds(10)));
-                // Give the reader a moment to attempt reading the replaced file while the writer is paused
-                // before letting the writer fail manifest commit and roll back.
-                await Task.Delay(50);
+                // Deterministically wait until the reader's first file-read attempt finishes
+                // while the writer is paused after replacing the file, then release the writer
+                // to fail manifest commit and roll back.
+                Assert.True(readerFinishedFirstReadAttempt.Wait(TimeSpan.FromSeconds(10)));
                 allowWriterToFailAndRollback.Set();
 
                 StorageResult writeResult = await writerTask;
@@ -1147,6 +1157,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             finally
             {
                 manifest.OnBeforeGetAllAccountsFileReadForTest = null;
+                manifest.OnAfterReadAccountsFromSnapshotForTest = null;
                 Manifest.OnAfterReplaceFilesBeforeManifestCommitForTest = null;
             }
         }
@@ -1592,10 +1603,324 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Equal("PassOne!123", afterMidBatchFail.GetSavedCredentialRecord(firstId, "vault-key-2")?.Password);
         }
 
+        [Fact]
+        public void SaveAccount_MidWriteFlushFailureRestoresOriginalBytesAndNeverDeletesBackupWithoutRestoring()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong accountId = 76561198000022000UL;
+            SteamGuardAccount account = CreateAccount(accountId);
+            account.Session.AccessToken = "original-before-midwrite-fail";
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string canonicalPath = Path.Combine(maDirectory, Manifest.GetCanonicalMaFileFilename(accountId));
+            string originalContents = File.ReadAllText(canonicalPath);
+
+            // Simulate an I/O error inside OverwriteAndFlush AFTER bytes have been written and
+            // truncated on the target stream, before Flush(true) completes.
+            StoragePathGuard.OnBeforeFlushReplacementForTest = path =>
+            {
+                throw new IOException("Simulated disk flush failure after partial in-place write.");
+            };
+            try
+            {
+                account.Session.AccessToken = "corrupted-midwrite-update";
+                StorageResult result = manifest.SaveAccount(account, false);
+                Assert.False(result.Succeeded);
+            }
+            finally
+            {
+                StoragePathGuard.OnBeforeFlushReplacementForTest = null;
+            }
+
+            Assert.Equal(originalContents, File.ReadAllText(canonicalPath));
+            Assert.Empty(Directory.EnumerateFiles(maDirectory, "*.bak"));
+            Assert.False(File.Exists(Path.Combine(maDirectory, ".asda-storage-transaction.json")));
+            Assert.Equal("original-before-midwrite-fail", Assert.Single(Manifest.GetManifest(true).GetAllAccounts()).Session.AccessToken);
+        }
+
+        [Fact]
+        public void StartupRecovery_RecoversPartialInterruptedWriteAndRecreatedMissingTargetAcrossCrash()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong accountId = 76561198000023000UL;
+            SteamGuardAccount account = CreateAccount(accountId);
+            account.Session.AccessToken = "intact-original-token";
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string canonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDirectory);
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string canonicalFilename = Manifest.GetCanonicalMaFileFilename(accountId);
+            string canonicalPath = Path.Combine(maDirectory, canonicalFilename);
+            string backupFilename = $".mafile.{accountId}.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bak";
+            string backupPath = Path.Combine(maDirectory, backupFilename);
+
+            string manifestContents = File.ReadAllText(manifestPath);
+            string originalContents = File.ReadAllText(canonicalPath);
+
+            // 1. Simulate a power-loss partial write: exact same FileIndex (in-place overwrite),
+            //    truncated corrupt JSON on disk, valid backup matching original_hash.
+            File.WriteAllText(backupPath, originalContents);
+            using (FileStream fs = new FileStream(canonicalPath, FileMode.Open, FileAccess.Write, FileShare.None))
+            {
+                byte[] partialBytes = Encoding.UTF8.GetBytes("{\"shared_secret\":\"truncated-mid-write");
+                fs.Write(partialBytes, 0, partialBytes.Length);
+                fs.SetLength(partialBytes.Length);
+                fs.Flush(true);
+            }
+            string sameTargetIdentity = StoragePathGuard.GetFileIdentityToken(canonicalPath, canonicalDir);
+
+            JObject partialWriteJournal = new JObject
+            {
+                ["journal_version"] = 2,
+                ["manifest_hash"] = ComputeContentHash(manifestContents + "-uncommitted-partial"),
+                ["previous_manifest_hash"] = ComputeContentHash(manifestContents),
+                ["created_filenames"] = new JArray(),
+                ["replaced_files"] = new JArray(new JObject
+                {
+                    ["filename"] = canonicalFilename,
+                    ["backup_filename"] = backupFilename,
+                    ["original_hash"] = ComputeContentHash(originalContents),
+                    ["replacement_hash"] = ComputeContentHash("{\"full\":\"never-finished\"}"),
+                    ["target_file_identity"] = sameTargetIdentity
+                }),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, partialWriteJournal.ToString(Formatting.None));
+
+            Manifest recoveredPartial = Manifest.GetManifest(true);
+            Assert.Equal("intact-original-token", Assert.Single(recoveredPartial.GetAllAccounts()).Session.AccessToken);
+            Assert.False(File.Exists(backupPath));
+            Assert.False(File.Exists(journalPath));
+
+            // 2. Simulate crash after missing-target recreation (new FileIndex) and backup deletion,
+            //    before journal removal: next startup must accept the restored file matching original_hash.
+            string oldIdentity = StoragePathGuard.GetFileIdentityToken(canonicalPath, canonicalDir);
+            File.Delete(canonicalPath);
+            string tempSwap = Path.Combine(maDirectory, "recreate-new-index.tmp");
+            File.WriteAllText(tempSwap, originalContents);
+            File.Move(tempSwap, canonicalPath);
+            string newIdentity = StoragePathGuard.GetFileIdentityToken(canonicalPath, canonicalDir);
+            // Write journal referencing oldIdentity while backup is already gone and canonicalPath has originalContents.
+            JObject postRecreateJournal = new JObject
+            {
+                ["journal_version"] = 2,
+                ["manifest_hash"] = ComputeContentHash(manifestContents + "-uncommitted-recreate"),
+                ["previous_manifest_hash"] = ComputeContentHash(manifestContents),
+                ["created_filenames"] = new JArray(),
+                ["replaced_files"] = new JArray(new JObject
+                {
+                    ["filename"] = canonicalFilename,
+                    ["backup_filename"] = backupFilename,
+                    ["original_hash"] = ComputeContentHash(originalContents),
+                    ["replacement_hash"] = ComputeContentHash("{\"full\":\"replacement\"}"),
+                    ["target_file_identity"] = oldIdentity == newIdentity ? "00000001:0000000000000001" : oldIdentity
+                }),
+                ["obsolete_filenames"] = new JArray(),
+                ["backup_filename"] = null
+            };
+            File.WriteAllText(journalPath, postRecreateJournal.ToString(Formatting.None));
+
+            Manifest recoveredPostRecreate = Manifest.GetManifest(true);
+            Assert.Equal("intact-original-token", Assert.Single(recoveredPostRecreate.GetAllAccounts()).Session.AccessToken);
+            Assert.False(File.Exists(journalPath));
+        }
+
+        [Fact]
+        public void VerifyPasskey_AndEncryptedOperationsSucceedWhileRetainedObsoleteJournalIsOnDisk()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000024000UL;
+            ulong secondId = 76561198000024001UL;
+            ulong thirdId = 76561198000024002UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), true, "retained-key-1").Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+
+            // Import an unmanaged file while locking the source file so a retained-obsolete-only
+            // journal remains on disk after commit.
+            string lockedSourceFilename = "locked-obsolete-source.maFile";
+            string lockedSourcePath = Path.Combine(maDirectory, lockedSourceFilename);
+            File.WriteAllText(lockedSourcePath, JsonConvert.SerializeObject(CreateAccount(secondId)));
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Single(candidates);
+
+            using (new FileStream(lockedSourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult importResult = manifest.ImportUnmanagedMaFiles(candidates, "retained-key-1");
+                Assert.True(importResult.Succeeded);
+                Assert.True(importResult.ObsoleteCleanupPending);
+                Assert.True(File.Exists(journalPath));
+
+                // VerifyPasskey, GetAllAccounts, ChangeEncryptionKey, and another ImportUnmanagedMaFiles
+                // must ALL succeed while the retained-obsolete cleanup journal stays on disk.
+                Manifest freshInstance = Manifest.GetManifest(true);
+                Assert.True(File.Exists(journalPath));
+                Assert.True(freshInstance.VerifyPasskey("retained-key-1"));
+                Assert.Equal(2, freshInstance.GetAllAccounts("retained-key-1").Length);
+
+                StorageResult rotateResult = freshInstance.ChangeEncryptionKey("retained-key-1", "retained-key-2");
+                Assert.True(rotateResult.Succeeded);
+                Assert.True(rotateResult.ObsoleteCleanupPending);
+                Assert.True(freshInstance.VerifyPasskey("retained-key-2"));
+
+                string thirdSourcePath = Path.Combine(maDirectory, "third-unlocked.maFile");
+                File.WriteAllText(thirdSourcePath, JsonConvert.SerializeObject(CreateAccount(thirdId)));
+                var thirdCandidates = freshInstance.FindUnmanagedMaFiles();
+                Assert.Single(thirdCandidates);
+                StorageResult thirdImport = freshInstance.ImportUnmanagedMaFiles(thirdCandidates, "retained-key-2");
+                Assert.True(thirdImport.Succeeded);
+                Assert.Equal(3, freshInstance.GetAllAccounts("retained-key-2").Length);
+            }
+
+            // Once unlocked, startup cleans up the retained obsolete file and removes the journal.
+            Manifest finalReload = Manifest.GetManifest(true);
+            Assert.False(File.Exists(lockedSourcePath));
+            Assert.False(File.Exists(journalPath));
+            Assert.Equal(3, finalReload.GetAllAccounts("retained-key-2").Length);
+        }
+
+        [Fact]
+        public void CommitStorageTransaction_PreservesPreviousCredentialStoreWhenManifestBackupLockedAndSweepsOrphanedAccountBackups()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong accountId = 76561198000025000UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(accountId), true, "cred-keep-v1").Succeeded);
+            Assert.True(manifest.SetAllowSavedSteamPasswords(true).Succeeded);
+            Assert.True(manifest.SaveAccountPassword(accountId, "KeepMeSafe!99", "cred-keep-v1").Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
+            string oldCredFilename = manifest.CredentialsStoreFilename;
+            string oldCredPath = Path.Combine(maDirectory, oldCredFilename);
+            Assert.True(File.Exists(oldCredPath));
+
+            // 1. Block deletion of .manifest.<guid>.bak during key rotation (which creates a new credential store).
+            //    SweepOrphanedCredentialStoresLocked must NOT delete oldCredPath while .manifest.<guid>.bak remains.
+            Manifest.BeforeDeleteFileForTesting = path => !Path.GetFileName(path).StartsWith(".manifest.", StringComparison.OrdinalIgnoreCase);
+            try
+            {
+                StorageResult rotateResult = manifest.ChangeEncryptionKey("cred-keep-v1", "cred-keep-v2");
+                Assert.True(rotateResult.Succeeded);
+                Assert.True(rotateResult.ObsoleteCleanupPending);
+            }
+            finally
+            {
+                Manifest.BeforeDeleteFileForTesting = null;
+            }
+
+            Assert.True(File.Exists(oldCredPath));
+            Assert.Single(Directory.EnumerateFiles(maDirectory, ".manifest.*.bak"));
+
+            // If manifest.json now goes missing, startup restores the old manifest AND the old credential store still works.
+            File.Delete(manifestPath);
+            Manifest restored = Manifest.GetManifest(true);
+            Assert.Equal(oldCredFilename, restored.CredentialsStoreFilename);
+            Assert.Equal("KeepMeSafe!99", restored.GetSavedCredentialRecord(accountId, "cred-keep-v1")?.Password);
+
+            // 2. Orphaned pre-journal .mafile.<steamId>.<guid>.bak (from a crash before journal write)
+            //    is swept cleanly on subsequent encryption setup, and surfaces ObsoleteCleanupPending if locked.
+            Assert.True(restored.ChangeEncryptionKey("cred-keep-v1", null).Succeeded);
+            string orphanedBackupFilename = $".mafile.{accountId}.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bak";
+            string orphanedBackupPath = Path.Combine(maDirectory, orphanedBackupFilename);
+            File.WriteAllText(orphanedBackupPath, "{\"plaintext\":\"orphaned-pre-journal-backup\"}");
+
+            using (new FileStream(orphanedBackupPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult encryptWithLockedOrphan = restored.ChangeEncryptionKey(null, "orphan-key-1");
+                Assert.True(encryptWithLockedOrphan.Succeeded);
+                Assert.True(encryptWithLockedOrphan.ObsoleteCleanupPending);
+                Assert.True(File.Exists(orphanedBackupPath));
+            }
+
+            // Once unlocked, next startup or save sweeps the orphaned plaintext backup cleanly.
+            Manifest.GetManifest(true);
+            Assert.False(File.Exists(orphanedBackupPath));
+        }
+
+        [Fact]
+        public void SaveWithResult_RebaseRetainedStorageTransactionDirectlyRejectsDuplicateKeysAndInjectedEntries()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000026000UL;
+            ulong secondId = 76561198000026001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string lockedSourceFilename = "rebase-locked-obsolete.maFile";
+            string lockedSourcePath = Path.Combine(maDirectory, lockedSourceFilename);
+            File.WriteAllText(lockedSourcePath, JsonConvert.SerializeObject(CreateAccount(secondId)));
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Single(candidates);
+
+            using (new FileStream(lockedSourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Assert.True(manifest.ImportUnmanagedMaFiles(candidates).Succeeded);
+                Assert.True(File.Exists(journalPath));
+                string validRetainedJournal = File.ReadAllText(journalPath);
+
+                // 1. Tamper with the journal right BEFORE RebaseRetainedStorageTransaction (after
+                //    RecoverPendingStorageTransaction has already succeeded) to inject a duplicate key.
+                bool rebaseHookHit = false;
+                Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = () =>
+                {
+                    rebaseHookHit = true;
+                    string hash = ComputeContentHash("rebase-dup");
+                    File.WriteAllText(
+                        journalPath,
+                        $"{{\"journal_version\":2,\"manifest_hash\":\"{hash}\",\"MANIFEST_HASH\":\"{hash}\",\"created_filenames\":[],\"obsolete_filenames\":[],\"retained_obsolete_filenames\":[\"{lockedSourceFilename}\"],\"backup_filename\":null}}");
+                };
+                try
+                {
+                    manifest.MinimizeToTray = !manifest.MinimizeToTray;
+                    StorageResult dupResult = manifest.SaveWithResult();
+                    Assert.True(rebaseHookHit);
+                    Assert.False(dupResult.Succeeded);
+                }
+                finally
+                {
+                    Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = null;
+                }
+
+                // Restore valid journal matching current manifest so recovery passes again, then inject
+                // an extra unvalidated filename right before RebaseRetainedStorageTransaction.
+                JObject validObj = JObject.Parse(validRetainedJournal);
+                validObj["manifest_hash"] = ComputeContentHash(File.ReadAllText(Path.Combine(maDirectory, "manifest.json")));
+                File.WriteAllText(journalPath, validObj.ToString(Formatting.None));
+
+                rebaseHookHit = false;
+                Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = () =>
+                {
+                    rebaseHookHit = true;
+                    JObject injected = JObject.Parse(File.ReadAllText(journalPath));
+                    ((JArray)injected["retained_obsolete_filenames"]).Add("injected-extra.maFile");
+                    File.WriteAllText(journalPath, injected.ToString(Formatting.None));
+                };
+                try
+                {
+                    manifest.CheckForUpdates = !manifest.CheckForUpdates;
+                    StorageResult injectedResult = manifest.SaveWithResult();
+                    Assert.True(rebaseHookHit);
+                    Assert.False(injectedResult.Succeeded);
+                }
+                finally
+                {
+                    Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = null;
+                }
+            }
+        }
+
         public void Dispose()
         {
             Manifest.BeforeDeleteFileForTesting = null;
             Manifest.OnAfterReplaceFilesBeforeManifestCommitForTest = null;
+            Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = null;
+            StoragePathGuard.OnBeforeFlushReplacementForTest = null;
             Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDataDirectory);
             if (Directory.Exists(dataDirectory))
                 Directory.Delete(dataDirectory, true);

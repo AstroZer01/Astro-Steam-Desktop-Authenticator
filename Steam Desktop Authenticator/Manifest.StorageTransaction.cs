@@ -30,6 +30,7 @@ namespace Steam_Desktop_Authenticator
         internal static long StorageTransactionCommitCount => Interlocked.Read(ref storageTransactionCommitCount);
         internal static Func<string, bool> BeforeDeleteFileForTesting { get; set; }
         internal static Action OnAfterReplaceFilesBeforeManifestCommitForTest { get; set; }
+        internal static Action OnBeforeRebaseRetainedStorageTransactionForTest { get; set; }
 
         private enum StagedAccountFileMode
         {
@@ -54,14 +55,17 @@ namespace Steam_Desktop_Authenticator
         {
             public ManifestRecoveryOwnership(
                 IReadOnlyDictionary<string, ManifestEntry> accountEntries,
-                HashSet<string> allLiveFilenames)
+                HashSet<string> allLiveFilenames,
+                bool encrypted)
             {
                 AccountEntries = accountEntries;
                 AllLiveFilenames = allLiveFilenames;
+                Encrypted = encrypted;
             }
 
             public IReadOnlyDictionary<string, ManifestEntry> AccountEntries { get; }
             public HashSet<string> AllLiveFilenames { get; }
+            public bool Encrypted { get; }
         }
 
         private static AccountFileTargetPlan PlanAccountFileTarget(
@@ -104,8 +108,12 @@ namespace Steam_Desktop_Authenticator
             return new AccountFileTargetPlan(StagedAccountFileMode.CreateFallbackGuid, fallbackFilename);
         }
 
-        private static bool TryRecoverPendingJournalBeforeReadLocked(string maDir, string manifestPath)
+        private static bool TryRecoverPendingJournalBeforeReadLocked(
+            string maDir,
+            string manifestPath,
+            out bool retainedCleanupJournalPresent)
         {
+            retainedCleanupJournalPresent = false;
             string journalPath = Path.Combine(maDir, StorageJournalFilename);
             if (!File.Exists(journalPath))
                 return true;
@@ -115,11 +123,15 @@ namespace Steam_Desktop_Authenticator
                 if (pinnedDir == null)
                     return true;
 
-                return RecoverPendingStorageTransaction(
+                List<string> retainedObsolete = new List<string>();
+                bool recovered = RecoverPendingStorageTransaction(
                     maDir,
                     manifestPath,
-                    expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath,
-                    validatedRoot: validatedRoot);
+                    retainedObsolete,
+                    pinnedDir.CanonicalDirectoryPath,
+                    validatedRoot);
+                retainedCleanupJournalPresent = recovered && retainedObsolete.Count > 0 && File.Exists(journalPath);
+                return recovered;
             }
         }
 
@@ -413,12 +425,17 @@ namespace Steam_Desktop_Authenticator
                             obsoleteFilenames.Concat(trackedRetainedObsoleteFilenames),
                             "The replaced authenticator file could not be removed after the manifest was committed.",
                             canonicalDir);
-                    if (obsoleteDeleted)
-                    {
+                    bool journalDeleted = obsoleteDeleted &&
                         DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed.", canonicalDir);
+                    bool orphanedBackupsSwept = true;
+                    if (journalDeleted)
+                    {
+                        // Only sweep orphaned credential stores and pre-journal account backups
+                        // once the manifest backup and transaction journal are completely gone.
+                        SweepOrphanedCredentialStoresLocked(maDir, stagedManifest.CredentialsStoreFilename, canonicalDir);
+                        orphanedBackupsSwept = SweepOrphanedAccountBackupsLocked(maDir, canonicalDir);
                     }
-                    SweepOrphanedCredentialStoresLocked(maDir, stagedManifest.CredentialsStoreFilename, canonicalDir);
-                    return StorageResult.Success(obsoleteCleanupPending: !obsoleteDeleted);
+                    return StorageResult.Success(obsoleteCleanupPending: !(journalDeleted && orphanedBackupsSwept));
                 }
                 catch (JsonException ex)
                 {
@@ -929,6 +946,49 @@ namespace Steam_Desktop_Authenticator
                         manifestOwnership,
                         manifestCommitted);
 
+                    // Fast path for a committed retained-obsolete-only cleanup journal:
+                    // do not bump storageMutationEpoch when locked obsolete files remain unchanged
+                    // so concurrent readers and VerifyPasskey do not spin or fail.
+                    bool isRetainedCleanupOnlyJournal =
+                        manifestCommitted &&
+                        !needsManifestRestore &&
+                        isVersion2 &&
+                        backupFilename == null &&
+                        created.Count == 0 &&
+                        (journal.CreatedFileHashes == null || journal.CreatedFileHashes.Count == 0) &&
+                        (journal.CreatedFileIdentities == null || journal.CreatedFileIdentities.Count == 0) &&
+                        replaced.Count == 0 &&
+                        obsolete.Count == 0 &&
+                        String.IsNullOrWhiteSpace(journal.PreviousManifestHash) &&
+                        retainedObsolete.Count > 0;
+
+                    if (isRetainedCleanupOnlyJournal)
+                    {
+                        if (!DeleteFilesBestEffort(maDir, retainedObsolete, "An obsolete authenticator file could not be removed during storage recovery.", canonicalDir))
+                        {
+                            List<string> remainingObsolete = retainedObsolete
+                                .Where(filename => Path.Exists(Path.Combine(maDir, filename)))
+                                .ToList();
+                            if (remainingObsolete.Count > 0)
+                            {
+                                if (remainingObsolete.Count != retainedObsolete.Count)
+                                {
+                                    journal.RetainedObsoleteFilenames = remainingObsolete;
+                                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
+                                }
+                                if (retainedObsoleteFilenames != null)
+                                {
+                                    foreach (string filename in remainingObsolete)
+                                        retainedObsoleteFilenames.Add(filename);
+                                }
+                                return true;
+                            }
+                        }
+
+                        bool retainedJournalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.", canonicalDir);
+                        return retainedJournalDeleted && !File.Exists(journalFilename);
+                    }
+
                     Interlocked.Increment(ref storageMutationEpoch);
                     try
                     {
@@ -962,33 +1022,16 @@ namespace Steam_Desktop_Authenticator
                                     .ToList();
                                 if (remainingObsolete.Count > 0)
                                 {
-                                    // The manifest is committed and its pre-commit backups are already gone,
-                                    // so its newly created/replaced files are live. Store only still-existing
-                                    // pending deletions in retained_obsolete_filenames so already-deleted files
-                                    // do not block subsequent canonical saves or normalizations.
-                                    bool alreadyRetainedOnly =
-                                        isVersion2 &&
-                                        backupFilename == null &&
-                                        created.Count == 0 &&
-                                        (journal.CreatedFileHashes == null || journal.CreatedFileHashes.Count == 0) &&
-                                        (journal.CreatedFileIdentities == null || journal.CreatedFileIdentities.Count == 0) &&
-                                        replaced.Count == 0 &&
-                                        obsolete.Count == 0 &&
-                                        String.IsNullOrWhiteSpace(journal.PreviousManifestHash) &&
-                                        retainedObsolete.Count == remainingObsolete.Count;
-                                    if (!alreadyRetainedOnly)
-                                    {
-                                        journal.JournalVersion = CurrentStorageJournalVersion;
-                                        journal.PreviousManifestHash = null;
-                                        journal.BackupFilename = null;
-                                        journal.CreatedFilenames = new List<string>();
-                                        journal.CreatedFileHashes = null;
-                                        journal.CreatedFileIdentities = null;
-                                        journal.ReplacedFiles = null;
-                                        journal.ObsoleteFilenames = new List<string>();
-                                        journal.RetainedObsoleteFilenames = remainingObsolete;
-                                        WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
-                                    }
+                                    journal.JournalVersion = CurrentStorageJournalVersion;
+                                    journal.PreviousManifestHash = null;
+                                    journal.BackupFilename = null;
+                                    journal.CreatedFilenames = new List<string>();
+                                    journal.CreatedFileHashes = null;
+                                    journal.CreatedFileIdentities = null;
+                                    journal.ReplacedFiles = null;
+                                    journal.ObsoleteFilenames = new List<string>();
+                                    journal.RetainedObsoleteFilenames = remainingObsolete;
+                                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
                                     if (retainedObsoleteFilenames != null)
                                     {
                                         foreach (string filename in remainingObsolete)
@@ -1002,7 +1045,7 @@ namespace Steam_Desktop_Authenticator
                             return committedJournalDeleted && !File.Exists(journalFilename);
                         }
 
-                        if (!RestoreReplacedFilesIfNeeded(maDir, replaced, canonicalDir))
+                        if (!RestoreReplacedFilesIfNeeded(maDir, replaced, canonicalDir, manifestOwnership))
                             return false;
 
                         if (replaced.Count > 0 &&
@@ -1092,22 +1135,31 @@ namespace Steam_Desktop_Authenticator
                         throw new InvalidDataException("The retained storage journal is not in a rebaseable cleanup-only state.");
                     }
 
-                    List<string> pendingRetainedObsolete = (expectedRetainedObsoleteFilenames ?? Enumerable.Empty<string>())
-                        .Concat(journal.RetainedObsoleteFilenames ?? Enumerable.Empty<string>())
+                    List<string> validatedExpected = (expectedRetainedObsoleteFilenames ?? Enumerable.Empty<string>())
                         .Where(filename => !String.IsNullOrWhiteSpace(filename))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList();
-                    foreach (string filename in pendingRetainedObsolete)
+                    HashSet<string> expectedSet = new HashSet<string>(validatedExpected, StringComparer.OrdinalIgnoreCase);
+
+                    // Carry forward only the cleanup list already validated by recovery; reject any
+                    // unexpected filenames injected into the journal before rebase.
+                    foreach (string journalEntry in journal.RetainedObsoleteFilenames ?? Enumerable.Empty<string>())
+                    {
+                        if (String.IsNullOrWhiteSpace(journalEntry) || !expectedSet.Contains(journalEntry))
+                            throw new InvalidDataException("The retained storage journal changed unexpectedly before rebase.");
+                    }
+
+                    foreach (string filename in validatedExpected)
                         ValidateStorageFilename(filename);
 
                     ManifestRecoveryOwnership newManifestOwnership = ParseManifestOwnershipForRecovery(manifestContents, root);
-                    foreach (string filename in pendingRetainedObsolete)
+                    foreach (string filename in validatedExpected)
                     {
                         if (newManifestOwnership.AllLiveFilenames.Contains(filename))
                             throw new InvalidDataException("A retained storage cleanup entry overlaps with a live file in the saved manifest.");
                     }
 
-                    pendingRetainedObsolete = pendingRetainedObsolete
+                    List<string> pendingRetainedObsolete = validatedExpected
                         .Where(filename => Path.Exists(Path.Combine(maDir, filename)))
                         .ToList();
 
@@ -1209,7 +1261,8 @@ namespace Steam_Desktop_Authenticator
         private static bool RestoreReplacedFilesIfNeeded(
             string maDir,
             IReadOnlyList<StorageTransactionReplacedFile> replacedFiles,
-            string expectedCanonicalDir)
+            string expectedCanonicalDir,
+            ManifestRecoveryOwnership manifestOwnership = null)
         {
             if (replacedFiles == null || replacedFiles.Count == 0)
                 return true;
@@ -1228,6 +1281,14 @@ namespace Steam_Desktop_Authenticator
                         expectedTargetIdentity = parsedIdentity;
                     }
 
+                    Func<Stream, bool> isIntactAccountFile = null;
+                    if (manifestOwnership != null &&
+                        manifestOwnership.AccountEntries.TryGetValue(record.Filename, out ManifestEntry entry))
+                    {
+                        bool isEncrypted = manifestOwnership.Encrypted;
+                        isIntactAccountFile = stream => IsIntactAccountFileStream(stream, entry, isEncrypted);
+                    }
+
                     if (File.Exists(backupPath))
                     {
                         StoragePathGuard.RestoreReplacedFileFromVerifiedBackup(
@@ -1236,7 +1297,8 @@ namespace Steam_Desktop_Authenticator
                             record.OriginalHash,
                             record.ReplacementHash,
                             expectedTargetIdentity,
-                            expectedCanonicalDir);
+                            expectedCanonicalDir,
+                            isIntactAccountFile);
                     }
                     else
                     {
@@ -1248,7 +1310,6 @@ namespace Steam_Desktop_Authenticator
                         StoragePathGuard.VerifyFileMatchesOriginalHash(
                             targetPath,
                             record.OriginalHash,
-                            expectedTargetIdentity,
                             expectedCanonicalDir);
                     }
                 }
@@ -1260,6 +1321,33 @@ namespace Steam_Desktop_Authenticator
             }
 
             return true;
+        }
+
+        private static bool IsIntactAccountFileStream(Stream stream, ManifestEntry entry, bool encrypted)
+        {
+            try
+            {
+                if (stream == null || stream.Length <= 0 || stream.Length > MaximumAccountFileSizeBytes)
+                    return false;
+
+                using (MemoryStream ms = new MemoryStream((int)stream.Length))
+                {
+                    stream.CopyTo(ms);
+                    string text = new UTF8Encoding(false, true).GetString(ms.ToArray());
+                    if (encrypted)
+                    {
+                        byte[] ciphertext = Convert.FromBase64String(text);
+                        return ciphertext.Length > 0 && ciphertext.Length % 16 == 0;
+                    }
+
+                    SteamAuth.SteamGuardAccount parsed = DeserializeAccountJson(text, storageJsonSettings);
+                    return parsed?.Session != null && parsed.Session.SteamID != 0 && parsed.Session.SteamID == entry.SteamID;
+                }
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static string ReadAndValidateManifestBackupContents(
@@ -1394,7 +1482,7 @@ namespace Steam_Desktop_Authenticator
             Dictionary<string, ManifestEntry> accountEntries = new Dictionary<string, ManifestEntry>(StringComparer.OrdinalIgnoreCase);
             HashSet<string> allLiveFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (String.IsNullOrWhiteSpace(manifestContents))
-                return new ManifestRecoveryOwnership(accountEntries, allLiveFilenames);
+                return new ManifestRecoveryOwnership(accountEntries, allLiveFilenames, encrypted: false);
 
             Manifest currentManifest = JsonConvert.DeserializeObject<Manifest>(manifestContents, storageJsonSettings);
             if (currentManifest == null || currentManifest.Entries == null)
@@ -1418,7 +1506,7 @@ namespace Steam_Desktop_Authenticator
                 allLiveFilenames.Add(currentManifest.CredentialsStoreFilename);
             }
 
-            return new ManifestRecoveryOwnership(accountEntries, allLiveFilenames);
+            return new ManifestRecoveryOwnership(accountEntries, allLiveFilenames, currentManifest.Encrypted);
         }
 
         private static void ValidateStorageTransactionFileOwnership(
@@ -1587,6 +1675,50 @@ namespace Steam_Desktop_Authenticator
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", ex, "The orphaned credential store sweep could not enumerate the data directory.");
+            }
+        }
+
+        private static bool SweepOrphanedAccountBackupsLocked(string maDir, string expectedCanonicalDir = null)
+        {
+            if (String.IsNullOrWhiteSpace(maDir) || !Directory.Exists(maDir))
+                return true;
+
+            // Never sweep account backups while a storage transaction journal exists on disk.
+            if (File.Exists(Path.Combine(maDir, StorageJournalFilename)))
+                return true;
+
+            bool allDeleted = true;
+            try
+            {
+                foreach (string filePath in Directory.EnumerateFiles(maDir, ".mafile.*.bak", SearchOption.TopDirectoryOnly))
+                {
+                    string fileName = Path.GetFileName(filePath);
+                    if (!IsValidAccountBackupFilename(fileName))
+                        continue;
+
+                    if (!DeleteFileBestEffort(filePath, "An orphaned pre-journal authenticator backup could not be removed.", expectedCanonicalDir))
+                        allDeleted = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                allDeleted = false;
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "The orphaned account backup sweep could not enumerate the data directory.");
+            }
+
+            return allDeleted;
+        }
+
+        private static bool IsValidAccountBackupFilename(string filename)
+        {
+            try
+            {
+                GetValidatedAccountBackupPath(".", filename);
+                return true;
+            }
+            catch (InvalidDataException)
+            {
+                return false;
             }
         }
 
