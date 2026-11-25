@@ -428,6 +428,31 @@ namespace Steam_Desktop_Authenticator
             Manifest manifest = null)
         {
             List<StagedTransferRecoveryRecord> pendingRecoveries = new List<StagedTransferRecoveryRecord>();
+            Dictionary<ulong, string> committedAttemptIds = new Dictionary<ulong, string>();
+            if (manifest?.Entries != null)
+            {
+                foreach (Manifest.ManifestEntry entry in manifest.Entries)
+                {
+                    if (entry != null && entry.SteamID != 0 && !String.IsNullOrWhiteSpace(entry.LastTransferAttemptId))
+                        committedAttemptIds[entry.SteamID] = entry.LastTransferAttemptId;
+                }
+            }
+
+            // Reconcile pending markers directly against committed LastTransferAttemptId values
+            // BEFORE checking recoveryDir existence so a committed transfer is never left fenced
+            // after restart when staging failed (no recoveryDir) or exited between stage cleanup and marker deletion.
+            foreach (PendingTransferMarkerRecord marker in EnumerateMarkers())
+            {
+                if (marker == null || marker.SteamId == 0 || String.IsNullOrWhiteSpace(marker.TransferAttemptId))
+                    continue;
+
+                if (committedAttemptIds.TryGetValue(marker.SteamId, out string committedMarkerAttemptId) &&
+                    String.Equals(committedMarkerAttemptId, marker.TransferAttemptId, StringComparison.Ordinal))
+                {
+                    DeleteMarkerBestEffort(marker.SteamId, marker.TransferAttemptId);
+                }
+            }
+
             string canonicalDataDir = GetCanonicalDataDirectory();
             string recoveryDir = GetRecoveryDirectoryForCurrentDataDirectory();
             if (!Directory.Exists(recoveryDir))
@@ -443,16 +468,6 @@ namespace Steam_Desktop_Authenticator
                 }
             }
 
-            Dictionary<ulong, string> committedAttemptIds = new Dictionary<ulong, string>();
-            if (manifest?.Entries != null)
-            {
-                foreach (Manifest.ManifestEntry entry in manifest.Entries)
-                {
-                    if (entry != null && entry.SteamID != 0 && !String.IsNullOrWhiteSpace(entry.LastTransferAttemptId))
-                        committedAttemptIds[entry.SteamID] = entry.LastTransferAttemptId;
-                }
-            }
-
             try
             {
                 foreach (string filePath in Directory.EnumerateFiles(recoveryDir, RecoveryFilePrefix + "*" + RecoveryFileSuffix, SearchOption.TopDirectoryOnly))
@@ -465,12 +480,15 @@ namespace Steam_Desktop_Authenticator
                     PendingTransferMarkerRecord activeMarker = TryReadMarker(loaded.SteamId);
 
                     // 0. If an active pending marker exists for a DIFFERENT transfer attempt,
-                    //    this staged recovery belongs to an older attempt and MUST NOT be offered or clear the newer marker.
+                    //    keep this older staged recovery out of automatic recovery while the newer
+                    //    attempt's outcome is unknown, WITHOUT deleting it yet (in case the newer
+                    //    attempt crashed before Steam received Continue and the older staged copy
+                    //    is still the only local copy of the active authenticator). It will be
+                    //    cleaned up once a newer replacement commits durably.
                     if (activeMarker != null &&
                         !String.IsNullOrWhiteSpace(activeMarker.TransferAttemptId) &&
                         !String.Equals(activeMarker.TransferAttemptId, loaded.TransferAttemptId, StringComparison.Ordinal))
                     {
-                        DeleteFileBestEffort(filePath);
                         continue;
                     }
 

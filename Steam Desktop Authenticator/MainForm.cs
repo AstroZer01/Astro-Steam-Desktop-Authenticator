@@ -98,6 +98,9 @@ namespace Steam_Desktop_Authenticator
         private bool allowExitAfterSettingsSave;
         private bool exitAfterSettingsSaveRequested;
         private bool settingsSaveInProgress;
+        private int activeIrreversibleTransferCount;
+        private bool exitAfterTransferRequested;
+        private bool IsIrreversibleTransferInFlight => Volatile.Read(ref activeIrreversibleTransferCount) > 0;
         private readonly UpdatePreferenceRevisionTracker updatePreferenceRevision;
         private readonly Func<ProxyConfiguration, CancellationToken, Task<ProxyTestResult>> proxyTestAsync;
         private readonly Action<ProxyConfiguration> applyProxy;
@@ -538,6 +541,21 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
+        private async Task WaitForTradeConfirmationDispatchSlotAsync(CancellationToken cancellationToken)
+        {
+            if (TryGetTradeRateLimitMessage(out string rateLimitMessage))
+                throw new TradeRateLimitedException(rateLimitMessage);
+
+            TimeSpan spacingWait = tradeConfirmationScheduler.GetRemainingGlobalDispatchSpacing();
+            if (spacingWait > TimeSpan.Zero)
+                await Task.Delay(spacingWait, cancellationToken);
+
+            if (TryGetTradeRateLimitMessage(out string postWaitRateLimitMessage))
+                throw new TradeRateLimitedException(postWaitRateLimitMessage);
+
+            tradeConfirmationScheduler.RecordGlobalDispatch();
+        }
+
         private async Task<Confirmation[]> FetchTradeConfirmationsAsync(SteamGuardAccount account, TimeSpan retryDelay, int retryCount, CancellationToken cancellationToken = default, bool nonBlocking = false)
         {
             if (TryGetTradeRateLimitMessage(out string rateLimitMessage))
@@ -553,9 +571,7 @@ namespace Steam_Desktop_Authenticator
 
             for (int attempt = 0; attempt <= retryCount; attempt++)
             {
-                if (TryGetTradeRateLimitMessage(out string retryRateLimitMessage))
-                    throw new TradeRateLimitedException(retryRateLimitMessage);
-                tradeConfirmationScheduler.RecordGlobalDispatch();
+                await WaitForTradeConfirmationDispatchSlotAsync(cancellationToken);
                 try
                 {
                     Func<Task<Confirmation[]>> fetchAction = async () =>
@@ -1213,6 +1229,16 @@ namespace Steam_Desktop_Authenticator
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
+            if (IsIrreversibleTransferInFlight &&
+                e.CloseReason != CloseReason.WindowsShutDown &&
+                e.CloseReason != CloseReason.TaskManagerClosing)
+            {
+                e.Cancel = true;
+                if (e.CloseReason == CloseReason.ApplicationExitCall || explicitExitRequested)
+                    exitAfterTransferRequested = true;
+                return;
+            }
+
             if (e.CloseReason == CloseReason.UserClosing && !explicitExitRequested && manifest != null && manifest.MinimizeToTray)
             {
                 e.Cancel = true;
@@ -1425,7 +1451,14 @@ namespace Steam_Desktop_Authenticator
                 account: null,
                 passKey: this.passKey,
                 beginTransferFenceAsync: BeginTransferFenceAsync,
-                onAccountCommitted: OnTransferredAccountCommitted))
+                onAccountCommitted: OnTransferredAccountCommitted,
+                onIrreversibleTransferStateChanged: inFlight =>
+                {
+                    if (inFlight)
+                        Interlocked.Increment(ref activeIrreversibleTransferCount);
+                    else
+                        Interlocked.Decrement(ref activeIrreversibleTransferCount);
+                }))
             {
                 loginForm.ShowDialog(this);
                 if (loginForm.SavedPasswordUpdated && loginForm.SavedPasswordUpdatedSteamId.HasValue)
@@ -1435,6 +1468,12 @@ namespace Steam_Desktop_Authenticator
             }
             RefreshUnresolvedTransferMarkers();
             this.loadAccountsList();
+            if (exitAfterTransferRequested && !IsIrreversibleTransferInFlight)
+            {
+                exitAfterTransferRequested = false;
+                explicitExitRequested = true;
+                Application.Exit();
+            }
         }
 
         private void ReconcilePendingTransfersOnStartup()
@@ -1832,6 +1871,11 @@ namespace Steam_Desktop_Authenticator
 
         private void menuQuit_Click(object sender, EventArgs e)
         {
+            if (IsIrreversibleTransferInFlight)
+            {
+                exitAfterTransferRequested = true;
+                return;
+            }
             explicitExitRequested = true;
             Application.Exit();
         }
@@ -2237,6 +2281,11 @@ namespace Steam_Desktop_Authenticator
 
         private void trayQuit_Click(object sender, EventArgs e)
         {
+            if (IsIrreversibleTransferInFlight)
+            {
+                exitAfterTransferRequested = true;
+                return;
+            }
             explicitExitRequested = true;
             Application.Exit();
         }
@@ -2430,7 +2479,6 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                tradeConfirmationScheduler.RecordGlobalDispatch();
                 Confirmation[] confirmations = await FetchTradeConfirmationsForMonitorAsync(account, lifetimeCancellationSource.Token, nonBlocking: true);
                 lblStatus.Text = "";
                 if (confirmations == null)
@@ -2462,6 +2510,7 @@ namespace Steam_Desktop_Authenticator
                     bool accepted = false;
                     try
                     {
+                        await WaitForTradeConfirmationDispatchSlotAsync(lifetimeCancellationSource.Token);
                         accepted = await RunAvailableSteamAccountOperationAsync(account, () =>
                             RunTradeConfirmationActionWithRefreshRetryAsync(
                                 account,
@@ -2918,13 +2967,23 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        internal bool IsTransferFenceOrMarkerActive(ulong steamId)
+        {
+            return steamId != 0 &&
+                (transferFencedSteamIds.ContainsKey(steamId) ||
+                 unresolvedTransferMarkerSteamIds.ContainsKey(steamId) ||
+                 PendingTransferMarker.HasMarker(steamId));
+        }
+
         private bool IsSessionAvailableForAccountOperations(SteamGuardAccount account)
         {
             if (account?.Session == null)
                 return false;
 
             ulong steamId = account.Session.SteamID;
-            if (steamId != 0 && unresolvedTransferMarkerSteamIds.ContainsKey(steamId))
+            if (steamId != 0 &&
+                (transferFencedSteamIds.ContainsKey(steamId) ||
+                 unresolvedTransferMarkerSteamIds.ContainsKey(steamId)))
                 return false;
 
             return !IsSessionRenewalRequired(account);
@@ -3832,6 +3891,17 @@ namespace Steam_Desktop_Authenticator
 
             return await RunSteamAccountOperationAsync(account, () =>
             {
+                ulong steamId = account.Session?.SteamID ?? 0;
+                if (IsTransferFenceOrMarkerActive(steamId))
+                {
+                    AstroMessageBox.Show(
+                        "This account has an active or unresolved authenticator transfer. Resolve or dismiss the transfer notice before renewing its session.",
+                        "Login Again",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    return Task.FromResult(false);
+                }
+
                 using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Refresh, account, passKey))
                 {
                     loginForm.ShowDialog(this);
@@ -6014,10 +6084,7 @@ namespace Steam_Desktop_Authenticator
                 await confirmationsSemaphore.WaitAsync(lifetimeCancellationSource.Token);
                 try
                 {
-                    if (TryGetTradeRateLimitMessage(out string activeRateLimitMessage))
-                        throw new TradeRateLimitedException(activeRateLimitMessage);
-
-                    tradeConfirmationScheduler.RecordGlobalDispatch();
+                    await WaitForTradeConfirmationDispatchSlotAsync(lifetimeCancellationSource.Token);
                     bool steamAcceptedAction = await RunAvailableSteamAccountOperationAsync(account, () =>
                         RunTradeConfirmationActionWithRefreshRetryAsync(
                             account,
@@ -6196,10 +6263,6 @@ namespace Steam_Desktop_Authenticator
                         }
                         try
                         {
-                            TimeSpan spacingWait = tradeConfirmationScheduler.GetRemainingGlobalDispatchSpacing();
-                            if (spacingWait > TimeSpan.Zero)
-                                await Task.Delay(spacingWait, cancellationToken);
-
                             if (TryGetTradeRateLimitMessage(out rateLimitMessage))
                                 break;
 

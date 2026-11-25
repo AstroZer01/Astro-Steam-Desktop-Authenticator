@@ -25,6 +25,7 @@ namespace Steam_Desktop_Authenticator
         private readonly string suppliedPassKey;
         private readonly Func<ulong, CancellationToken, Task<IDisposable>> beginTransferFenceAsync;
         private readonly Action<SteamGuardAccount, string> onAccountCommitted;
+        private readonly Action<bool> onIrreversibleTransferStateChanged;
         private bool savePasswordRequested;
         public bool SavedPasswordUpdated { get; private set; }
         public ulong? SavedPasswordUpdatedSteamId { get; private set; }
@@ -34,7 +35,8 @@ namespace Steam_Desktop_Authenticator
             SteamGuardAccount account = null,
             string passKey = null,
             Func<ulong, CancellationToken, Task<IDisposable>> beginTransferFenceAsync = null,
-            Action<SteamGuardAccount, string> onAccountCommitted = null)
+            Action<SteamGuardAccount, string> onAccountCommitted = null,
+            Action<bool> onIrreversibleTransferStateChanged = null)
         {
             InitializeComponent();
             this.LoginReason = loginReason;
@@ -42,6 +44,7 @@ namespace Steam_Desktop_Authenticator
             this.suppliedPassKey = passKey;
             this.beginTransferFenceAsync = beginTransferFenceAsync;
             this.onAccountCommitted = onAccountCommitted;
+            this.onIrreversibleTransferStateChanged = onIrreversibleTransferStateChanged;
 
             try
             {
@@ -80,16 +83,29 @@ namespace Steam_Desktop_Authenticator
         private SteamClient activeSteamClient;
         private volatile bool transferContinueInFlight;
 
+        internal void SetIrreversibleTransferInFlight(bool inFlight)
+        {
+            bool changed = transferContinueInFlight != inFlight;
+            transferContinueInFlight = inFlight;
+            if (changed)
+                onIrreversibleTransferStateChanged?.Invoke(inFlight);
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (transferContinueInFlight && e.CloseReason == CloseReason.UserClosing)
+            if (transferContinueInFlight &&
+                e.CloseReason != CloseReason.WindowsShutDown &&
+                e.CloseReason != CloseReason.TaskManagerClosing)
             {
                 e.Cancel = true;
-                AstroMessageBox.Show(
-                    "Completing authenticator transfer with Steam — please wait a few seconds so your replacement secrets are received and staged safely.",
-                    "Authenticator Transfer In Progress",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                if (e.CloseReason == CloseReason.UserClosing)
+                {
+                    AstroMessageBox.Show(
+                        "Completing authenticator transfer with Steam — please wait a few seconds so your replacement secrets are received and staged safely.",
+                        "Authenticator Transfer In Progress",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
                 return;
             }
 
@@ -1249,8 +1265,7 @@ namespace Steam_Desktop_Authenticator
             {
                 CancellationTokenSource boundedCts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
                 continueCancellationToken = boundedCts.Token;
-                if (owner != null)
-                    owner.transferContinueInFlight = true;
+                owner?.SetIrreversibleTransferInFlight(true);
                 return new ContinueSectionGuard(owner, boundedCts);
             }
 
@@ -1258,6 +1273,7 @@ namespace Steam_Desktop_Authenticator
             {
                 private readonly LoginForm owner;
                 private CancellationTokenSource cts;
+                private int disposed;
 
                 public ContinueSectionGuard(LoginForm owner, CancellationTokenSource cts)
                 {
@@ -1267,8 +1283,10 @@ namespace Steam_Desktop_Authenticator
 
                 public void Dispose()
                 {
-                    if (owner != null)
-                        owner.transferContinueInFlight = false;
+                    if (Interlocked.Exchange(ref disposed, 1) == 0)
+                    {
+                        owner?.SetIrreversibleTransferInFlight(false);
+                    }
                     CancellationTokenSource toDispose = Interlocked.Exchange(ref cts, null);
                     toDispose?.Dispose();
                 }

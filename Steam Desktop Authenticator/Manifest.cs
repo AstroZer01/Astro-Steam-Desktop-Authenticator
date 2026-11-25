@@ -112,6 +112,11 @@ namespace Steam_Desktop_Authenticator
         private string cachedCredentialMetadataPassKeyHash;
         private Dictionary<ulong, SavedCredentialStatus> cachedCredentialMetadata;
         private bool cachedCredentialMetadataFailed;
+        // Per-instance HMAC proof of a verified passkey (never stores plaintext passkey).
+        // Avoids re-decrypting every account file on ordinary SaveAccount writes and ensures
+        // an unrelated unreadable account file cannot block healthy encrypted account saves.
+        private readonly byte[] passkeyProofKey = RandomNumberGenerator.GetBytes(32);
+        private byte[] verifiedPasskeyProof;
         // Refresh persistence only needs to reject changes to the account it
         // captured. A manifest-wide revision would make an unrelated account
         // update abort an otherwise safe refresh.
@@ -922,6 +927,10 @@ namespace Steam_Desktop_Authenticator
                 if (result.Succeeded)
                 {
                     CopyStorageStateFrom(stagedManifest);
+                    if (toEncrypt)
+                        RecordVerifiedPasskeyProofLocked(newKey);
+                    else
+                        ClearVerifiedPasskeyProofLocked();
                     StorageResult normalizationResult = NormalizeAccountFilenames();
                     if (!normalizationResult.Succeeded)
                         DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "Encryption changed successfully, but canonical authenticator filenames could not be completed.");
@@ -939,6 +948,105 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private byte[] ComputePasskeyProof(string passkey)
+        {
+            byte[] keyBytes = Encoding.UTF8.GetBytes(passkey ?? String.Empty);
+            try
+            {
+                using (var hmac = new HMACSHA256(passkeyProofKey))
+                {
+                    return hmac.ComputeHash(keyBytes);
+                }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(keyBytes);
+            }
+        }
+
+        private void RecordVerifiedPasskeyProofLocked(string passkey)
+        {
+            if (String.IsNullOrEmpty(passkey))
+            {
+                verifiedPasskeyProof = null;
+                return;
+            }
+            verifiedPasskeyProof = ComputePasskeyProof(passkey);
+        }
+
+        private void ClearVerifiedPasskeyProofLocked()
+        {
+            verifiedPasskeyProof = null;
+        }
+
+        private bool IsPasskeyValidForEncryptedWriteLocked(string passKey, ulong targetSteamId)
+        {
+            if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
+                return true;
+            if (String.IsNullOrEmpty(passKey))
+                return false;
+
+            if (verifiedPasskeyProof != null)
+            {
+                byte[] candidateProof = ComputePasskeyProof(passKey);
+                return CryptographicOperations.FixedTimeEquals(verifiedPasskeyProof, candidateProof);
+            }
+
+            // Cold-start validation when VerifyPasskey has not yet run on this Manifest instance:
+            // validate against the target entry first, then any readable entry. A single unreadable
+            // unrelated file does not block healthy encrypted writes, while a wrong passkey fails closed.
+            string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+            IEnumerable<ManifestEntry> orderedEntries = this.Entries
+                .Where(entry => entry != null)
+                .OrderByDescending(entry => targetSteamId != 0 && entry.SteamID == targetSteamId);
+
+            foreach (ManifestEntry entry in orderedEntries)
+            {
+                string filename;
+                try
+                {
+                    filename = GetManifestFilePath(maDir, entry);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (!File.Exists(filename))
+                    continue;
+
+                string rawContents;
+                try
+                {
+                    rawContents = ReadTextWithLimit(filename, MaximumAccountFileSizeBytes);
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Authenticator storage", ex, "Skipping an unreadable authenticator file during passkey write validation.");
+                    continue;
+                }
+
+                string decrypted = FileEncryptor.DecryptData(passKey, entry.Salt, entry.IV, rawContents);
+                if (decrypted == null)
+                    return false;
+
+                try
+                {
+                    SteamGuardAccount parsed = JsonConvert.DeserializeObject<SteamGuardAccount>(decrypted, storageJsonSettings);
+                    if (parsed?.Session != null && parsed.Session.SteamID == entry.SteamID)
+                    {
+                        RecordVerifiedPasskeyProofLocked(passKey);
+                        return true;
+                    }
+                }
+                catch (JsonException)
+                {
+                    continue;
+                }
+            }
+
+            return false;
+        }
+
         public bool VerifyPasskey(string passkey)
         {
             if (!this.Encrypted || this.Entries.Count == 0) return true;
@@ -946,7 +1054,15 @@ namespace Steam_Desktop_Authenticator
             try
             {
                 var accounts = this.GetAllAccounts(passkey);
-                return accounts != null && accounts.Length == this.Entries.Count;
+                bool valid = accounts != null && accounts.Length == this.Entries.Count;
+                if (valid)
+                {
+                    lock (storageLock)
+                    {
+                        RecordVerifiedPasskeyProofLocked(passkey);
+                    }
+                }
+                return valid;
             }
             catch (Exception ex)
             {
@@ -997,7 +1113,7 @@ namespace Steam_Desktop_Authenticator
                     string existingCredPath = Path.Combine(maDir, this.CredentialsStoreFilename);
                     if (File.Exists(existingCredPath))
                     {
-                        if (String.IsNullOrEmpty(passKey) || !VerifyPasskey(passKey))
+                        if (String.IsNullOrEmpty(passKey) || !IsPasskeyValidForEncryptedWriteLocked(passKey, entry.SteamID))
                         {
                             DiagnosticErrorLogger.Log("Authenticator storage", new InvalidOperationException("Passkey required to update credential store during account removal."), "Removing an account with saved credentials requires a valid passkey.");
                             return false;
@@ -1130,7 +1246,7 @@ namespace Steam_Desktop_Authenticator
 
                 try
                 {
-                if (this.Encrypted && !this.VerifyPasskey(passKey))
+                if (this.Encrypted && !IsPasskeyValidForEncryptedWriteLocked(passKey, account.Session.SteamID))
                     return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid. The account was not saved.");
 
                 if (expectedCredentialGenerationId != null)
@@ -1215,6 +1331,8 @@ namespace Steam_Desktop_Authenticator
                 if (result.Succeeded)
                 {
                     CopyStorageStateFrom(stagedManifest);
+                    if (stagedManifest.Encrypted && !String.IsNullOrEmpty(passKey))
+                        RecordVerifiedPasskeyProofLocked(passKey);
                     StorageResult normalizationResult = NormalizeAccountFilenames();
                     if (!normalizationResult.Succeeded)
                         DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "The account was saved, but its canonical filename could not be completed.");
@@ -1374,6 +1492,10 @@ namespace Steam_Desktop_Authenticator
 
             Entries = source.Entries;
             Encrypted = source.Encrypted;
+            if (!Encrypted || Entries == null || Entries.Count == 0)
+            {
+                ClearVerifiedPasskeyProofLocked();
+            }
             AllowSavedSteamPasswords = source.AllowSavedSteamPasswords;
             if (!String.Equals(CredentialsStoreFilename, source.CredentialsStoreFilename, StringComparison.Ordinal))
             {
@@ -2257,7 +2379,7 @@ namespace Steam_Desktop_Authenticator
             {
                 if (!this.Encrypted || !this.AllowSavedSteamPasswords)
                     return StorageResult.Failure(StorageFailureKind.Validation, "Enable encryption and opt into saved Steam passwords first.");
-                if (String.IsNullOrEmpty(passKey) || !VerifyPasskey(passKey))
+                if (String.IsNullOrEmpty(passKey) || !IsPasskeyValidForEncryptedWriteLocked(passKey, steamId))
                     return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid.");
                 if (Entries == null || !Entries.Any(entry => entry != null && entry.SteamID == steamId))
                     return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is no longer managed by this authenticator.");
@@ -2297,7 +2419,7 @@ namespace Steam_Desktop_Authenticator
             {
                 if (String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
                     return StorageResult.Success();
-                if (!this.Encrypted || String.IsNullOrEmpty(passKey) || !VerifyPasskey(passKey))
+                if (!this.Encrypted || String.IsNullOrEmpty(passKey) || !IsPasskeyValidForEncryptedWriteLocked(passKey, steamId))
                     return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid.");
 
                 try
@@ -2342,7 +2464,7 @@ namespace Steam_Desktop_Authenticator
             {
                 if (!this.Encrypted || !this.AllowSavedSteamPasswords || String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
                     return StorageResult.Success();
-                if (String.IsNullOrEmpty(passKey) || !VerifyPasskey(passKey))
+                if (String.IsNullOrEmpty(passKey) || !IsPasskeyValidForEncryptedWriteLocked(passKey, steamId))
                     return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid.");
 
                 try

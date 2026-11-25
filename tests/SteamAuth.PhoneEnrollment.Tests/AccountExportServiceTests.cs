@@ -247,6 +247,32 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
+        public void OpenAndPinDestinationDirectory_BlocksRenamingParentAndAncestorDirectoriesWhileHeld()
+        {
+            if (!System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
+                return;
+
+            string ancestorDir = Path.Combine(exportDir, "ancestor-pin-test");
+            string childDir = Path.Combine(ancestorDir, "nested-export-dir");
+            Directory.CreateDirectory(childDir);
+            string destFile = Path.Combine(childDir, "pinned.maFile");
+
+            string renamedChild = Path.Combine(ancestorDir, "nested-export-dir-renamed");
+            string renamedAncestor = Path.Combine(exportDir, "ancestor-pin-test-renamed");
+
+            using (AccountExportService.PinnedExportDirectory pinned = AccountExportService.OpenAndPinDestinationDirectory(destFile))
+            {
+                Assert.Throws<IOException>(() => Directory.Move(childDir, renamedChild));
+                Assert.Throws<IOException>(() => Directory.Move(ancestorDir, renamedAncestor));
+                pinned.VerifyStillAtExpectedPath();
+            }
+
+            // Once disposed, normal directory operations succeed again
+            Directory.Move(childDir, renamedChild);
+            Assert.True(Directory.Exists(renamedChild));
+        }
+
+        [Fact]
         public void SecretQrBuilder_GeneratesValidKeePassXcAndBitwardenUris_RoundTripsThroughZXing_AndMatchesSteamTotp()
         {
             // Fixed 20-byte RFC test secret vector

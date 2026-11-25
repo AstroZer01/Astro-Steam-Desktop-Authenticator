@@ -252,7 +252,43 @@ namespace Steam_Desktop_Authenticator
                  path.StartsWith(@"\??\", StringComparison.Ordinal));
         }
 
-        private static SafeFileHandle OpenAndVerifyDestinationDirectoryHandle(string destinationFilePath)
+        internal sealed class PinnedExportDirectory : IDisposable
+        {
+            private readonly List<SafeFileHandle> pinnedHandles;
+            private readonly SafeFileHandle leafHandle;
+
+            public string VerifiedDirectoryPath { get; }
+
+            public PinnedExportDirectory(string verifiedDirectoryPath, List<SafeFileHandle> pinnedHandles, SafeFileHandle leafHandle)
+            {
+                VerifiedDirectoryPath = verifiedDirectoryPath;
+                this.pinnedHandles = pinnedHandles ?? new List<SafeFileHandle>();
+                this.leafHandle = leafHandle;
+            }
+
+            public void VerifyStillAtExpectedPath()
+            {
+                if (leafHandle == null || leafHandle.IsInvalid)
+                    return;
+
+                string currentFinalPath = GetNormalizedFinalPath(leafHandle);
+                if (!String.Equals(currentFinalPath, VerifiedDirectoryPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException("The export destination directory changed during export.");
+                }
+            }
+
+            public void Dispose()
+            {
+                for (int i = pinnedHandles.Count - 1; i >= 0; i--)
+                {
+                    try { pinnedHandles[i]?.Dispose(); } catch { }
+                }
+                pinnedHandles.Clear();
+            }
+        }
+
+        internal static PinnedExportDirectory OpenAndPinDestinationDirectory(string destinationFilePath)
         {
             string fullDestination = Path.GetFullPath(destinationFilePath);
             string parentDir = Path.GetDirectoryName(fullDestination);
@@ -263,45 +299,208 @@ namespace Steam_Desktop_Authenticator
             ValidateExportDestination(fullDestination);
 
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                return null;
+                return new PinnedExportDirectory(parentDir, null, null);
 
-            SafeFileHandle dirHandle = CreateFileW(
-                parentDir,
-                FileListDirectory,
-                FileShareReadWrite,
-                IntPtr.Zero,
-                OpenExisting,
-                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
-                IntPtr.Zero);
-            if (dirHandle.IsInvalid)
+            string liveMaDir = Path.GetFullPath(Path.Combine(Manifest.GetExecutableDir(), "maFiles"))
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            WindowsPathIdentity liveMaIdentity = default;
+            bool hasLiveMaIdentity = Directory.Exists(liveMaDir) &&
+                TryGetWindowsPathIdentity(liveMaDir, isDirectory: true, out liveMaIdentity);
+            string canonicalLiveMaDir = Directory.Exists(liveMaDir) &&
+                TryGetNormalizedFinalPathForPath(liveMaDir, isDirectory: true, out string resolvedLiveMaDir)
+                ? resolvedLiveMaDir
+                : liveMaDir;
+            string canonicalLiveMaDirWithSep = canonicalLiveMaDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
+            // Collect every directory from the first non-root ancestor down to parentDir
+            // so we verify and pin the entire path chain against rename/delete/redirect.
+            List<string> chain = new List<string>();
+            DirectoryInfo cursor = new DirectoryInfo(parentDir);
+            while (cursor != null)
             {
-                dirHandle.Dispose();
-                throw new IOException("Could not open and verify the export destination directory.");
+                DirectoryInfo parent = cursor.Parent;
+                if (parent == null || String.Equals(parent.FullName, cursor.FullName, StringComparison.OrdinalIgnoreCase))
+                    break;
+                chain.Add(cursor.FullName);
+                cursor = parent;
             }
+            chain.Reverse();
 
+            List<SafeFileHandle> handles = new List<SafeFileHandle>();
             try
             {
-                if (!GetFileInformationByHandle(dirHandle, out BY_HANDLE_FILE_INFORMATION dirInfo))
-                    throw new IOException("Could not verify the export destination directory identity.");
-                if ((dirInfo.FileAttributes & (uint)FileAttributes.ReparsePoint) != 0)
-                    throw new InvalidDataException("The selected export destination directory uses an unsupported symbolic link or junction.");
-
-                string liveMaDir = Path.GetFullPath(Path.Combine(Manifest.GetExecutableDir(), "maFiles"))
-                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                if (Directory.Exists(liveMaDir) &&
-                    TryGetWindowsPathIdentity(liveMaDir, isDirectory: true, out WindowsPathIdentity liveMaIdentity))
+                SafeFileHandle leafHandle = null;
+                for (int i = 0; i < chain.Count; i++)
                 {
-                    WindowsPathIdentity openDirIdentity = new WindowsPathIdentity(dirInfo.VolumeSerialNumber, dirInfo.FileIndexHigh, dirInfo.FileIndexLow);
-                    if (openDirIdentity.Equals(liveMaIdentity))
-                        throw new InvalidDataException("Exporting into the live maFiles folder is not allowed. Choose a separate folder.");
+                    string dirPath = chain[i];
+                    bool isLeaf = i == chain.Count - 1;
+
+                    SafeFileHandle handle = CreateFileW(
+                        dirPath,
+                        FileListDirectory,
+                        FileShareReadWrite,
+                        IntPtr.Zero,
+                        OpenExisting,
+                        FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                        IntPtr.Zero);
+
+                    if (handle.IsInvalid && !isLeaf)
+                    {
+                        int lastError = Marshal.GetLastWin32Error();
+                        handle.Dispose();
+                        if (lastError == ErrorAccessDenied)
+                        {
+                            // Traverse-only ancestor directory: still open without FILE_SHARE_DELETE
+                            // and verify it is not a reparse point or the live maFiles directory.
+                            handle = CreateFileW(
+                                dirPath,
+                                0,
+                                FileShareReadWrite,
+                                IntPtr.Zero,
+                                OpenExisting,
+                                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                                IntPtr.Zero);
+                        }
+                        else
+                        {
+                            throw new IOException("Could not open and pin the export destination directory path.");
+                        }
+                    }
+
+                    if (handle.IsInvalid)
+                    {
+                        handle.Dispose();
+                        throw new IOException("Could not open and verify the export destination directory.");
+                    }
+
+                    handles.Add(handle);
+
+                    if (!GetFileInformationByHandle(handle, out BY_HANDLE_FILE_INFORMATION dirInfo))
+                        throw new IOException("Could not verify the export destination directory identity.");
+                    if ((dirInfo.FileAttributes & (uint)FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidDataException("The selected export destination directory uses an unsupported symbolic link or junction.");
+
+                    if (hasLiveMaIdentity)
+                    {
+                        WindowsPathIdentity openDirIdentity = new WindowsPathIdentity(dirInfo.VolumeSerialNumber, dirInfo.FileIndexHigh, dirInfo.FileIndexLow);
+                        if (openDirIdentity.Equals(liveMaIdentity))
+                            throw new InvalidDataException("Exporting into the live maFiles folder is not allowed. Choose a separate folder.");
+                    }
+
+                    if (isLeaf)
+                        leafHandle = handle;
                 }
 
-                return dirHandle;
+                if (leafHandle == null)
+                {
+                    // Destination is directly under a drive root (e.g. C:\export.maFile); open root handle to verify.
+                    leafHandle = CreateFileW(
+                        parentDir,
+                        FileListDirectory,
+                        FileShareReadWrite,
+                        IntPtr.Zero,
+                        OpenExisting,
+                        FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                        IntPtr.Zero);
+                    if (leafHandle.IsInvalid)
+                    {
+                        leafHandle.Dispose();
+                        throw new IOException("Could not open and verify the export destination directory.");
+                    }
+                    handles.Add(leafHandle);
+                }
+
+                string verifiedFinalPath = GetNormalizedFinalPath(leafHandle);
+                if (String.Equals(verifiedFinalPath, canonicalLiveMaDir, StringComparison.OrdinalIgnoreCase) ||
+                    verifiedFinalPath.StartsWith(canonicalLiveMaDirWithSep, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException("Exporting into the live maFiles folder is not allowed. Choose a separate folder.");
+                }
+
+                return new PinnedExportDirectory(verifiedFinalPath, handles, leafHandle);
             }
             catch
             {
-                dirHandle.Dispose();
+                for (int i = handles.Count - 1; i >= 0; i--)
+                {
+                    try { handles[i]?.Dispose(); } catch { }
+                }
                 throw;
+            }
+        }
+
+        private static void EnsureDestinationFileIsNotReparsePoint(string fullDestinationPath)
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !File.Exists(fullDestinationPath))
+                return;
+
+            using (SafeFileHandle handle = CreateFileW(
+                fullDestinationPath,
+                0,
+                FileShareAll,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint,
+                IntPtr.Zero))
+            {
+                if (handle.IsInvalid)
+                    return;
+
+                if (GetFileInformationByHandle(handle, out BY_HANDLE_FILE_INFORMATION info) &&
+                    (info.FileAttributes & (uint)FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new InvalidDataException("The selected export destination file uses an unsupported symbolic link or reparse point.");
+                }
+            }
+        }
+
+        private static string GetNormalizedFinalPath(SafeFileHandle handle)
+        {
+            const uint FileNameNormalized = 0x0;
+            uint requiredChars = GetFinalPathNameByHandleW(handle, null, 0, FileNameNormalized);
+            if (requiredChars == 0)
+                throw new IOException("Could not resolve the verified export destination path.");
+
+            StringBuilder sb = new StringBuilder((int)requiredChars + 1);
+            uint written = GetFinalPathNameByHandleW(handle, sb, (uint)sb.Capacity, FileNameNormalized);
+            if (written == 0 || written >= sb.Capacity)
+                throw new IOException("Could not resolve the verified export destination path.");
+
+            string finalPath = sb.ToString();
+            if (finalPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                finalPath = @"\\" + finalPath.Substring(8);
+            else if (finalPath.StartsWith(@"\\?\", StringComparison.Ordinal))
+                finalPath = finalPath.Substring(4);
+
+            return finalPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+
+        private static bool TryGetNormalizedFinalPathForPath(string path, bool isDirectory, out string normalizedPath)
+        {
+            normalizedPath = null;
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                return false;
+
+            using (SafeFileHandle handle = CreateFileW(
+                path,
+                0,
+                FileShareAll,
+                IntPtr.Zero,
+                OpenExisting,
+                isDirectory ? FileFlagBackupSemantics : 0u,
+                IntPtr.Zero))
+            {
+                if (handle.IsInvalid)
+                    return false;
+                try
+                {
+                    normalizedPath = GetNormalizedFinalPath(handle);
+                    return !String.IsNullOrEmpty(normalizedPath);
+                }
+                catch
+                {
+                    return false;
+                }
             }
         }
 
@@ -341,6 +540,7 @@ namespace Steam_Desktop_Authenticator
             public uint FileIndexLow;
         }
 
+        private const int ErrorAccessDenied = 5;
         private const uint FileListDirectory = 0x00000001;
         private const uint FileFlagBackupSemantics = 0x02000000;
         private const uint FileFlagOpenReparsePoint = 0x00200000;
@@ -363,6 +563,13 @@ namespace Steam_Desktop_Authenticator
         private static extern bool GetFileInformationByHandle(
             SafeFileHandle hFile,
             out BY_HANDLE_FILE_INFORMATION lpFileInformation);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle hFile,
+            StringBuilder lpszFilePath,
+            uint cchFilePath,
+            uint dwFlags);
 
         private static bool TryGetWindowsPathIdentity(string path, bool isDirectory, out WindowsPathIdentity identity)
         {
@@ -456,6 +663,46 @@ namespace Steam_Desktop_Authenticator
             return candidate;
         }
 
+        private static void WriteAtomicallyIntoPinnedDirectory(
+            PinnedExportDirectory pinnedDir,
+            string destinationFileName,
+            Action<FileStream> writeContent)
+        {
+            if (String.IsNullOrWhiteSpace(destinationFileName) ||
+                destinationFileName.IndexOfAny(new[] { '\\', '/' }) >= 0)
+            {
+                throw new InvalidDataException("The selected export filename is invalid.");
+            }
+
+            string verifiedDestination = Path.Combine(pinnedDir.VerifiedDirectoryPath, destinationFileName);
+            EnsureDestinationFileIsNotReparsePoint(verifiedDestination);
+
+            string tempPath = Path.Combine(
+                pinnedDir.VerifiedDirectoryPath,
+                destinationFileName + "." + Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                using (FileStream fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, FileOptions.WriteThrough))
+                {
+                    writeContent(fs);
+                    fs.Flush(flushToDisk: true);
+                }
+
+                pinnedDir.VerifyStillAtExpectedPath();
+                EnsureDestinationFileIsNotReparsePoint(verifiedDestination);
+
+                if (File.Exists(verifiedDestination))
+                    File.Replace(tempPath, verifiedDestination, null, ignoreMetadataErrors: true);
+                else
+                    File.Move(tempPath, verifiedDestination);
+            }
+            catch
+            {
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                throw;
+            }
+        }
+
         public static void ExportPlainMaFile(SteamGuardAccount account, string destinationFilePath, bool includeSession)
         {
             if (account == null)
@@ -463,11 +710,12 @@ namespace Steam_Desktop_Authenticator
 
             ValidateExportDestination(destinationFilePath);
             string fullPath = Path.GetFullPath(destinationFilePath);
-            using (SafeFileHandle verifiedDirHandle = OpenAndVerifyDestinationDirectoryHandle(fullPath))
+            string fileName = Path.GetFileName(fullPath);
+            using (PinnedExportDirectory pinnedDir = OpenAndPinDestinationDirectory(fullPath))
             {
                 string json = SerializeAllowlistedMaFile(account, includeSession);
-                ValidateExportDestination(fullPath);
-                PendingTransferMarker.WriteAllTextAtomicallyFlushed(fullPath, json);
+                byte[] utf8Bytes = new UTF8Encoding(false).GetBytes(json);
+                WriteAtomicallyIntoPinnedDirectory(pinnedDir, fileName, fs => fs.Write(utf8Bytes, 0, utf8Bytes.Length));
             }
         }
 
@@ -505,22 +753,20 @@ namespace Steam_Desktop_Authenticator
             string exportPassKey,
             bool includeSession)
         {
-            using (SafeFileHandle verifiedDirHandle = OpenAndVerifyDestinationDirectoryHandle(fullDestinationZipPath))
+            string fileName = Path.GetFileName(fullDestinationZipPath);
+            using (PinnedExportDirectory pinnedDir = OpenAndPinDestinationDirectory(fullDestinationZipPath))
             {
-            string tempZipPath = fullDestinationZipPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try
-            {
-                ExportManifestDto exportManifest = new ExportManifestDto
+                WriteAtomicallyIntoPinnedDirectory(pinnedDir, fileName, fs =>
                 {
-                    Encrypted = encrypted,
-                    FirstRun = false
-                };
+                    ExportManifestDto exportManifest = new ExportManifestDto
+                    {
+                        Encrypted = encrypted,
+                        FirstRun = false
+                    };
 
-                HashSet<string> usedEntryNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                UTF8Encoding utf8NoBom = new UTF8Encoding(false);
+                    HashSet<string> usedEntryNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    UTF8Encoding utf8NoBom = new UTF8Encoding(false);
 
-                using (FileStream fs = new FileStream(tempZipPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, FileOptions.WriteThrough))
-                {
                     using (ZipArchive archive = new ZipArchive(fs, ZipArchiveMode.Create, leaveOpen: true))
                     {
                         foreach (SteamGuardAccount account in accounts)
@@ -569,21 +815,7 @@ namespace Steam_Desktop_Authenticator
                             manifestWriter.Write(JsonConvert.SerializeObject(exportManifest, ExportJsonSettings));
                         }
                     }
-
-                    fs.Flush(flushToDisk: true);
-                }
-
-                ValidateExportDestination(fullDestinationZipPath);
-                if (File.Exists(fullDestinationZipPath))
-                    File.Replace(tempZipPath, fullDestinationZipPath, null, ignoreMetadataErrors: true);
-                else
-                    File.Move(tempZipPath, fullDestinationZipPath);
-            }
-            catch
-            {
-                try { if (File.Exists(tempZipPath)) File.Delete(tempZipPath); } catch { }
-                throw;
-            }
+                });
             }
         }
     }

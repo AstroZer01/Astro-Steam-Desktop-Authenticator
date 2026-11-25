@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using Newtonsoft.Json.Linq;
 using Steam_Desktop_Authenticator;
 using Xunit;
@@ -168,6 +169,80 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Environment.SetEnvironmentVariable(ApplicationPaths.DataDirectoryEnvironmentVariable, prev);
                 try { if (Directory.Exists(tempData)) Directory.Delete(tempData, true); } catch { }
                 try { if (Directory.Exists(tempOut)) Directory.Delete(tempOut, true); } catch { }
+            }
+        }
+
+        [Fact]
+        public void EncryptedSaveAccount_SucceedsWhenUnrelatedAccountFileIsCorrupt_AndStillRejectsWrongOrOldPasskey()
+        {
+            string tempData = Path.Combine(Path.GetTempPath(), "asda-sec-encsave-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempData);
+            string prev = Environment.GetEnvironmentVariable(ApplicationPaths.DataDirectoryEnvironmentVariable);
+            Environment.SetEnvironmentVariable(ApplicationPaths.DataDirectoryEnvironmentVariable, tempData);
+
+            try
+            {
+                const string passKey = "PrimaryPasskey!2026";
+                const string newPassKey = "RotatedPasskey!2026";
+                ulong steamIdA = 76561198000009001UL;
+                ulong steamIdB = 76561198000009002UL;
+
+                Manifest manifest = Manifest.GenerateNewManifest(false);
+                SteamGuardAccount accountA = new SteamGuardAccount
+                {
+                    AccountName = "healthy_user",
+                    SharedSecret = Convert.ToBase64String(Enumerable.Range(1, 20).Select(i => (byte)i).ToArray()),
+                    IdentitySecret = Convert.ToBase64String(Enumerable.Range(21, 20).Select(i => (byte)i).ToArray()),
+                    DeviceID = "android:healthy",
+                    FullyEnrolled = true,
+                    Session = new SessionData { SteamID = steamIdA, AccessToken = "at-a1", RefreshToken = "rt-a1" }
+                };
+                SteamGuardAccount accountB = new SteamGuardAccount
+                {
+                    AccountName = "corrupt_user",
+                    SharedSecret = Convert.ToBase64String(Enumerable.Range(41, 20).Select(i => (byte)i).ToArray()),
+                    IdentitySecret = Convert.ToBase64String(Enumerable.Range(61, 20).Select(i => (byte)i).ToArray()),
+                    DeviceID = "android:corrupt",
+                    FullyEnrolled = true,
+                    Session = new SessionData { SteamID = steamIdB, AccessToken = "at-b1", RefreshToken = "rt-b1" }
+                };
+
+                Assert.True(manifest.SaveAccount(accountA, encrypt: true, passKey: passKey).Succeeded);
+                Assert.True(manifest.SaveAccount(accountB, encrypt: true, passKey: passKey).Succeeded);
+                Assert.True(manifest.VerifyPasskey(passKey));
+
+                // Corrupt account B's encrypted file on disk AFTER unlock
+                string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+                string fileB = Path.Combine(maDir, manifest.Entries.Single(e => e.SteamID == steamIdB).Filename);
+                File.WriteAllText(fileB, "corrupted-ciphertext-bytes");
+
+                // Full-store VerifyPasskey still reports false because B is unreadable
+                Assert.False(manifest.VerifyPasskey(passKey));
+
+                // Ordinary encrypted SaveAccount for healthy account A MUST STILL SUCCEED with the verified passkey
+                accountA.Session.AccessToken = "at-a2";
+                Assert.True(manifest.SaveAccount(accountA, encrypt: true, passKey: passKey).Succeeded);
+
+                // Wrong passkey MUST STILL FAIL
+                Assert.False(manifest.SaveAccount(accountA, encrypt: true, passKey: "WrongPasskey!").Succeeded);
+
+                // Cold-start Manifest reload (no prior VerifyPasskey): saving healthy account A still succeeds
+                // even while B is corrupt, while wrong passkey fails closed
+                Manifest reloaded = Manifest.GetManifest(true);
+                accountA.Session.AccessToken = "at-a3";
+                Assert.True(reloaded.SaveAccount(accountA, encrypt: true, passKey: passKey).Succeeded);
+                Assert.False(reloaded.SaveAccount(accountA, encrypt: true, passKey: "WrongPasskey!").Succeeded);
+
+                // Restore B, rekey from passKey -> newPassKey, and verify old passKey proof is invalidated immediately
+                Assert.True(reloaded.SaveAccount(accountB, encrypt: true, passKey: passKey).Succeeded);
+                Assert.True(reloaded.ChangeEncryptionKey(passKey, newPassKey).Succeeded);
+                Assert.False(reloaded.SaveAccount(accountA, encrypt: true, passKey: passKey).Succeeded);
+                Assert.True(reloaded.SaveAccount(accountA, encrypt: true, passKey: newPassKey).Succeeded);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(ApplicationPaths.DataDirectoryEnvironmentVariable, prev);
+                try { if (Directory.Exists(tempData)) Directory.Delete(tempData, true); } catch { }
             }
         }
     }

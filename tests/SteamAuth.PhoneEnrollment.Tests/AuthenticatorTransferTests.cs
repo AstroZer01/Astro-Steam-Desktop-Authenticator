@@ -565,10 +565,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
             PendingTransferMarker.DeleteMarkerBestEffort(steamId, "attempt-A");
             Assert.True(PendingTransferMarker.HasMarker(steamId));
 
-            // Reconciliation MUST discard obsolete staged A and preserve attempt B's marker!
+            // Reconciliation MUST keep staged A out of automatic recovery while attempt B's marker is unresolved,
+            // WITHOUT deleting staged A on disk (in case B crashed before Steam received Continue),
+            // and MUST preserve attempt B's marker!
             var pending = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(Array.Empty<SteamGuardAccount>(), passKey: null);
             Assert.Empty(pending);
-            Assert.False(File.Exists(stagedA));
+            Assert.True(File.Exists(stagedA));
             Assert.True(PendingTransferMarker.HasMarker(steamId));
         }
 
@@ -988,6 +990,124 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 secondFence.Dispose();
                 Assert.False(unresolvedDict.ContainsKey(steamId));
                 Assert.False((bool)isBusyMethod.Invoke(form, new object[] { steamId }));
+            }
+        }
+
+        [Fact]
+        public void CommittedTransferWithNoStagedFile_ReconcileClearsMatchingMarkerDirectly_AndPreservesMismatchedMarker()
+        {
+            ulong committedSteamId = 76561198000000091UL;
+            ulong pendingSteamId = 76561198000000092UL;
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount committedAccount = new SteamGuardAccount
+            {
+                AccountName = "committed_no_stage",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(1, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(21, 20).Select(i => (byte)i).ToArray()),
+                DeviceID = "android:committed",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = committedSteamId, AccessToken = "at1", RefreshToken = "rt1" }
+            };
+            SteamGuardAccount otherAccount = new SteamGuardAccount
+            {
+                AccountName = "pending_new_attempt",
+                SharedSecret = Convert.ToBase64String(Enumerable.Range(31, 20).Select(i => (byte)i).ToArray()),
+                IdentitySecret = Convert.ToBase64String(Enumerable.Range(51, 20).Select(i => (byte)i).ToArray()),
+                DeviceID = "android:other",
+                FullyEnrolled = true,
+                Session = new SessionData { SteamID = pendingSteamId, AccessToken = "at2", RefreshToken = "rt2" }
+            };
+
+            Assert.True(manifest.SaveAccount(committedAccount, encrypt: false, transferAttemptId: "attempt-committed-1").Succeeded);
+            Assert.True(manifest.SaveAccount(otherAccount, encrypt: false, transferAttemptId: "attempt-older-1").Succeeded);
+
+            // Simulate leftover markers with NO staged files:
+            // - committedSteamId has an exact-match committed marker -> MUST be cleared on startup reconcile
+            // - pendingSteamId has a NEWER uncommitted marker -> MUST remain fenced!
+            Assert.True(PendingTransferMarker.TryWriteMarker(committedSteamId, "committed_no_stage", "android:committed", "attempt-committed-1"));
+            Assert.True(PendingTransferMarker.TryWriteMarker(pendingSteamId, "pending_new_attempt", "android:other", "attempt-newer-2"));
+
+            var recoveries = PendingTransferMarker.ReconcileAndLoadStagedRecoveries(
+                new[] { committedAccount, otherAccount },
+                passKey: null,
+                manifest: manifest);
+            Assert.Empty(recoveries);
+            Assert.False(PendingTransferMarker.HasMarker(committedSteamId));
+            Assert.True(PendingTransferMarker.HasMarker(pendingSteamId));
+        }
+
+        [Fact]
+        public void LoginForm_AndMainForm_CancelApplicationExitWhileIrreversibleTransferContinueInFlight()
+        {
+            bool callbackSeenTrue = false;
+            bool callbackSeenFalse = false;
+            using (LoginForm loginForm = new LoginForm(
+                LoginForm.LoginType.Transfer,
+                onIrreversibleTransferStateChanged: inFlight =>
+                {
+                    if (inFlight) callbackSeenTrue = true;
+                    else callbackSeenFalse = true;
+                }))
+            {
+                var onFormClosing = typeof(LoginForm).GetMethod(
+                    "OnFormClosing",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.NotNull(onFormClosing);
+
+                loginForm.SetIrreversibleTransferInFlight(true);
+                Assert.True(callbackSeenTrue);
+
+                var appExitArgs = new System.Windows.Forms.FormClosingEventArgs(System.Windows.Forms.CloseReason.ApplicationExitCall, false);
+                onFormClosing.Invoke(loginForm, new object[] { appExitArgs });
+                Assert.True(appExitArgs.Cancel);
+
+                var ownerCloseArgs = new System.Windows.Forms.FormClosingEventArgs(System.Windows.Forms.CloseReason.FormOwnerClosing, false);
+                onFormClosing.Invoke(loginForm, new object[] { ownerCloseArgs });
+                Assert.True(ownerCloseArgs.Cancel);
+
+                var shutdownArgs = new System.Windows.Forms.FormClosingEventArgs(System.Windows.Forms.CloseReason.WindowsShutDown, false);
+                onFormClosing.Invoke(loginForm, new object[] { shutdownArgs });
+                Assert.False(shutdownArgs.Cancel);
+
+                loginForm.SetIrreversibleTransferInFlight(false);
+                Assert.True(callbackSeenFalse);
+            }
+
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            using (MainForm mainForm = new MainForm(manifest, new UpdatePreferenceRevisionTracker(), null, _ => { }))
+            {
+                var countField = typeof(MainForm).GetField("activeIrreversibleTransferCount", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                var deferredField = typeof(MainForm).GetField("exitAfterTransferRequested", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                var closingMethod = typeof(MainForm).GetMethod("MainForm_FormClosing", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.NotNull(countField);
+                Assert.NotNull(deferredField);
+                Assert.NotNull(closingMethod);
+
+                countField.SetValue(mainForm, 1);
+                var mainExitArgs = new System.Windows.Forms.FormClosingEventArgs(System.Windows.Forms.CloseReason.ApplicationExitCall, false);
+                closingMethod.Invoke(mainForm, new object[] { mainForm, mainExitArgs });
+                Assert.True(mainExitArgs.Cancel);
+                Assert.True((bool)deferredField.GetValue(mainForm));
+
+                countField.SetValue(mainForm, 0);
+            }
+        }
+
+        [Fact]
+        public void IsTransferFenceOrMarkerActive_BlocksManualRenewalWhenUnresolvedMarkerExistsOnDisk()
+        {
+            ulong steamId = 76561198000000093UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            using (MainForm form = new MainForm(manifest, new UpdatePreferenceRevisionTracker(), null, _ => { }))
+            {
+                Assert.False(form.IsTransferFenceOrMarkerActive(steamId));
+
+                Assert.True(PendingTransferMarker.TryWriteMarker(steamId, "manual_refresh_blocked", "android:m", "attempt-m1"));
+                Assert.True(form.IsTransferFenceOrMarkerActive(steamId));
+
+                PendingTransferMarker.DeleteMarkerBestEffort(steamId, "attempt-m1");
+                Assert.False(form.IsTransferFenceOrMarkerActive(steamId));
             }
         }
     }
