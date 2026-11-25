@@ -47,7 +47,7 @@ namespace Steam_Desktop_Authenticator
                     "Cancel");
 
                 if (choice == DialogResult.Cancel)
-                    throw new LoginPromptCanceledException();
+                    ThrowForPromptDismissal(cancellationToken);
 
                 return choice == DialogResult.Yes;
             });
@@ -89,7 +89,7 @@ namespace Steam_Desktop_Authenticator
                         }
                         cancellationToken.ThrowIfCancellationRequested();
                         if (codeForm.Canceled || !codeForm.UiReady || codeForm.LoadFailed)
-                            throw new LoginPromptCanceledException();
+                            ThrowForPromptDismissal(cancellationToken);
                         return (codeForm.txtBox.Text ?? String.Empty).Trim().ToUpperInvariant();
                     }
                 });
@@ -167,10 +167,16 @@ namespace Steam_Desktop_Authenticator
                     }
                     cancellationToken.ThrowIfCancellationRequested();
                     if (emailForm.Canceled || !emailForm.UiReady || emailForm.LoadFailed)
-                        throw new LoginPromptCanceledException();
+                        ThrowForPromptDismissal(cancellationToken);
                     return emailForm.txtBox.Text;
                 }
             });
+        }
+
+        internal static void ThrowForPromptDismissal(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new LoginPromptCanceledException();
         }
 
         private Task<T> RunOnUiThreadAsync<T>(Func<T> action)

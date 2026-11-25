@@ -123,6 +123,13 @@ namespace Steam_Desktop_Authenticator
             account.DeviceID = previousDeviceId;
         }
 
+        internal static bool IsExpectedLoginCancellation(Exception ex, CancellationToken cancellationToken)
+        {
+            return ex is AuthenticatorAlreadyLinkedException ||
+                ex is LoginPromptCanceledException ||
+                (ex is OperationCanceledException && cancellationToken.IsCancellationRequested);
+        }
+
         internal static async Task<LegacyDeviceCodeLoginResult> CompleteLegacyDeviceCodeLoginAsync(
             Func<CancellationToken, Task<string>> generateDeviceCodeAsync,
             Func<string, CancellationToken, Task<EResult>> submitDeviceCodeAsync,
@@ -131,18 +138,20 @@ namespace Steam_Desktop_Authenticator
             CancellationToken cancellationToken,
             TimeSpan? deadline = null,
             int maxMismatchSubmissions = 3,
-            Func<TimeSpan, CancellationToken, Task> delayAsync = null)
+            Func<TimeSpan, CancellationToken, Task> delayAsync = null,
+            TimeSpan? postAcceptancePollDeadline = null)
         {
             if (generateDeviceCodeAsync == null || submitDeviceCodeAsync == null || pollAuthSessionStatusAsync == null)
                 return new LegacyDeviceCodeLoginResult(null, false);
 
             int effectiveMaxMismatchSubmissions = Math.Max(1, maxMismatchSubmissions);
-            TimeSpan effectiveOverallDeadline = deadline.HasValue && deadline.Value > TimeSpan.Zero
+            bool hasExplicitOverallDeadline = deadline.HasValue && deadline.Value > TimeSpan.Zero;
+            TimeSpan effectiveOverallDeadline = hasExplicitOverallDeadline
                 ? deadline.Value
                 : TimeSpan.FromSeconds(Math.Max(30, 35 * effectiveMaxMismatchSubmissions));
-            TimeSpan effectivePollDeadline = deadline.HasValue && deadline.Value > TimeSpan.Zero
-                ? deadline.Value
-                : TimeSpan.FromSeconds(30);
+            TimeSpan effectivePollDeadline = postAcceptancePollDeadline.HasValue && postAcceptancePollDeadline.Value > TimeSpan.Zero
+                ? postAcceptancePollDeadline.Value
+                : (hasExplicitOverallDeadline ? deadline.Value : TimeSpan.FromSeconds(30));
             TimeSpan effectiveInterval = pollingInterval > TimeSpan.Zero
                 ? pollingInterval
                 : TimeSpan.FromSeconds(1);
@@ -228,7 +237,13 @@ namespace Steam_Desktop_Authenticator
                         return new LegacyDeviceCodeLoginResult(null, deviceCodeAffirmativelyAccepted: false);
                     }
 
-                    using (CancellationTokenSource pollDeadlineCts = CancellationTokenSource.CreateLinkedTokenSource(effectiveToken))
+                    // When no explicit overall deadline was passed, give post-acceptance polling its full
+                    // 30-second budget (linked only to caller cancellation) so prior TOTP rollover waits
+                    // never starve polling after Steam has already accepted the code.
+                    CancellationToken pollParentToken = hasExplicitOverallDeadline && !postAcceptancePollDeadline.HasValue
+                        ? effectiveToken
+                        : cancellationToken;
+                    using (CancellationTokenSource pollDeadlineCts = CancellationTokenSource.CreateLinkedTokenSource(pollParentToken))
                     {
                         pollDeadlineCts.CancelAfter(effectivePollDeadline);
                         CancellationToken pollToken = pollDeadlineCts.Token;
@@ -666,17 +681,7 @@ namespace Steam_Desktop_Authenticator
                     Authenticator = new UserFormAuthenticator(this.account, this, cancellationToken, allowInteractiveDeviceAuth: LoginReason == LoginType.Transfer),
                 });
             }
-            catch (AuthenticatorAlreadyLinkedException)
-            {
-                ResetLoginButton(cancellationToken);
-                return;
-            }
-            catch (LoginPromptCanceledException)
-            {
-                ResetLoginButton(cancellationToken);
-                return;
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (Exception ex) when (IsExpectedLoginCancellation(ex, cancellationToken))
             {
                 ResetLoginButton(cancellationToken);
                 return;
@@ -749,17 +754,7 @@ namespace Steam_Desktop_Authenticator
                     pollResponse = await authSession.PollingWaitForResultAsync(cancellationToken);
                 }
             }
-            catch (AuthenticatorAlreadyLinkedException)
-            {
-                ResetLoginButton(cancellationToken);
-                return;
-            }
-            catch (LoginPromptCanceledException)
-            {
-                ResetLoginButton(cancellationToken);
-                return;
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (Exception ex) when (IsExpectedLoginCancellation(ex, cancellationToken))
             {
                 ResetLoginButton(cancellationToken);
                 return;
@@ -846,6 +841,11 @@ namespace Steam_Desktop_Authenticator
                     }
                     catch (Exception ex)
                     {
+                        if (cancellationToken.IsCancellationRequested || IsDisposed || Disposing)
+                        {
+                            ResetLoginButton(cancellationToken);
+                            return;
+                        }
                         DiagnosticErrorLogger.Log("Authenticator recovery", ex, "Unexpected failure while verifying pending authenticator activation.");
                         AstroMessageBox.Show(
                             "Steam could not verify whether this pending authenticator is active right now. Your pending record was kept safely; try again later.",
@@ -984,6 +984,11 @@ namespace Steam_Desktop_Authenticator
                     }
                     catch (Exception ex)
                     {
+                        if (cancellationToken.IsCancellationRequested || IsDisposed || Disposing)
+                        {
+                            ResetLoginButton(cancellationToken);
+                            return;
+                        }
                         DiagnosticErrorLogger.Log("Authenticator recovery", ex, "Unexpected failure while checking for an existing pending authenticator.");
                         AstroMessageBox.Show(
                             "Steam could not verify whether your existing pending authenticator is active right now. Your pending record was kept safely; try again later.",
@@ -1619,13 +1624,12 @@ namespace Steam_Desktop_Authenticator
             }
 
             SessionData previousSession = pendingAccount.Session;
-            string previousTokenGid = pendingAccount.TokenGID;
-            string previousDeviceId = pendingAccount.DeviceID;
             pendingAccount.Session = freshSession;
             AuthenticatorActivationVerificationResult verification;
             try
             {
                 verification = await verifyActivationAsync(pendingAccount, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
             }
             catch
             {
@@ -1651,7 +1655,7 @@ namespace Steam_Desktop_Authenticator
                     activationStatus: activationStatus);
             }
 
-            if (!TryApplyVerifiedIdentifiers(pendingAccount, verification, out previousTokenGid, out previousDeviceId))
+            if (!TryApplyVerifiedIdentifiers(pendingAccount, verification, out string previousTokenGid, out string previousDeviceId))
             {
                 pendingAccount.Session = previousSession;
                 return new PendingAuthenticatorRecoveryResult(

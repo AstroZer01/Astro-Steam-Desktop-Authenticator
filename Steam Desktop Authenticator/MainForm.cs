@@ -1214,6 +1214,7 @@ namespace Steam_Desktop_Authenticator
                 return false;
 
             AuthenticatorActivationVerificationResult verification = await verifyActivationAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             if (verification.Status != AuthenticatorActivationStatus.ActiveForThisRecord)
                 return false;
 

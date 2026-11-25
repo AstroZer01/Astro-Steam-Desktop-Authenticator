@@ -837,11 +837,132 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public void LoginPromptCanceledException_IsDistinctFromOperationCanceledException()
+        public void LoginPromptDismissal_ThrowsLoginPromptCanceledAndIsHandledDistinctlyFromTimeouts()
         {
-            var promptCanceled = new LoginPromptCanceledException();
-            Assert.False(typeof(OperationCanceledException).IsAssignableFrom(promptCanceled.GetType()));
-            Assert.Contains("canceled", promptCanceled.Message, StringComparison.OrdinalIgnoreCase);
+            using (var activeCts = new CancellationTokenSource())
+            {
+                // Dismissing a prompt while the login attempt is still active throws LoginPromptCanceledException,
+                // which LoginForm treats as expected silent cancellation without showing a connection error.
+                LoginPromptCanceledException promptCanceled = Assert.Throws<LoginPromptCanceledException>(() =>
+                    UserFormAuthenticator.ThrowForPromptDismissal(activeCts.Token));
+                Assert.True(LoginForm.IsExpectedLoginCancellation(promptCanceled, activeCts.Token));
+
+                // Non-caller TaskCanceledException (e.g., SteamKit2 AsyncJob or TimeAligner timeout) is NOT treated as silent cancel.
+                Assert.False(LoginForm.IsExpectedLoginCancellation(new TaskCanceledException("SteamKit timeout"), activeCts.Token));
+
+                // Once the owning login token is canceled, OperationCanceledException is treated as expected cancellation.
+                activeCts.Cancel();
+                OperationCanceledException callerCanceled = Assert.Throws<OperationCanceledException>(() =>
+                    UserFormAuthenticator.ThrowForPromptDismissal(activeCts.Token));
+                Assert.True(LoginForm.IsExpectedLoginCancellation(callerCanceled, activeCts.Token));
+            }
+        }
+
+        [Fact]
+        public async Task CompleteLegacyDeviceCodeLoginAsync_GivesPostAcceptancePollingFullBudgetIndependentOfSubmissionRollover()
+        {
+            var codes = new Queue<string>(new[] { "OLD01", "NEW02" });
+            int pollCalls = 0;
+            string freshAccess = CreateJwt(DateTimeOffset.UtcNow.AddHours(2).ToUnixTimeSeconds());
+            string freshRefresh = CreateJwt(DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds());
+
+            // Submission consumes 80ms of a 120ms submission deadline, while post-acceptance polling
+            // takes 90ms (exceeding the remaining 40ms of the submission deadline) and still succeeds
+            // within its independent 250ms post-acceptance polling budget.
+            LoginForm.LegacyDeviceCodeLoginResult result = await LoginForm.CompleteLegacyDeviceCodeLoginAsync(
+                _ => Task.FromResult(codes.Dequeue()),
+                async (code, ct) =>
+                {
+                    if (code == "OLD01")
+                    {
+                        await Task.Delay(80, ct);
+                        return SteamKit2.EResult.TwoFactorCodeMismatch;
+                    }
+                    return SteamKit2.EResult.OK;
+                },
+                async ct =>
+                {
+                    pollCalls++;
+                    if (pollCalls == 1)
+                        return null; // poll right after mismatch
+                    await Task.Delay(90, ct);
+                    return CreateAuthPollResult(freshAccess, freshRefresh);
+                },
+                TimeSpan.FromMilliseconds(5),
+                CancellationToken.None,
+                deadline: TimeSpan.FromMilliseconds(120),
+                delayAsync: (_, _) => Task.CompletedTask,
+                postAcceptancePollDeadline: TimeSpan.FromMilliseconds(250));
+
+            Assert.NotNull(result.PollResult);
+            Assert.True(result.DeviceCodeAffirmativelyAccepted);
+        }
+
+        [Fact]
+        public async Task PendingActivationRecovery_CancelingDuringVerificationNeverSavesOrPromotes()
+        {
+            const ulong steamId = 76561198000009022UL;
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount pending = CreateAccount(steamId, "cancel-during-verify", fullyEnrolled: false);
+            SessionData originalSession = pending.Session;
+            Assert.True(manifest.SaveAccount(pending, encrypt: false, passKey: null).Succeeded);
+
+            // 1. Interactive recovery: canceling token while verifyActivationAsync runs rolls back Session and does not save/promote.
+            using (var interactiveCts = new CancellationTokenSource())
+            {
+                SessionData freshSession = new SessionData
+                {
+                    SteamID = steamId,
+                    AccessToken = CreateJwt(DateTimeOffset.UtcNow.AddHours(3).ToUnixTimeSeconds()),
+                    RefreshToken = CreateJwt(DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds())
+                };
+
+                await Assert.ThrowsAsync<OperationCanceledException>(() =>
+                    LoginForm.TryRecoverPendingAccountWithFreshSessionAsync(
+                        manifest,
+                        pending,
+                        freshSession,
+                        passKey: null,
+                        (_, _) =>
+                        {
+                            interactiveCts.Cancel();
+                            return Task.FromResult(new AuthenticatorActivationVerificationResult(
+                                AuthenticatorActivationStatus.ActiveForThisRecord,
+                                pending.TokenGID,
+                                pending.DeviceID));
+                        },
+                        interactiveCts.Token));
+
+                Assert.False(pending.FullyEnrolled);
+                Assert.Same(originalSession, pending.Session);
+                Assert.False(Assert.Single(Manifest.GetManifest(true).GetAllAccounts()).FullyEnrolled);
+            }
+
+            // 2. Startup recovery: canceling token while verifyActivationAsync runs throws without calling persistActivatedAccount.
+            using (var startupCts = new CancellationTokenSource())
+            {
+                bool persistCalled = false;
+                await Assert.ThrowsAsync<OperationCanceledException>(() =>
+                    MainForm.TryRecoverPendingAccountActivationAsync(
+                        pending,
+                        _ =>
+                        {
+                            startupCts.Cancel();
+                            return Task.FromResult(new AuthenticatorActivationVerificationResult(
+                                AuthenticatorActivationStatus.ActiveForThisRecord,
+                                pending.TokenGID,
+                                pending.DeviceID));
+                        },
+                        (_, _) =>
+                        {
+                            persistCalled = true;
+                            return true;
+                        },
+                        startupCts.Token));
+
+                Assert.False(persistCalled);
+                Assert.False(pending.FullyEnrolled);
+            }
         }
 
         [Fact]
