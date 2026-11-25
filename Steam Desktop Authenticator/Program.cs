@@ -393,6 +393,15 @@ namespace Steam_Desktop_Authenticator
                     MessageBoxIcon.Error);
                 return;
             }
+            catch (ManifestStorageDirectoryException)
+            {
+                AstroMessageBox.Show(
+                    "Astro SDA cannot start because the account-data folder is not a supported local directory. Move the data folder to a regular local directory without symbolic links or junctions, then restart the application.",
+                    "Astro Steam Desktop Assistant",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
             catch (ManifestParseException)
             {
                 // Manifest file was corrupted, generate a new one.

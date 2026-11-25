@@ -13,4 +13,8 @@ namespace Steam_Desktop_Authenticator
     class ManifestRecoveryException : ManifestParseException
     {
     }
+
+    class ManifestStorageDirectoryException : ManifestParseException
+    {
+    }
 }
