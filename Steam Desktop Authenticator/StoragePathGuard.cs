@@ -58,6 +58,20 @@ namespace Steam_Desktop_Authenticator
                 if (handle == null || handle.IsInvalid || handle.IsClosed)
                     throw new InvalidDataException("The account-data directory lock handle is no longer valid.");
 
+                if (!GetFileInformationByHandle(handle, out ByHandleFileInformation fileInfo))
+                {
+                    int infoError = Marshal.GetLastWin32Error();
+                    throw new InvalidDataException(
+                        "The account-data directory attributes could not be verified.",
+                        infoError != 0 ? new Win32Exception(infoError) : null);
+                }
+
+                if ((fileInfo.FileAttributes & FileAttributeReparsePoint) != 0)
+                    throw new InvalidDataException("The account-data directory uses an unsupported link.");
+
+                if ((fileInfo.FileAttributes & FileAttributeDirectory) == 0)
+                    throw new InvalidDataException("The account-data directory is not a valid directory.");
+
                 string currentCanonical = TryGetFinalPathNameByHandle(handle, out int win32Error);
                 if (String.IsNullOrEmpty(currentCanonical))
                     throw new InvalidDataException(
@@ -68,6 +82,21 @@ namespace Steam_Desktop_Authenticator
                 string actual = currentCanonical.TrimEnd(DirectorySeparators);
                 if (!String.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("The account-data directory changed during a storage operation.");
+            }
+
+            public bool TryVerifyStillPinned(out Exception failure)
+            {
+                try
+                {
+                    VerifyStillPinned();
+                    failure = null;
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                    return false;
+                }
             }
 
             public void Dispose()
@@ -451,7 +480,7 @@ namespace Steam_Desktop_Authenticator
                 throw new InvalidDataException("The account-data directory resolved through an unsupported link.");
         }
 
-        private static void VerifyOpenedFileWithinCanonicalDirectory(
+        internal static void VerifyOpenedFileWithinCanonicalDirectory(
             SafeFileHandle fileHandle,
             string expectedFilename,
             string expectedCanonicalDirectory)

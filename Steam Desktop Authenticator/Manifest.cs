@@ -1557,8 +1557,9 @@ namespace Steam_Desktop_Authenticator
                         pinnedDir = StoragePathGuard.CreateAndPinDirectory(maDir);
                     }
 
+                    pinnedDir.VerifyStillPinned();
                     string backupFilename = Path.Combine(maDir, SettingsBackupFilename);
-                    WriteAllTextAtomically(manifestFilename, contents, backupFilename);
+                    WriteAllTextAtomically(manifestFilename, contents, backupFilename, pinnedDir.CanonicalDirectoryPath);
                     if (retainedObsoleteFilenames.Count > 0)
                     {
                         if (!RebaseRetainedStorageTransaction(maDir, contents, pinnedDir.CanonicalDirectoryPath) ||
@@ -1573,9 +1574,15 @@ namespace Steam_Desktop_Authenticator
                                 "The settings were saved, but a previous account-data cleanup could not be completed safely. Restart the application and try again.");
                         }
                     }
-                    pinnedDir.VerifyStillPinned();
-                    DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
-                    SweepOrphanedCredentialStoresLocked(maDir, this.CredentialsStoreFilename);
+                    if (pinnedDir.TryVerifyStillPinned(out Exception postCommitPinError))
+                    {
+                        DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
+                        SweepOrphanedCredentialStoresLocked(maDir, this.CredentialsStoreFilename);
+                    }
+                    else
+                    {
+                        DiagnosticErrorLogger.Log("Authenticator storage", postCommitPinError, "Skipping post-save cleanup because the account-data directory changed after the manifest was committed.");
+                    }
                     return StorageResult.Success();
                 }
                 catch (JsonException ex)
@@ -1842,6 +1849,7 @@ namespace Steam_Desktop_Authenticator
                         pinnedDir = StoragePathGuard.CreateAndPinDirectory(maDir);
                     }
 
+                    pinnedDir.VerifyStillPinned();
                     StorageTransactionJournal journal = new StorageTransactionJournal()
                     {
                         ManifestHash = GetContentHash(manifestContents),
@@ -1850,21 +1858,29 @@ namespace Steam_Desktop_Authenticator
                         RetainedObsoleteFilenames = trackedRetainedObsoleteFilenames.Count > 0 ? trackedRetainedObsoleteFilenames : null,
                         BackupFilename = Path.GetFileName(backupFilename)
                     };
-                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
+                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: pinnedDir.CanonicalDirectoryPath);
                     journalWritten = true;
 
                     foreach (KeyValuePair<string, string> stagedFile in stagedFiles)
                     {
                         if (stagedFile.Value == null || Encoding.UTF8.GetByteCount(stagedFile.Value) > MaximumAccountFileSizeBytes)
                             throw new InvalidDataException("An account file is larger than the supported size limit.");
-                        WriteAllTextAtomically(Path.Combine(maDir, stagedFile.Key), stagedFile.Value);
+                        WriteAllTextAtomically(Path.Combine(maDir, stagedFile.Key), stagedFile.Value, expectedCanonicalDirectory: pinnedDir.CanonicalDirectoryPath);
                     }
 
+                    pinnedDir.VerifyStillPinned();
                     manifestCommitStarted = true;
-                    WriteAllTextAtomically(manifestFilename, manifestContents, backupFilename);
+                    WriteAllTextAtomically(manifestFilename, manifestContents, backupFilename, pinnedDir.CanonicalDirectoryPath);
                     manifestCommitted = true;
 
-                    pinnedDir.VerifyStillPinned();
+                    if (!pinnedDir.TryVerifyStillPinned(out Exception postCommitPinError))
+                    {
+                        // Manifest is already committed on disk; preserve the journal for safe recovery
+                        // and report success with cleanup pending so callers still publish staged state.
+                        DiagnosticErrorLogger.Log("Authenticator storage", postCommitPinError, "Skipping post-commit cleanup because the account-data directory changed after the manifest was committed.");
+                        return StorageResult.Success(obsoleteCleanupPending: true);
+                    }
+
                     bool backupDeleted = DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
                     bool obsoleteDeleted = backupDeleted &&
                         DeleteFilesBestEffort(
@@ -1964,7 +1980,7 @@ namespace Steam_Desktop_Authenticator
                     RetainedObsoleteFilenames = retainedObsoleteFilenames.ToList(),
                     BackupFilename = null
                 };
-                WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings));
+                WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
                 return true;
             }
             catch (Exception ex)
@@ -2038,7 +2054,7 @@ namespace Steam_Desktop_Authenticator
                             journal.CreatedFilenames = new List<string>();
                             journal.ObsoleteFilenames = new List<string>();
                             journal.RetainedObsoleteFilenames = committedObsolete;
-                            WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
+                            WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
                             if (retainedObsoleteFilenames != null)
                             {
                                 foreach (string filename in committedObsolete)
@@ -2125,7 +2141,7 @@ namespace Steam_Desktop_Authenticator
                     journal.ObsoleteFilenames = new List<string>();
                     journal.RetainedObsoleteFilenames = pendingRetainedObsolete.Count > 0 ? pendingRetainedObsolete : null;
                     journal.BackupFilename = null;
-                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings));
+                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
                     return true;
                 }
                 catch (Exception ex)
@@ -2152,7 +2168,8 @@ namespace Steam_Desktop_Authenticator
                 string canonicalDir = expectedCanonicalDir ?? StoragePathGuard.GetValidatedCanonicalDirectoryPath(Path.GetDirectoryName(manifestFilename));
                 WriteAllTextAtomically(
                     manifestFilename,
-                    StoragePathGuard.ReadTextWithLimit(backupFilename, MaximumManifestFileSizeBytes, canonicalDir));
+                    StoragePathGuard.ReadTextWithLimit(backupFilename, MaximumManifestFileSizeBytes, canonicalDir),
+                    expectedCanonicalDirectory: canonicalDir);
                 return File.Exists(manifestFilename);
             }
             catch (Exception ex)
@@ -2241,17 +2258,33 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static void WriteAllTextAtomically(string filename, string contents, string backupFilename = null)
+        private static void WriteAllTextAtomically(
+            string filename,
+            string contents,
+            string backupFilename = null,
+            string expectedCanonicalDirectory = null)
         {
             string temporaryFilename = filename + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            bool tempFileVerified = String.IsNullOrWhiteSpace(expectedCanonicalDirectory);
             try
             {
                 using (FileStream stream = new FileStream(temporaryFilename, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
-                using (StreamWriter writer = new StreamWriter(stream, new UTF8Encoding(false)))
                 {
-                    writer.Write(contents);
-                    writer.Flush();
-                    stream.Flush(true);
+                    if (!tempFileVerified)
+                    {
+                        StoragePathGuard.VerifyOpenedFileWithinCanonicalDirectory(
+                            stream.SafeFileHandle,
+                            Path.GetFileName(temporaryFilename),
+                            expectedCanonicalDirectory);
+                        tempFileVerified = true;
+                    }
+
+                    using (StreamWriter writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                    {
+                        writer.Write(contents);
+                        writer.Flush();
+                        stream.Flush(true);
+                    }
                 }
 
                 if (File.Exists(filename))
@@ -2274,7 +2307,7 @@ namespace Steam_Desktop_Authenticator
             }
             finally
             {
-                if (File.Exists(temporaryFilename))
+                if (tempFileVerified && File.Exists(temporaryFilename))
                     File.Delete(temporaryFilename);
             }
         }
