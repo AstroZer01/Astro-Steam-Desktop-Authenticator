@@ -25,13 +25,21 @@ namespace Steam_Desktop_Authenticator
         private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(24);
         private static readonly TimeSpan FailureRetryBackoff = TimeSpan.FromMinutes(10);
         private static readonly Regex AvatarMediumXmlRegex = new Regex(
-            @"<avatar(?:Medium|Icon|Full)>\s*(?:<!\[CDATA\[)?(https://[^<\]]+?)(?:\]\]>)?\s*</avatar(?:Medium|Icon|Full)>",
+            @"<avatarMedium>\s*(?:<!\[CDATA\[)?(https://[^<\]]+?)(?:\]\]>)?\s*</avatarMedium>",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex AvatarFullXmlRegex = new Regex(
+            @"<avatarFull>\s*(?:<!\[CDATA\[)?(https://[^<\]]+?)(?:\]\]>)?\s*</avatarFull>",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex AvatarIconXmlRegex = new Regex(
+            @"<avatarIcon>\s*(?:<!\[CDATA\[)?(https://[^<\]]+?)(?:\]\]>)?\s*</avatarIcon>",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         private readonly string cacheDirectory;
+        private readonly Func<string, int, CancellationToken, Task<byte[]>> downloadBytesAsync;
+        private readonly Func<DateTime> utcNowProvider;
         private readonly ConcurrentDictionary<ulong, CacheEntry> memoryCache = new ConcurrentDictionary<ulong, CacheEntry>();
         private readonly ConcurrentDictionary<ulong, DateTime> failedUntilUtc = new ConcurrentDictionary<ulong, DateTime>();
-        private readonly ConcurrentDictionary<ulong, Task<string>> inflightFetches = new ConcurrentDictionary<ulong, Task<string>>();
+        private readonly ConcurrentDictionary<ulong, Lazy<Task<string>>> inflightFetches = new ConcurrentDictionary<ulong, Lazy<Task<string>>>();
 
         private sealed class CacheEntry
         {
@@ -40,6 +48,14 @@ namespace Steam_Desktop_Authenticator
         }
 
         public SteamAvatarService(string cacheDirectory = null)
+            : this(cacheDirectory, null, null)
+        {
+        }
+
+        internal SteamAvatarService(
+            string cacheDirectory,
+            Func<string, int, CancellationToken, Task<byte[]>> downloadBytesAsync,
+            Func<DateTime> utcNowProvider = null)
         {
             this.cacheDirectory = !String.IsNullOrWhiteSpace(cacheDirectory)
                 ? cacheDirectory
@@ -47,6 +63,8 @@ namespace Steam_Desktop_Authenticator
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "Astro Steam Desktop Authenticator",
                     "AvatarCache");
+            this.downloadBytesAsync = downloadBytesAsync ?? DownloadBytesAsync;
+            this.utcNowProvider = utcNowProvider ?? (() => DateTime.UtcNow);
         }
 
         public string TryGetCachedAvatarDataUrl(ulong steamId)
@@ -72,14 +90,21 @@ namespace Steam_Desktop_Authenticator
             if (steamId < SteamId64Base)
                 return true;
 
-            if (memoryCache.TryGetValue(steamId, out CacheEntry entry) &&
-                !String.IsNullOrEmpty(entry?.DataUrl) &&
-                DateTime.UtcNow - entry.CachedAtUtc < CacheTtl)
+            DateTime now = utcNowProvider();
+            if (!memoryCache.TryGetValue(steamId, out CacheEntry entry))
+            {
+                TryGetCachedAvatarDataUrl(steamId);
+                memoryCache.TryGetValue(steamId, out entry);
+            }
+
+            if (entry != null &&
+                !String.IsNullOrEmpty(entry.DataUrl) &&
+                now - entry.CachedAtUtc < CacheTtl)
             {
                 return true;
             }
 
-            if (failedUntilUtc.TryGetValue(steamId, out DateTime retryAfter) && DateTime.UtcNow < retryAfter)
+            if (failedUntilUtc.TryGetValue(steamId, out DateTime retryAfter) && now < retryAfter)
                 return true;
 
             return false;
@@ -94,32 +119,44 @@ namespace Steam_Desktop_Authenticator
             if (!String.IsNullOrEmpty(cached) && IsCacheFresh(steamId))
                 return Task.FromResult(cached);
 
-            if (failedUntilUtc.TryGetValue(steamId, out DateTime retryAfter) && DateTime.UtcNow < retryAfter)
+            if (failedUntilUtc.TryGetValue(steamId, out DateTime retryAfter) && utcNowProvider() < retryAfter)
                 return Task.FromResult(cached);
 
-            return inflightFetches.GetOrAdd(steamId, id => FetchAndCacheCoreAsync(id, cached, cancellationToken));
+            // Publish the Lazy entry into inflightFetches BEFORE invoking FetchAndCacheCoreAsync
+            // so even a synchronous throw (e.g. blocked proxy) always cleans up its own entry,
+            // and concurrent callers share a single execution.
+            Lazy<Task<string>> candidate = null;
+            candidate = new Lazy<Task<string>>(
+                () => FetchAndCacheCoreAsync(steamId, cached, candidate, cancellationToken),
+                LazyThreadSafetyMode.ExecutionAndPublication);
+            Lazy<Task<string>> active = inflightFetches.GetOrAdd(steamId, candidate);
+            return active.Value;
         }
 
-        private async Task<string> FetchAndCacheCoreAsync(ulong steamId, string fallbackCached, CancellationToken cancellationToken)
+        private async Task<string> FetchAndCacheCoreAsync(
+            ulong steamId,
+            string fallbackCached,
+            Lazy<Task<string>> ownerEntry,
+            CancellationToken cancellationToken)
         {
             try
             {
                 string avatarUrl = await ResolveAvatarUrlAsync(steamId, cancellationToken).ConfigureAwait(false);
                 if (String.IsNullOrEmpty(avatarUrl))
                 {
-                    failedUntilUtc[steamId] = DateTime.UtcNow.Add(FailureRetryBackoff);
+                    failedUntilUtc[steamId] = utcNowProvider().Add(FailureRetryBackoff);
                     return fallbackCached;
                 }
 
-                byte[] imageBytes = await DownloadBytesAsync(avatarUrl, MaxAvatarImageBytes, cancellationToken).ConfigureAwait(false);
+                byte[] imageBytes = await downloadBytesAsync(avatarUrl, MaxAvatarImageBytes, cancellationToken).ConfigureAwait(false);
                 if (!TryValidateImageBytes(imageBytes, out string mimeType))
                 {
-                    failedUntilUtc[steamId] = DateTime.UtcNow.Add(FailureRetryBackoff);
+                    failedUntilUtc[steamId] = utcNowProvider().Add(FailureRetryBackoff);
                     return fallbackCached;
                 }
 
                 string dataUrl = "data:" + mimeType + ";base64," + Convert.ToBase64String(imageBytes);
-                DateTime now = DateTime.UtcNow;
+                DateTime now = utcNowProvider();
                 memoryCache[steamId] = new CacheEntry { DataUrl = dataUrl, CachedAtUtc = now };
                 failedUntilUtc.TryRemove(steamId, out _);
                 TryWriteDiskCache(steamId, dataUrl);
@@ -131,12 +168,12 @@ namespace Steam_Desktop_Authenticator
             }
             catch
             {
-                failedUntilUtc[steamId] = DateTime.UtcNow.Add(FailureRetryBackoff);
+                failedUntilUtc[steamId] = utcNowProvider().Add(FailureRetryBackoff);
                 return fallbackCached;
             }
             finally
             {
-                inflightFetches.TryRemove(steamId, out _);
+                inflightFetches.TryRemove(new System.Collections.Generic.KeyValuePair<ulong, Lazy<Task<string>>>(steamId, ownerEntry));
             }
         }
 
@@ -183,11 +220,60 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrWhiteSpace(xml))
                 return null;
 
-            Match match = AvatarMediumXmlRegex.Match(xml);
-            if (!match.Success || match.Groups.Count < 2)
-                return null;
+            // Steam profile XML emits <avatarIcon> (32px) before <avatarMedium> (64px);
+            // prefer medium, then full, then icon.
+            Regex[] orderedTags = { AvatarMediumXmlRegex, AvatarFullXmlRegex, AvatarIconXmlRegex };
+            foreach (Regex regex in orderedTags)
+            {
+                Match match = regex.Match(xml);
+                if (!match.Success || match.Groups.Count < 2)
+                    continue;
 
-            return ConfirmationTypePresentation.SanitizeIconUrl(match.Groups[1].Value);
+                string sanitized = ConfirmationTypePresentation.SanitizeIconUrl(match.Groups[1].Value);
+                if (!String.IsNullOrEmpty(sanitized))
+                    return sanitized;
+            }
+
+            return null;
+        }
+
+        internal static bool TryValidateImageDataUrl(string dataUrl)
+        {
+            if (String.IsNullOrWhiteSpace(dataUrl))
+                return false;
+
+            const string prefix = "data:";
+            const string base64Marker = ";base64,";
+            if (!dataUrl.StartsWith(prefix, StringComparison.Ordinal))
+                return false;
+
+            int markerIndex = dataUrl.IndexOf(base64Marker, prefix.Length, StringComparison.Ordinal);
+            if (markerIndex <= prefix.Length)
+                return false;
+
+            string declaredMime = dataUrl.Substring(prefix.Length, markerIndex - prefix.Length);
+            if (!String.Equals(declaredMime, "image/png", StringComparison.Ordinal) &&
+                !String.Equals(declaredMime, "image/jpeg", StringComparison.Ordinal) &&
+                !String.Equals(declaredMime, "image/webp", StringComparison.Ordinal) &&
+                !String.Equals(declaredMime, "image/gif", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            string base64Payload = dataUrl.Substring(markerIndex + base64Marker.Length);
+            if (String.IsNullOrWhiteSpace(base64Payload))
+                return false;
+
+            try
+            {
+                byte[] bytes = Convert.FromBase64String(base64Payload);
+                return TryValidateImageBytes(bytes, out string actualMime) &&
+                    String.Equals(declaredMime, actualMime, StringComparison.Ordinal);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
         }
 
         internal static bool TryValidateImageBytes(byte[] bytes, out string mimeType)
@@ -230,9 +316,9 @@ namespace Steam_Desktop_Authenticator
             return false;
         }
 
-        private static async Task<string> DownloadTextAsync(string url, int maxBytes, CancellationToken cancellationToken)
+        private async Task<string> DownloadTextAsync(string url, int maxBytes, CancellationToken cancellationToken)
         {
-            byte[] bytes = await DownloadBytesAsync(url, maxBytes, cancellationToken).ConfigureAwait(false);
+            byte[] bytes = await downloadBytesAsync(url, maxBytes, cancellationToken).ConfigureAwait(false);
             if (bytes == null || bytes.Length == 0)
                 return null;
             return Encoding.UTF8.GetString(bytes);
@@ -290,13 +376,18 @@ namespace Steam_Desktop_Authenticator
             cachedAtUtc = DateTime.MinValue;
             try
             {
+                DirectoryInfo dirInfo = new DirectoryInfo(cacheDirectory);
+                if (!dirInfo.Exists || (dirInfo.Attributes & FileAttributes.ReparsePoint) != 0)
+                    return null;
+
                 string path = GetCacheFilePath(steamId);
                 FileInfo info = new FileInfo(path);
-                if (!info.Exists || info.Length == 0 || info.Length > MaxAvatarImageBytes * 2)
+                if (!info.Exists || (info.Attributes & FileAttributes.ReparsePoint) != 0 ||
+                    info.Length == 0 || info.Length > MaxAvatarImageBytes * 2)
                     return null;
 
                 string content = File.ReadAllText(path, Encoding.UTF8).Trim();
-                if (!content.StartsWith("data:image/", StringComparison.Ordinal))
+                if (!TryValidateImageDataUrl(content))
                     return null;
 
                 cachedAtUtc = info.LastWriteTimeUtc;
@@ -310,17 +401,41 @@ namespace Steam_Desktop_Authenticator
 
         private void TryWriteDiskCache(ulong steamId, string dataUrl)
         {
+            string temp = null;
             try
             {
                 Directory.CreateDirectory(cacheDirectory);
+                DirectoryInfo dirInfo = new DirectoryInfo(cacheDirectory);
+                if ((dirInfo.Attributes & FileAttributes.ReparsePoint) != 0)
+                    return;
+
                 string target = GetCacheFilePath(steamId);
-                string temp = target + ".tmp";
+                if (File.Exists(target) && (File.GetAttributes(target) & FileAttributes.ReparsePoint) != 0)
+                    return;
+
+                temp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 File.WriteAllText(temp, dataUrl, new UTF8Encoding(false));
                 File.Move(temp, target, overwrite: true);
+                temp = null;
             }
             catch
             {
                 // Best-effort disk cache only.
+            }
+            finally
+            {
+                if (!String.IsNullOrEmpty(temp))
+                {
+                    try
+                    {
+                        if (File.Exists(temp))
+                            File.Delete(temp);
+                    }
+                    catch
+                    {
+                        // Ignore cleanup errors for best-effort temp files.
+                    }
+                }
             }
         }
     }

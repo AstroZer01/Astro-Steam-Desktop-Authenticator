@@ -436,9 +436,9 @@ namespace Steam_Desktop_Authenticator
 
         private async void SetupModernUI()
         {
-            this.Size = new Size(440, 520);
-            this.MinimumSize = new Size(440, 520);
-            this.MaximumSize = new Size(440, 520);
+            this.Size = new Size(440, 568);
+            this.MinimumSize = new Size(440, 568);
+            this.MaximumSize = new Size(440, 568);
             this.MaximizeBox = false;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.BackColor = AstroTheme.Background;

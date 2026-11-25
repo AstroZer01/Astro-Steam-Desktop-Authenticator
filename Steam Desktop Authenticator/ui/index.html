@@ -12,6 +12,30 @@
     <div class="loader"></div>
   </div>
 
+  <!-- + Add Popover Menu (mounted at shell root so it remains visible in compact mode when desktop sidebar is hidden) -->
+  <div id="add-account-popover" role="menu" class="hidden fixed w-52 z-[60] astro-card-elevated rounded-lg p-1.5 flex-col gap-0.5">
+    <button id="btn-setup-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
+      <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      <span class="min-w-0"><span class="block font-medium">Setup New Account</span><span class="block text-[10px] text-on-surface-subtle">Enable Steam Guard</span></span>
+    </button>
+    <button id="btn-transfer-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
+      <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h12m0 0-3-3m3 3-3 3M19 16H7m0 0 3-3m-3 3 3 3"/></svg>
+      <span class="min-w-0"><span class="block font-medium">Transfer Authenticator</span><span class="block text-[10px] text-on-surface-subtle">Move from Steam Mobile</span></span>
+    </button>
+    <button id="btn-import-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
+      <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <span class="min-w-0"><span class="block font-medium">Import .maFile</span><span class="block text-[10px] text-on-surface-subtle">Existing SDA account</span></span>
+    </button>
+  </div>
+
+  <!-- Account Overflow Menu (mounted at shell root so both desktop and compact headers share it) -->
+  <div id="guard-more-menu" role="menu" class="hidden fixed w-48 z-[60] astro-card-elevated rounded-lg p-1.5 flex-col gap-0.5">
+    <button id="btn-guard-renew" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Renew Session</button>
+    <button id="btn-guard-export-menu" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Backup &amp; Export…</button>
+    <div class="h-px bg-white/[0.075] my-1"></div>
+    <button id="btn-guard-remove" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-error hover:bg-error-strong/15 transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Remove Account…</button>
+  </div>
+
   <!-- ==================== DESKTOP LEFT VAULT SIDEBAR (>= 680px) ==================== -->
   <aside id="desktop-sidebar" class="astro-sidebar flex-col bg-surface-container-lowest border-r border-white/[0.075] min-h-0 relative">
     <!-- Aligned 44px Header Seam -->
@@ -21,22 +45,6 @@
         <span>+ Add</span>
         <span class="text-[9px] opacity-80">▾</span>
       </button>
-
-      <!-- + Add Popover Menu -->
-      <div id="add-account-popover" role="menu" class="hidden absolute top-10 right-2.5 w-52 z-[60] astro-card-elevated rounded-lg p-1.5 flex-col gap-0.5">
-        <button id="btn-setup-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
-          <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          <span class="min-w-0"><span class="block font-medium">Setup New Account</span><span class="block text-[10px] text-on-surface-subtle">Enable Steam Guard</span></span>
-        </button>
-        <button id="btn-transfer-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
-          <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h12m0 0-3-3m3 3-3 3M19 16H7m0 0 3-3m-3 3 3 3"/></svg>
-          <span class="min-w-0"><span class="block font-medium">Transfer Authenticator</span><span class="block text-[10px] text-on-surface-subtle">Move from Steam Mobile</span></span>
-        </button>
-        <button id="btn-import-account" role="menuitem" type="button" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high hover:text-primary transition-colors">
-          <svg class="ui-icon shrink-0" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-          <span class="min-w-0"><span class="block font-medium">Import .maFile</span><span class="block text-[10px] text-on-surface-subtle">Existing SDA account</span></span>
-        </button>
-      </div>
     </div>
 
     <!-- Filter Box -->
@@ -105,7 +113,10 @@
           <div id="compact-account-name" class="text-xs font-semibold text-on-surface truncate">No account selected</div>
           <div id="compact-account-sub" class="text-[10px] text-on-surface-subtle truncate">Add or import an account</div>
         </div>
-        <button id="btn-compact-add-menu" type="button" class="btn-add-accent rounded-md px-2.5 py-1 text-[10.5px] leading-none shrink-0">+ Add ▾</button>
+        <div class="flex items-center gap-1.5 shrink-0">
+          <button id="btn-compact-add-menu" type="button" aria-haspopup="menu" aria-expanded="false" class="btn-add-accent rounded-md px-2.5 py-1 text-[10.5px] leading-none shrink-0">+ Add ▾</button>
+          <button id="btn-compact-guard-more" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="More account actions" title="More account actions" class="btn-ghost rounded-md px-2 py-1 text-xs leading-none shrink-0">⋯</button>
+        </div>
       </div>
     </div>
 
@@ -132,14 +143,6 @@
           <div class="flex items-center gap-2 shrink-0 relative">
             <button id="btn-guard-options" type="button" class="btn-surface rounded-lg px-3 py-2 text-xs">Options</button>
             <button id="btn-guard-more" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="More account actions" title="More account actions" class="btn-ghost rounded-lg px-2.5 py-2 text-xs leading-none">⋯</button>
-
-            <!-- Account Overflow Menu (tucks Remove & Renew safely away from daily header) -->
-            <div id="guard-more-menu" role="menu" class="hidden absolute top-10 right-0 w-48 z-[55] astro-card-elevated rounded-lg p-1.5 flex-col gap-0.5">
-              <button id="btn-guard-renew" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Renew Session</button>
-              <button id="btn-guard-export-menu" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-on-surface hover:bg-surface-container-high transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Backup &amp; Export…</button>
-              <div class="h-px bg-white/[0.075] my-1"></div>
-              <button id="btn-guard-remove" role="menuitem" type="button" class="w-full text-left px-2.5 py-2 rounded-md text-xs text-error hover:bg-error-strong/15 transition-colors disabled:opacity-45 disabled:cursor-not-allowed">Remove Account…</button>
-            </div>
           </div>
         </div>
 
@@ -786,6 +789,8 @@
   const validSettingsSubTabs = new Set(['confirmations', 'logins', 'proxy', 'app']);
   const ACCOUNT_SCOPE_STORAGE_KEY = 'astro.confirmationsScope';
   let hasExplicitScopePreference = false;
+  let hasHydratedCurrentAccountScope = false;
+  let hasInitializedCurrentAccount = false;
 
   let allAccs = [];
   let currentAcc = "";
@@ -846,26 +851,32 @@
     const container = document.getElementById(containerId);
     if (!container) return;
     const existingImg = container.querySelector('img');
-    if (existingImg) existingImg.remove();
     const fallback = document.getElementById(fallbackId);
     const dot = document.getElementById(dotId);
     if (acc && acc.avatarUrl) {
       if (fallback) fallback.classList.add('hidden');
-      const img = document.createElement('img');
-      img.src = acc.avatarUrl;
-      img.alt = '';
-      img.className = 'w-full h-full object-cover rounded-[inherit]';
-      img.onerror = () => {
-        img.remove();
-        if (fallback) {
-          fallback.textContent = getAccountInitials(acc.name);
-          fallback.classList.remove('hidden');
-        }
-      };
-      container.insertBefore(img, container.firstChild);
-    } else if (fallback) {
-      fallback.textContent = acc ? getAccountInitials(acc.name) : '--';
-      fallback.classList.remove('hidden');
+      if (!existingImg || existingImg.dataset.avatarSrc !== acc.avatarUrl) {
+        if (existingImg) existingImg.remove();
+        const img = document.createElement('img');
+        img.src = acc.avatarUrl;
+        img.dataset.avatarSrc = acc.avatarUrl;
+        img.alt = '';
+        img.className = 'w-full h-full object-cover rounded-[inherit]';
+        img.onerror = () => {
+          img.remove();
+          if (fallback) {
+            fallback.textContent = getAccountInitials(acc.name);
+            fallback.classList.remove('hidden');
+          }
+        };
+        container.insertBefore(img, container.firstChild);
+      }
+    } else {
+      if (existingImg) existingImg.remove();
+      if (fallback) {
+        fallback.textContent = acc ? getAccountInitials(acc.name) : '--';
+        fallback.classList.remove('hidden');
+      }
     }
     if (dot) {
       dot.className = (containerId === 'guard-account-avatar' ? 'w-2.5 h-2.5' : 'w-2 h-2') +
@@ -885,62 +896,84 @@
   }
 
   // ==================== POPOVERS & KEYBOARD SHORTCUTS ====================
-  function closeAllPopovers() {
-    const addPop = document.getElementById('add-account-popover');
-    const addBtn = document.getElementById('btn-add-menu');
-    if (addPop) { addPop.classList.add('hidden'); addPop.classList.remove('flex'); }
-    if (addBtn) addBtn.setAttribute('aria-expanded', 'false');
-    const moreMenu = document.getElementById('guard-more-menu');
-    const moreBtn = document.getElementById('btn-guard-more');
-    if (moreMenu) { moreMenu.classList.add('hidden'); moreMenu.classList.remove('flex'); }
-    if (moreBtn) moreBtn.setAttribute('aria-expanded', 'false');
+  function clearPopoverPosition(el) {
+    if (!el) return;
+    el.style.top = '';
+    el.style.left = '';
+    el.style.right = '';
   }
 
-  function toggleAddPopover(anchorRight = false) {
-    const pop = document.getElementById('add-account-popover');
-    const btn = document.getElementById('btn-add-menu');
-    if (!pop) return;
-    const willOpen = pop.classList.contains('hidden');
+  function positionAnchoredPopover(popover, triggerBtn) {
+    if (!popover || !triggerBtn) return;
+    const rect = triggerBtn.getBoundingClientRect();
+    const popWidth = popover.offsetWidth || 208;
+    const popHeight = popover.offsetHeight || 160;
+    const margin = 8;
+    const left = Math.max(margin, Math.min(rect.right - popWidth, window.innerWidth - popWidth - margin));
+    let top = rect.bottom + 6;
+    if (top + popHeight > window.innerHeight - margin) {
+      top = Math.max(margin, rect.top - popHeight - 6);
+    }
+    popover.style.left = Math.round(left) + 'px';
+    popover.style.top = Math.round(top) + 'px';
+    popover.style.right = 'auto';
+  }
+
+  function closeAllPopovers() {
+    const addPop = document.getElementById('add-account-popover');
+    if (addPop) {
+      addPop.classList.add('hidden');
+      addPop.classList.remove('flex');
+      clearPopoverPosition(addPop);
+    }
+    ['btn-add-menu', 'btn-compact-add-menu'].forEach(id => {
+      const btn = document.getElementById(id);
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    });
+
+    const moreMenu = document.getElementById('guard-more-menu');
+    if (moreMenu) {
+      moreMenu.classList.add('hidden');
+      moreMenu.classList.remove('flex');
+      clearPopoverPosition(moreMenu);
+    }
+    ['btn-guard-more', 'btn-compact-guard-more'].forEach(id => {
+      const btn = document.getElementById(id);
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    });
+  }
+
+  function toggleAnchoredPopover(popoverId, triggerBtn) {
+    const pop = document.getElementById(popoverId);
+    if (!pop || !triggerBtn || triggerBtn.disabled) return;
+    const wasOpenOnSameTrigger = !pop.classList.contains('hidden') && triggerBtn.getAttribute('aria-expanded') === 'true';
     closeAllPopovers();
-    if (willOpen) {
+    if (!wasOpenOnSameTrigger) {
       pop.classList.remove('hidden');
       pop.classList.add('flex');
-      if (btn) btn.setAttribute('aria-expanded', 'true');
+      positionAnchoredPopover(pop, triggerBtn);
+      triggerBtn.setAttribute('aria-expanded', 'true');
     }
   }
 
   document.getElementById('btn-add-menu').addEventListener('click', e => {
     e.stopPropagation();
-    toggleAddPopover(false);
+    toggleAnchoredPopover('add-account-popover', e.currentTarget);
   });
   document.getElementById('btn-compact-add-menu').addEventListener('click', e => {
     e.stopPropagation();
-    // In compact mode, show the popover fixed near top-right
-    const pop = document.getElementById('add-account-popover');
-    if (!pop) return;
-    const willOpen = pop.classList.contains('hidden');
-    closeAllPopovers();
-    if (willOpen) {
-      pop.classList.remove('hidden');
-      pop.classList.add('flex');
-      pop.style.position = 'fixed';
-      pop.style.top = '58px';
-      pop.style.right = '14px';
-    }
+    toggleAnchoredPopover('add-account-popover', e.currentTarget);
   });
   document.getElementById('btn-guard-more').addEventListener('click', e => {
     e.stopPropagation();
-    const menu = document.getElementById('guard-more-menu');
-    const btn = document.getElementById('btn-guard-more');
-    const willOpen = menu.classList.contains('hidden');
-    closeAllPopovers();
-    if (willOpen) {
-      menu.classList.remove('hidden');
-      menu.classList.add('flex');
-      btn.setAttribute('aria-expanded', 'true');
-    }
+    toggleAnchoredPopover('guard-more-menu', e.currentTarget);
+  });
+  document.getElementById('btn-compact-guard-more').addEventListener('click', e => {
+    e.stopPropagation();
+    toggleAnchoredPopover('guard-more-menu', e.currentTarget);
   });
   document.addEventListener('click', () => closeAllPopovers());
+  window.addEventListener('resize', () => closeAllPopovers());
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
@@ -1240,6 +1273,7 @@
     const optBtn = document.getElementById('btn-guard-options');
     const expBtn = document.getElementById('btn-guard-export');
     const moreBtn = document.getElementById('btn-guard-more');
+    const compactMoreBtn = document.getElementById('btn-compact-guard-more');
     const renewItem = document.getElementById('btn-guard-renew');
     const expMenu = document.getElementById('btn-guard-export-menu');
     const remMenu = document.getElementById('btn-guard-remove');
@@ -1256,6 +1290,7 @@
       if (optBtn) optBtn.disabled = true;
       if (expBtn) expBtn.disabled = true;
       if (moreBtn) moreBtn.disabled = true;
+      if (compactMoreBtn) compactMoreBtn.disabled = true;
       if (compactName) compactName.textContent = 'No accounts';
       if (compactSub) compactSub.textContent = 'Click + Add to set up Steam Guard';
       updatePendingActivityStrip();
@@ -1265,6 +1300,7 @@
     if (optBtn) optBtn.disabled = !acc.steamId;
     if (expBtn) expBtn.disabled = !acc.steamId;
     if (moreBtn) moreBtn.disabled = false;
+    if (compactMoreBtn) compactMoreBtn.disabled = false;
     if (expMenu) expMenu.disabled = !acc.steamId;
     if (remMenu) remMenu.disabled = false;
 
@@ -1349,27 +1385,54 @@
   }
 
   function updateCurrentAccount(accName, sessionExpired = false, steamId = "", pendingActivation = false) {
-    const selectionChanged = currentAccSteamId !== (steamId || "") || currentAccExpired !== !!sessionExpired || currentAccPending !== !!pendingActivation;
+    const normalizedSteamId = steamId || "";
+    const normalizedExpired = !!sessionExpired;
+    const normalizedPending = !!pendingActivation;
+    const selectionChanged = currentAccSteamId !== normalizedSteamId || currentAccExpired !== normalizedExpired || currentAccPending !== normalizedPending;
+    const accountChanged = !hasInitializedCurrentAccount || currentAcc !== accName || selectionChanged;
+
     currentAcc = accName;
-    currentAccSteamId = steamId || "";
-    currentAccExpired = !!sessionExpired;
-    currentAccPending = !!pendingActivation;
-    document.getElementById('account-title').innerText = currentAccPending
-      ? accName + " (pending activation)"
-      : accName;
-    renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+    currentAccSteamId = normalizedSteamId;
+    currentAccExpired = normalizedExpired;
+    currentAccPending = normalizedPending;
+    hasInitializedCurrentAccount = true;
+
+    const titleEl = document.getElementById('account-title');
+    const desiredTitle = currentAccPending ? (accName + " (pending activation)") : accName;
+    if (titleEl && titleEl.innerText !== desiredTitle) {
+      titleEl.innerText = desiredTitle;
+    }
+
+    // Avoid rebuilding sidebar rows, avatar <img> nodes, and Login Actions DOM on every 1 Hz token tick.
+    if (!accountChanged) {
+      return;
+    }
+
+    if (!accountListRenderDeferred) {
+      renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+    }
     updateGuardHeaderDetails();
 
     const tradeSelect = document.getElementById('trade-account-select');
     const loginSelect = document.getElementById('login-account-select');
     const previousTradeSelection = tradeSelect ? (tradeSelect.value || 'all') : 'all';
+    const savedScopePref = getSavedAccountScopePreference();
+    const shouldHydrateSelectedScope = !hasHydratedCurrentAccountScope && hasExplicitScopePreference && savedScopePref === 'selected';
+
     if (currentAccExpired || currentAccPending) {
       if (tradeSelect) tradeSelect.value = 'all';
       if (loginSelect) loginSelect.value = 'all';
-    } else {
+    } else if (currentAccSteamId) {
       const hasOption = select => Array.from(select.options).some(option => option.value === currentAccSteamId);
-      if (tradeSelect && tradeSelect.value !== 'all' && hasOption(tradeSelect)) tradeSelect.value = currentAccSteamId;
-      if (loginSelect && loginSelect.value !== 'all' && hasOption(loginSelect)) loginSelect.value = currentAccSteamId;
+      if (tradeSelect && (tradeSelect.value !== 'all' || shouldHydrateSelectedScope) && hasOption(tradeSelect)) {
+        tradeSelect.value = currentAccSteamId;
+      }
+      if (loginSelect && (loginSelect.value !== 'all' || shouldHydrateSelectedScope) && hasOption(loginSelect)) {
+        loginSelect.value = currentAccSteamId;
+      }
+      if ((tradeSelect && hasOption(tradeSelect)) || (loginSelect && hasOption(loginSelect))) {
+        hasHydratedCurrentAccountScope = true;
+      }
     }
     syncScopeButtonsUI();
     const tradeSelectionChanged = syncTradeAccountSelection(previousTradeSelection);
@@ -1417,9 +1480,11 @@
   function updateAccountAvatar(steamId, dataUrl) {
     if (!steamId || !dataUrl) return;
     const target = allAccs.find(a => a.steamId === String(steamId));
-    if (!target) return;
+    if (!target || target.avatarUrl === dataUrl) return;
     target.avatarUrl = dataUrl;
-    renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+    if (!accountListRenderDeferred) {
+      renderAccountList(document.getElementById('filter-input').value.toLowerCase());
+    }
     if (currentAccSteamId === String(steamId)) {
       updateGuardHeaderDetails();
     }
@@ -2107,6 +2172,7 @@
 
   function applyAccountScope(scopeValue) {
     saveAccountScopePreference(scopeValue);
+    hasHydratedCurrentAccountScope = true;
     const tradeSelect = document.getElementById('trade-account-select');
     const loginSelect = document.getElementById('login-account-select');
     const targetVal = scopeValue === 'selected' && currentAccSteamId && !currentAccExpired && !currentAccPending

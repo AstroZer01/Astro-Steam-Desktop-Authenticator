@@ -8,7 +8,8 @@ namespace Steam_Desktop_Authenticator
 {
     internal sealed class QrScanOverlayForm : Form
     {
-        private const int VisualSize = 350;
+        internal const int CaptureSize = 350;
+        private const int VisualSize = CaptureSize;
         private const int InstructionsHeight = 52;
         private readonly Timer followCursorTimer = new Timer { Interval = 16 };
 

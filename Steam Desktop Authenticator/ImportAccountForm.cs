@@ -50,7 +50,7 @@ namespace Steam_Desktop_Authenticator
                 Text = "Import Steam Guard Account",
                 AutoSize = true,
                 Location = new Point(20, 16),
-                Font = new Font("Segoe UI", 11F, FontStyle.Bold),
+                Font = AstroTheme.FontButtonLarge,
                 ForeColor = AstroTheme.OnSurface,
                 BackColor = Color.Transparent
             };
@@ -63,22 +63,27 @@ namespace Steam_Desktop_Authenticator
                 400);
             callout.Location = new Point(20, 44);
 
-            Panel divider = AstroTheme.CreateDivider(400);
-            divider.Location = new Point(20, 114);
+            Controls.Add(heading);
+            Controls.Add(callout);
+            PerformLayout();
 
+            int dividerTop = Math.Max(114, callout.Bottom + 14);
+            Panel divider = AstroTheme.CreateDivider(400);
+            divider.Location = new Point(20, dividerTop);
+
+            int buttonTop = divider.Bottom + 13;
             btnCancel.Text = "Cancel";
             btnCancel.Size = new Size(96, 34);
-            btnCancel.Location = new Point(168, 128);
+            btnCancel.Location = new Point(168, buttonTop);
             AstroTheme.StyleSurfaceButton(btnCancel);
 
             btnImport.Text = "Select .maFile…";
             btnImport.Size = new Size(148, 34);
-            btnImport.Location = new Point(272, 128);
+            btnImport.Location = new Point(272, buttonTop);
             AstroTheme.StylePrimaryButton(btnImport);
 
-            Controls.Add(heading);
-            Controls.Add(callout);
             Controls.Add(divider);
+            ClientSize = new Size(440, Math.Max(176, btnImport.Bottom + 16));
         }
 
         private void btnImport_Click(object sender, EventArgs e)

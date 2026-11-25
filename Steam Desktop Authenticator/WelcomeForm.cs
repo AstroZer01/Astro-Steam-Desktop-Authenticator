@@ -27,6 +27,18 @@ namespace Steam_Desktop_Authenticator
         private Manifest man;
 
         private Bitmap appIconBitmap;
+        private PictureBox appIconBox;
+
+        private void ReleaseAppIconBitmap()
+        {
+            if (appIconBox != null && !appIconBox.IsDisposed)
+                appIconBox.Image = null;
+            if (appIconBitmap != null)
+            {
+                appIconBitmap.Dispose();
+                appIconBitmap = null;
+            }
+        }
 
         public WelcomeForm()
         {
@@ -51,6 +63,7 @@ namespace Steam_Desktop_Authenticator
                 SizeMode = PictureBoxSizeMode.Zoom,
                 BackColor = AstroTheme.SurfaceContainer
             };
+            appIconBox = iconBox;
             if (Icon != null)
             {
                 appIconBitmap = Icon.ToBitmap();
@@ -66,14 +79,14 @@ namespace Steam_Desktop_Authenticator
             Controls.Add(iconBox);
 
             label1.Text = "Welcome to Astro SDA";
-            label1.Font = new Font("Segoe UI", 16F, FontStyle.Bold);
+            label1.Font = AstroTheme.FontHeadlineLarge;
             label1.ForeColor = AstroTheme.OnSurface;
             label1.Location = new Point(24, 80);
             label1.Size = new Size(412, 30);
             label1.TextAlign = ContentAlignment.MiddleCenter;
 
             label2.Text = "Manage Steam Guard codes, confirmations, and login approvals locally.";
-            label2.Font = new Font("Segoe UI", 9.25F, FontStyle.Regular);
+            label2.Font = AstroTheme.FontSubtitle;
             label2.ForeColor = AstroTheme.OnSurfaceVariant;
             label2.Location = new Point(28, 112);
             label2.Size = new Size(404, 34);
@@ -94,15 +107,7 @@ namespace Steam_Desktop_Authenticator
                 top: 248);
 
             AcceptButton = btnJustStart;
-            FormClosed += (s, e) =>
-            {
-                if (appIconBitmap != null)
-                {
-                    iconBox.Image = null;
-                    appIconBitmap.Dispose();
-                    appIconBitmap = null;
-                }
-            };
+            FormClosed += (s, e) => ReleaseAppIconBitmap();
         }
 
         private static void ConfigureChoiceCardButton(Button button, string title, string subtitle, bool isPrimary, int top)

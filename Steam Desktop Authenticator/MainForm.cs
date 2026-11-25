@@ -1583,9 +1583,6 @@ namespace Steam_Desktop_Authenticator
             // Style the tray context menu
             AstroTheme.StyleContextMenuStrip(menuStripTray);
             ConfigureTrayContextMenu();
-            trayAccountList.BackColor = AstroTheme.SurfaceContainer;
-            trayAccountList.ForeColor = AstroTheme.OnSurface;
-            trayAccountList.FlatStyle = FlatStyle.Flat;
 
             // Handle left click on tray icon to restore
             trayIcon.MouseClick += (s, ev) =>
@@ -1746,11 +1743,11 @@ namespace Steam_Desktop_Authenticator
                 ResizeRect rect = Marshal.PtrToStructure<ResizeRect>(m.LParam);
                 AdjustResizeRectForAspectRatio(
                     ref rect,
-                    m.WParam.ToInt32(),
+                    unchecked((int)m.WParam.ToInt64()),
                     ModernWindowAspectRatio,
                     this.MinimumSize.Width,
                     this.MinimumSize.Height);
-                Marshal.StructureToPtr(rect, m.LParam, true);
+                Marshal.StructureToPtr(rect, m.LParam, false);
                 m.Result = (IntPtr)1;
                 return;
             }
@@ -2226,15 +2223,15 @@ namespace Steam_Desktop_Authenticator
                 bool cancelled = false;
                 for (int i = 300; i > 0; i--)
                 {
-                    if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
-                    {
-                        keyPressed = true;
-                        break;
-                    }
-
                     if (qrScanCancelRequested || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0)
                     {
                         cancelled = true;
+                        break;
+                    }
+
+                    if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
+                    {
+                        keyPressed = true;
                         break;
                     }
 
@@ -2259,8 +2256,8 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 GetCursorPos(out Point cursorPos);
-                int scanWidth = 500;
-                int scanHeight = 500;
+                int scanWidth = QrScanOverlayForm.CaptureSize;
+                int scanHeight = QrScanOverlayForm.CaptureSize;
 
                 using (Bitmap bitmap = new Bitmap(scanWidth, scanHeight))
                 {
@@ -2874,10 +2871,43 @@ namespace Steam_Desktop_Authenticator
             OpenTradeConfirmationsFromNotification();
         }
 
+        private bool isSynchronizingAccountSelection;
+
+        private static string EscapeMenuItemText(string text)
+        {
+            return String.IsNullOrEmpty(text) ? String.Empty : text.Replace("&", "&&");
+        }
+
+        private void SelectAccount(SteamGuardAccount account)
+        {
+            if (account == null)
+                return;
+
+            currentAccount = account;
+            int idx = listAccounts.Items.IndexOf(account.AccountName);
+            if (idx >= 0 && listAccounts.SelectedIndex != idx)
+            {
+                isSynchronizingAccountSelection = true;
+                try
+                {
+                    listAccounts.SelectedIndex = idx;
+                }
+                finally
+                {
+                    isSynchronizingAccountSelection = false;
+                }
+            }
+
+            btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(account);
+            menuDeactivateAuthenticator.Enabled = IsSessionAvailableForAccountOperations(account);
+            btnCopy.Enabled = !IsPendingEnrollment(account);
+            loadAccountInfo();
+        }
+
         private void ConfigureTrayContextMenu()
         {
             trayRestore.Text = "Open Astro SDA";
-            trayRestore.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+            trayRestore.Font = AstroTheme.FontButton;
             trayTradeConfirmations.Text = "Confirmations";
             trayCopySteamGuard.Text = "Copy Steam Guard Code";
             trayQuit.Text = "Quit";
@@ -2905,21 +2935,33 @@ namespace Steam_Desktop_Authenticator
             menuStripTray.Opening += trayMenuStripTray_Opening;
         }
 
+        private void DisposeTrayActiveAccountItems()
+        {
+            if (trayActiveAccountMenu == null || trayActiveAccountMenu.DropDownItems.Count == 0)
+                return;
+
+            ToolStripItem[] existingItems = new ToolStripItem[trayActiveAccountMenu.DropDownItems.Count];
+            trayActiveAccountMenu.DropDownItems.CopyTo(existingItems, 0);
+            trayActiveAccountMenu.DropDownItems.Clear();
+            foreach (ToolStripItem existingItem in existingItems)
+                existingItem.Dispose();
+        }
+
         private void trayMenuStripTray_Opening(object sender, System.ComponentModel.CancelEventArgs e)
         {
             bool hasAccounts = allAccounts != null && allAccounts.Length > 0;
             trayLoginActions.Enabled = hasAccounts;
             trayTradeConfirmations.Enabled = hasAccounts;
             trayActiveAccountMenu.Enabled = hasAccounts;
-            bool hasToken = hasAccounts && !IsPendingEnrollment(currentAccount) && !String.IsNullOrWhiteSpace(txtLoginToken.Text);
+            bool hasToken = hasAccounts && currentAccount != null && !IsPendingEnrollment(currentAccount);
             trayCopySteamGuard.Enabled = hasToken;
 
             string activeName = currentAccount?.AccountName;
             trayActiveAccountMenu.Text = String.IsNullOrWhiteSpace(activeName)
                 ? "Active Account"
-                : "Active Account: " + activeName;
+                : "Active Account: " + EscapeMenuItemText(activeName);
 
-            trayActiveAccountMenu.DropDownItems.Clear();
+            DisposeTrayActiveAccountItems();
             if (hasAccounts)
             {
                 foreach (SteamGuardAccount account in allAccounts.OrderBy(a => a.AccountName, StringComparer.OrdinalIgnoreCase))
@@ -2929,30 +2971,17 @@ namespace Steam_Desktop_Authenticator
                         ((captured.Session?.SteamID ?? 0) != 0
                             ? captured.Session.SteamID == (currentAccount.Session?.SteamID ?? 0)
                             : String.Equals(captured.AccountName, currentAccount.AccountName, StringComparison.Ordinal));
-                    var item = new ToolStripMenuItem(isSelected ? "●  " + captured.AccountName : "    " + captured.AccountName)
+                    string safeAccountLabel = EscapeMenuItemText(captured.AccountName);
+                    var item = new ToolStripMenuItem(isSelected ? "●  " + safeAccountLabel : "    " + safeAccountLabel)
                     {
-                        Font = isSelected ? new Font("Segoe UI", 9F, FontStyle.Bold) : new Font("Segoe UI", 9F, FontStyle.Regular)
+                        Font = isSelected ? AstroTheme.FontButton : AstroTheme.FontBodyRegular9
                     };
-                    item.Click += (s, args) =>
-                    {
-                        currentAccount = captured;
-                        int idx = listAccounts.Items.IndexOf(captured.AccountName);
-                        if (idx >= 0)
-                            listAccounts.SelectedIndex = idx;
-                        else
-                        {
-                            btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(captured);
-                            menuDeactivateAuthenticator.Enabled = IsSessionAvailableForAccountOperations(captured);
-                            loadAccountInfo();
-                        }
-                    };
+                    item.Click += (s, args) => SelectAccount(captured);
                     trayActiveAccountMenu.DropDownItems.Add(item);
                 }
             }
 
-            trayCopySteamGuard.Text = hasToken
-                ? "Copy Steam Guard Code   (" + txtLoginToken.Text.Trim() + ")"
-                : "Copy Steam Guard Code";
+            trayCopySteamGuard.Text = "Copy Steam Guard Code";
 
             int totalConfirmations = pendingTradeConfirmationCounts.Values.Sum();
             trayTradeConfirmations.Text = totalConfirmations > 0
@@ -2979,6 +3008,9 @@ namespace Steam_Desktop_Authenticator
         // Misc UI handlers
         private void listAccounts_SelectedValueChanged(object sender, EventArgs e)
         {
+            if (isSynchronizingAccountSelection)
+                return;
+
             for (int i = 0; i < allAccounts.Length; i++)
             {
                 // Check if index is out of bounds first
@@ -2988,12 +3020,7 @@ namespace Steam_Desktop_Authenticator
                 SteamGuardAccount account = allAccounts[i];
                 if (account.AccountName == (string)listAccounts.Items[listAccounts.SelectedIndex])
                 {
-                    trayAccountList.Text = account.AccountName;
-                    currentAccount = account;
-                    btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(account);
-                    menuDeactivateAuthenticator.Enabled = IsSessionAvailableForAccountOperations(account);
-                    btnCopy.Enabled = !IsPendingEnrollment(account);
-                    loadAccountInfo();
+                    SelectAccount(account);
                     break;
                 }
             }
@@ -3006,9 +3033,6 @@ namespace Steam_Desktop_Authenticator
 
             listAccounts.Items.Clear();
             listAccounts.Items.AddRange(names.ToArray());
-
-            trayAccountList.Items.Clear();
-            trayAccountList.Items.AddRange(names.ToArray());
         }
 
 
@@ -5265,9 +5289,11 @@ namespace Steam_Desktop_Authenticator
 
         private void CopyLoginToken()
         {
-            if (IsPendingEnrollment(currentAccount))
+            if (currentAccount == null || IsPendingEnrollment(currentAccount))
                 return;
-            string text = txtLoginToken.Text;
+            string text = GetDisplayLoginToken(currentAccount, steamTime, txtLoginToken.Text);
+            if (!String.IsNullOrEmpty(text))
+                txtLoginToken.Text = text;
             if (String.IsNullOrEmpty(text))
                 return;
             Clipboard.SetText(text);
@@ -5385,9 +5411,6 @@ namespace Steam_Desktop_Authenticator
             listAccounts.Items.Clear();
             listAccounts.SelectedIndex = -1;
 
-            trayAccountList.Items.Clear();
-            trayAccountList.SelectedIndex = -1;
-
             if (manifest != null && !manifest.Encrypted && !String.IsNullOrEmpty(passKey))
             {
                 passKey = null;
@@ -5424,11 +5447,9 @@ namespace Steam_Desktop_Authenticator
                 {
                     SteamGuardAccount account = allAccounts[i];
                     listAccounts.Items.Add(account.AccountName);
-                    trayAccountList.Items.Add(account.AccountName);
                 }
 
                 listAccounts.Sorted = true;
-                trayAccountList.Sorted = true;
 
                 string preferredName = previousSteamId.HasValue
                     ? allAccounts.FirstOrDefault(account => account.Session?.SteamID == previousSteamId.Value)?.AccountName
@@ -5439,7 +5460,6 @@ namespace Steam_Desktop_Authenticator
                 if (selectedIndex < 0)
                     selectedIndex = 0;
                 listAccounts.SelectedIndex = selectedIndex;
-                trayAccountList.SelectedIndex = Math.Min(selectedIndex, trayAccountList.Items.Count - 1);
             }
             bool hasAccounts = allAccounts.Length > 0;
             bool canCopyCurrentAccount = hasAccounts && !IsPendingEnrollment(currentAccount);
@@ -5492,8 +5512,20 @@ namespace Steam_Desktop_Authenticator
 
         private void DispatchAvatarFetchesForAccounts(SteamGuardAccount[] accounts)
         {
-            if (accounts == null || accounts.Length == 0 || lifetimeCancellationSource.IsCancellationRequested)
+            if (accounts == null || accounts.Length == 0 || IsDisposed || Disposing)
                 return;
+
+            CancellationToken cancellationToken;
+            try
+            {
+                if (lifetimeCancellationSource.IsCancellationRequested)
+                    return;
+                cancellationToken = lifetimeCancellationSource.Token;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
 
             ulong[] steamIds = accounts
                 .Select(a => a?.Session?.SteamID ?? 0UL)
@@ -5506,26 +5538,41 @@ namespace Steam_Desktop_Authenticator
 
             _ = Task.Run(async () =>
             {
-                foreach (ulong steamId in steamIds)
+                try
                 {
-                    if (lifetimeCancellationSource.IsCancellationRequested || IsDisposed || Disposing)
-                        return;
-
-                    string dataUrl = await steamAvatarService.GetOrFetchAvatarDataUrlAsync(steamId, lifetimeCancellationSource.Token).ConfigureAwait(false);
-                    if (String.IsNullOrEmpty(dataUrl) || lifetimeCancellationSource.IsCancellationRequested || IsDisposed || Disposing)
-                        continue;
-
-                    string jsSteamId = JsonConvert.SerializeObject(steamId.ToString(CultureInfo.InvariantCulture));
-                    string jsDataUrl = JsonConvert.SerializeObject(dataUrl);
-                    TryBeginInvoke(() =>
+                    foreach (ulong steamId in steamIds)
                     {
-                        if (!IsDisposed && !Disposing)
+                        if (cancellationToken.IsCancellationRequested || IsDisposed || Disposing)
+                            return;
+
+                        string dataUrl = await steamAvatarService.GetOrFetchAvatarDataUrlAsync(steamId, cancellationToken).ConfigureAwait(false);
+                        if (String.IsNullOrEmpty(dataUrl) || cancellationToken.IsCancellationRequested || IsDisposed || Disposing)
+                            continue;
+
+                        string jsSteamId = JsonConvert.SerializeObject(steamId.ToString(CultureInfo.InvariantCulture));
+                        string jsDataUrl = JsonConvert.SerializeObject(dataUrl);
+                        TryBeginInvoke(() =>
                         {
-                            _ = ExecuteScriptSafelyAsync(
-                                $"if (typeof updateAccountAvatar === 'function') updateAccountAvatar({jsSteamId}, {jsDataUrl});",
-                                "Account avatar UI");
-                        }
-                    });
+                            if (!cancellationToken.IsCancellationRequested && !IsDisposed && !Disposing)
+                            {
+                                _ = ExecuteScriptSafelyAsync(
+                                    $"if (typeof updateAccountAvatar === 'function') updateAccountAvatar({jsSteamId}, {jsDataUrl});",
+                                    "Account avatar UI");
+                            }
+                        });
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Window is closing; cancellation is expected.
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Form or token source was disposed during shutdown.
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Account avatar fetch", ex, "Could not refresh Steam profile avatars.");
                 }
             }, CancellationToken.None);
         }
@@ -7345,10 +7392,7 @@ namespace Steam_Desktop_Authenticator
 
                 if (selectedAccount != null)
                 {
-                    currentAccount = selectedAccount;
-                    btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(selectedAccount);
-                    menuDeactivateAuthenticator.Enabled = IsSessionAvailableForAccountOperations(selectedAccount);
-                    loadAccountInfo();
+                    SelectAccount(selectedAccount);
                 }
             }
             else if (action == "remove_account")

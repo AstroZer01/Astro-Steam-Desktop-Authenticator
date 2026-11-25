@@ -40,14 +40,45 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.InRange((double)clampedWidth / clampedHeight, Ratio - 0.01, Ratio + 0.01);
         }
 
-        [Fact]
-        public void AdjustResizeRectForAspectRatio_AnchorsOppositeCornerOnTopLeftDrag()
+        [Theory]
+        [InlineData(1, false, true, true, false)]  // WMSZ_LEFT: anchors Right, Top
+        [InlineData(2, true, false, true, false)]  // WMSZ_RIGHT: anchors Left, Top
+        [InlineData(3, true, false, false, true)]  // WMSZ_TOP: anchors Left, Bottom
+        [InlineData(4, false, true, false, true)]  // WMSZ_TOPLEFT: anchors Right, Bottom
+        [InlineData(5, true, false, false, true)]  // WMSZ_TOPRIGHT: anchors Left, Bottom
+        [InlineData(6, true, false, true, false)]  // WMSZ_BOTTOM: anchors Left, Top
+        [InlineData(7, false, true, true, false)]  // WMSZ_BOTTOMLEFT: anchors Right, Top
+        [InlineData(8, true, false, true, false)]  // WMSZ_BOTTOMRIGHT: anchors Left, Top
+        public void AdjustResizeRectForAspectRatio_AnchorsOppositeEdgesAcrossAllDirections(
+            int edge,
+            bool anchorLeft,
+            bool anchorRight,
+            bool anchorTop,
+            bool anchorBottom)
         {
             var rect = new MainForm.ResizeRect { Left = 50, Top = 80, Right = 1200, Bottom = 900 };
-            MainForm.AdjustResizeRectForAspectRatio(ref rect, 4 /* WMSZ_TOPLEFT */, Ratio, MinWidth, MinHeight);
+            MainForm.AdjustResizeRectForAspectRatio(ref rect, edge, Ratio, MinWidth, MinHeight);
 
-            Assert.Equal(1200, rect.Right);
-            Assert.Equal(900, rect.Bottom);
+            if (anchorLeft) Assert.Equal(50, rect.Left);
+            if (anchorRight) Assert.Equal(1200, rect.Right);
+            if (anchorTop) Assert.Equal(80, rect.Top);
+            if (anchorBottom) Assert.Equal(900, rect.Bottom);
+        }
+
+        [Fact]
+        public void AdjustResizeRectForAspectRatio_HandlesNonPositiveRatioAndInvertedRectSafely()
+        {
+            var unchanged = new MainForm.ResizeRect { Left = 10, Top = 20, Right = 500, Bottom = 400 };
+            MainForm.AdjustResizeRectForAspectRatio(ref unchanged, 8, 0.0, MinWidth, MinHeight);
+            Assert.Equal(10, unchanged.Left);
+            Assert.Equal(20, unchanged.Top);
+            Assert.Equal(500, unchanged.Right);
+            Assert.Equal(400, unchanged.Bottom);
+
+            var inverted = new MainForm.ResizeRect { Left = 600, Top = 500, Right = 200, Bottom = 100 };
+            MainForm.AdjustResizeRectForAspectRatio(ref inverted, 8, Ratio, MinWidth, MinHeight);
+            Assert.True(inverted.Right - inverted.Left >= MinWidth);
+            Assert.True(inverted.Bottom - inverted.Top >= MinHeight);
         }
     }
 }

@@ -64,7 +64,7 @@ namespace Steam_Desktop_Authenticator
             Label lblTitle = new Label
             {
                 Text = "Steam replaced your old authenticator, but local save failed",
-                Font = new Font("Segoe UI", 10.25F, FontStyle.Bold),
+                Font = AstroTheme.FontTitleMedium,
                 ForeColor = AstroTheme.Error,
                 BackColor = Color.Transparent,
                 AutoSize = false,
@@ -74,7 +74,7 @@ namespace Steam_Desktop_Authenticator
             Label lblBody = new Label
             {
                 Text = errorDetail + "\n\n" + stagingNote,
-                Font = new Font("Segoe UI", 8.75F, FontStyle.Regular),
+                Font = AstroTheme.FontBodySmall,
                 ForeColor = Color.FromArgb(215, 200, 205),
                 BackColor = Color.Transparent,
                 AutoSize = false,
@@ -109,7 +109,7 @@ namespace Steam_Desktop_Authenticator
             Label lblCodeCaption = new Label
             {
                 Text = "NEW REVOCATION CODE",
-                Font = new Font("Segoe UI", 7.5F, FontStyle.Bold),
+                Font = AstroTheme.FontCaptionBold,
                 ForeColor = AstroTheme.Outline,
                 BackColor = Color.Transparent,
                 Location = new Point(14, 8),
@@ -120,7 +120,7 @@ namespace Steam_Desktop_Authenticator
                 Text = String.IsNullOrWhiteSpace(replacementAccount.RevocationCode)
                     ? "(none)"
                     : string.Join(" ", replacementAccount.RevocationCode.Trim().ToCharArray()),
-                Font = new Font("Consolas", 13.5F, FontStyle.Bold),
+                Font = AstroTheme.FontMonoCode,
                 ForeColor = Color.FromArgb(245, 248, 252),
                 BackColor = Color.Transparent,
                 Location = new Point(14, 24),
@@ -135,7 +135,7 @@ namespace Steam_Desktop_Authenticator
                 AutoSize = false,
                 Location = new Point(22, 230),
                 Size = new Size(496, 36),
-                Font = new Font("Segoe UI", 8.75F, FontStyle.Regular),
+                Font = AstroTheme.FontBodySmall,
                 ForeColor = AstroTheme.Error,
                 BackColor = Color.Transparent
             };

@@ -211,7 +211,7 @@ namespace Steam_Desktop_Authenticator
         private static void StyleSegmentedButton(Button button, bool active)
         {
             button.FlatStyle = FlatStyle.Flat;
-            button.Font = new Font("Segoe UI", 8.75F, active ? FontStyle.Bold : FontStyle.Regular);
+            button.Font = active ? AstroTheme.FontBodySmallBold : AstroTheme.FontBodySmall;
             button.Cursor = Cursors.Hand;
             button.FlatAppearance.BorderSize = active ? 1 : 0;
             if (active)

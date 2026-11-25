@@ -88,12 +88,25 @@ namespace Steam_Desktop_Authenticator
         // ── Fonts ──
         public static readonly Font FontBody = new Font("Segoe UI", 9.5F, FontStyle.Regular);
         public static readonly Font FontBodyMedium = new Font("Segoe UI", 9.5F, FontStyle.Bold);
+        public static readonly Font FontBodyRegular9 = new Font("Segoe UI", 9F, FontStyle.Regular);
+        public static readonly Font FontBodySmall = new Font("Segoe UI", 8.75F, FontStyle.Regular);
+        public static readonly Font FontBodySmallBold = new Font("Segoe UI", 8.75F, FontStyle.Bold);
+        public static readonly Font FontSubtitle = new Font("Segoe UI", 9.25F, FontStyle.Regular);
+        public static readonly Font FontTitleMedium = new Font("Segoe UI", 10.25F, FontStyle.Bold);
+        public static readonly Font FontSectionHeading = new Font("Segoe UI", 13.5F, FontStyle.Bold);
         public static readonly Font FontHeadline = new Font("Segoe UI", 12F, FontStyle.Bold);
         public static readonly Font FontHeadlineLarge = new Font("Segoe UI", 16F, FontStyle.Bold);
         public static readonly Font FontLabel = new Font("Consolas", 8.5F, FontStyle.Regular);
+        public static readonly Font FontMonoSmall = new Font("Consolas", 7.5F, FontStyle.Regular);
+        public static readonly Font FontMonoInput = new Font("Consolas", 13.5F, FontStyle.Regular);
+        public static readonly Font FontMonoCode = new Font("Consolas", 13.5F, FontStyle.Bold);
+        public static readonly Font FontMonoHero = new Font("Consolas", 17F, FontStyle.Bold);
         public static readonly Font FontLoginToken = new Font("Consolas", 16F, FontStyle.Bold);
         public static readonly Font FontSmall = new Font("Segoe UI", 8F, FontStyle.Regular);
+        public static readonly Font FontSmallBold = new Font("Segoe UI", 8F, FontStyle.Bold);
+        public static readonly Font FontCaptionBold = new Font("Segoe UI", 7.5F, FontStyle.Bold);
         public static readonly Font FontInput = new Font("Segoe UI", 10F, FontStyle.Regular);
+        public static readonly Font FontInputBold = new Font("Segoe UI", 10F, FontStyle.Bold);
         public static readonly Font FontInputLarge = new Font("Segoe UI", 13.5F, FontStyle.Regular);
         public static readonly Font FontButton = new Font("Segoe UI", 9F, FontStyle.Bold);
         public static readonly Font FontButtonLarge = new Font("Segoe UI", 11F, FontStyle.Bold);
@@ -339,7 +352,7 @@ namespace Steam_Desktop_Authenticator
                 Text = text,
                 AutoSize = true,
                 MaximumSize = new Size(Math.Max(120, width - 30), 0),
-                Font = boldFirstLine ? FontBodyMedium : new Font("Segoe UI", 9F, FontStyle.Regular),
+                Font = boldFirstLine ? FontBodyMedium : FontBodyRegular9,
                 ForeColor = textColor,
                 BackColor = Color.Transparent,
                 Dock = DockStyle.Fill,

@@ -65,7 +65,7 @@ namespace Steam_Desktop_Authenticator
             {
                 Text = "Verify a Phone Number",
                 AutoSize = true,
-                Font = new Font("Segoe UI", 13.5f, FontStyle.Bold),
+                Font = AstroTheme.FontSectionHeading,
                 ForeColor = AstroTheme.OnSurface,
                 Margin = new Padding(0, 0, 0, 4)
             };
@@ -74,7 +74,7 @@ namespace Steam_Desktop_Authenticator
                 Text = "Choose your country or region, then enter your phone number in international format. The dialing prefix is filled in automatically and can be edited.",
                 AutoSize = true,
                 MaximumSize = new Size(476, 0),
-                Font = new Font("Segoe UI", 9.25f),
+                Font = AstroTheme.FontSubtitle,
                 ForeColor = AstroTheme.OnSurfaceVariant,
                 Margin = new Padding(0, 0, 0, 16)
             };
@@ -91,7 +91,7 @@ namespace Steam_Desktop_Authenticator
                 Text = "Country / Region",
                 AutoSize = true,
                 Location = new Point(0, 0),
-                Font = new Font("Segoe UI", 8.75f, FontStyle.Bold),
+                Font = AstroTheme.FontBodySmallBold,
                 ForeColor = AstroTheme.OnSurfaceVariant
             };
             countrySelector = new ComboBox
@@ -99,7 +99,7 @@ namespace Steam_Desktop_Authenticator
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Location = new Point(0, 22),
                 Width = 476,
-                Font = new Font("Segoe UI", 10f),
+                Font = AstroTheme.FontInput,
                 BackColor = AstroTheme.SurfaceContainerLowest,
                 ForeColor = AstroTheme.OnSurface,
                 FlatStyle = FlatStyle.Flat,
@@ -127,14 +127,14 @@ namespace Steam_Desktop_Authenticator
                 Text = "International Phone Number",
                 AutoSize = true,
                 Location = new Point(0, 0),
-                Font = new Font("Segoe UI", 8.75f, FontStyle.Bold),
+                Font = AstroTheme.FontBodySmallBold,
                 ForeColor = AstroTheme.OnSurfaceVariant
             };
             phoneNumberInput = new TextBox
             {
                 Location = new Point(0, 22),
                 Size = new Size(476, 36),
-                Font = new Font("Consolas", 13.5f, FontStyle.Regular),
+                Font = AstroTheme.FontMonoInput,
                 PlaceholderText = "+55 11 99999 9999",
                 BackColor = AstroTheme.SurfaceContainerLowest,
                 ForeColor = AstroTheme.OnSurface,

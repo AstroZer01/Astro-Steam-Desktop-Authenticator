@@ -45,7 +45,7 @@ namespace Steam_Desktop_Authenticator
             {
                 AutoEllipsis = true,
                 BackColor = Color.Transparent,
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+                Font = AstroTheme.FontBodyMedium,
                 ForeColor = isAlert ? AstroTheme.Error : Color.FromArgb(243, 246, 251),
                 Location = new Point(18, 14),
                 Size = new Size(310, 22),
@@ -57,7 +57,7 @@ namespace Steam_Desktop_Authenticator
             {
                 AutoEllipsis = true,
                 BackColor = Color.Transparent,
-                Font = new Font("Segoe UI", 8.75F, FontStyle.Regular),
+                Font = AstroTheme.FontBodySmall,
                 ForeColor = Color.FromArgb(184, 196, 212),
                 Location = new Point(18, 39),
                 Size = new Size(326, 46),
@@ -73,7 +73,7 @@ namespace Steam_Desktop_Authenticator
             {
                 AutoSize = true,
                 BackColor = Color.Transparent,
-                Font = new Font("Segoe UI", 8F, FontStyle.Bold),
+                Font = AstroTheme.FontSmallBold,
                 ForeColor = isAlert ? AstroTheme.Error : AstroTheme.PrimaryLight,
                 Location = new Point(18, 92),
                 Text = formattedHint
@@ -84,7 +84,7 @@ namespace Steam_Desktop_Authenticator
             {
                 AutoSize = false,
                 BackColor = Color.Transparent,
-                Font = new Font("Consolas", 7.5F, FontStyle.Regular),
+                Font = AstroTheme.FontMonoSmall,
                 ForeColor = AstroTheme.Outline,
                 Location = new Point(314, 92),
                 Size = new Size(38, 18),
@@ -99,7 +99,7 @@ namespace Steam_Desktop_Authenticator
                 BackColor = Color.Transparent,
                 Cursor = Cursors.Hand,
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 10F, FontStyle.Regular),
+                Font = AstroTheme.FontInput,
                 ForeColor = AstroTheme.OnSurfaceVariant,
                 Location = new Point(336, 8),
                 Size = new Size(24, 24),

@@ -53,7 +53,7 @@ namespace Steam_Desktop_Authenticator
                 AutoSize = true,
                 Location = new Point(22, 20),
                 MaximumSize = new Size(460, 0),
-                Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+                Font = AstroTheme.FontInputBold,
                 ForeColor = AstroTheme.OnSurface,
                 BackColor = Color.Transparent
             };
@@ -63,7 +63,7 @@ namespace Steam_Desktop_Authenticator
                 Text = "Account: " + account.AccountName,
                 AutoSize = true,
                 Location = new Point(22, 54),
-                Font = new Font("Segoe UI", 9f, FontStyle.Regular),
+                Font = AstroTheme.FontBodyRegular9,
                 ForeColor = AstroTheme.OnSurfaceVariant,
                 BackColor = Color.Transparent
             };
@@ -90,7 +90,7 @@ namespace Steam_Desktop_Authenticator
                 Location = new Point(12, 10),
                 Size = new Size(436, 16),
                 TextAlign = ContentAlignment.MiddleCenter,
-                Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
+                Font = AstroTheme.FontCaptionBold,
                 ForeColor = AstroTheme.Outline,
                 BackColor = Color.Transparent
             };
@@ -102,7 +102,7 @@ namespace Steam_Desktop_Authenticator
                 Location = new Point(12, 28),
                 Size = new Size(436, 36),
                 TextAlign = ContentAlignment.MiddleCenter,
-                Font = new Font("Consolas", 17f, FontStyle.Bold),
+                Font = AstroTheme.FontMonoHero,
                 ForeColor = Color.FromArgb(245, 248, 252),
                 BackColor = Color.Transparent
             };
@@ -132,7 +132,7 @@ namespace Steam_Desktop_Authenticator
                 Text = calloutText,
                 AutoSize = true,
                 MaximumSize = new Size(426, 0),
-                Font = new Font("Segoe UI", 8.85f, FontStyle.Regular),
+                Font = AstroTheme.FontBodySmall,
                 ForeColor = AstroTheme.WarningSoft,
                 BackColor = Color.Transparent,
                 Location = new Point(14, 10)
@@ -321,7 +321,15 @@ namespace Steam_Desktop_Authenticator
 
         private void RecoveryCodeForm_FormClosed(object sender, FormClosedEventArgs e)
         {
-            continueTimer.Dispose();
+            continueTimer?.Stop();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                continueTimer?.Dispose();
+
+            base.Dispose(disposing);
         }
 
         private string BuildRecoveryCodeText()
