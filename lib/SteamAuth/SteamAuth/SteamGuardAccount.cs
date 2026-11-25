@@ -320,10 +320,15 @@ namespace SteamAuth
             return (long)conf.Creator;
         }
 
-        public async Task<bool> AcceptMultipleConfirmations(Confirmation[] confs, CancellationToken cancellationToken = default)
+        public Task<bool> AcceptMultipleConfirmations(Confirmation[] confs, CancellationToken cancellationToken = default)
+        {
+            return AcceptMultipleConfirmations(confs, null, cancellationToken);
+        }
+
+        public async Task<bool> AcceptMultipleConfirmations(Confirmation[] confs, Func<bool> beforeSendCheck, CancellationToken cancellationToken)
         {
             ValidateConfirmations(confs);
-            return await _sendMultiConfirmationAjax(confs, "allow", cancellationToken);
+            return await _sendMultiConfirmationAjax(confs, "allow", cancellationToken, beforeSendCheck);
         }
 
         public async Task<bool> DenyMultipleConfirmations(Confirmation[] confs, CancellationToken cancellationToken = default)
@@ -370,7 +375,7 @@ namespace SteamAuth
             }
         }
 
-        private async Task<bool> _sendMultiConfirmationAjax(Confirmation[] confs, string op, CancellationToken cancellationToken)
+        private async Task<bool> _sendMultiConfirmationAjax(Confirmation[] confs, string op, CancellationToken cancellationToken, Func<bool> beforeSendCheck = null)
         {
             string url = APIEndpoints.COMMUNITY_BASE + "/mobileconf/multiajaxop";
             // tag is different from op now
@@ -382,6 +387,9 @@ namespace SteamAuth
                 body.Add("cid[]", conf.ID.ToString());
                 body.Add("ck[]", conf.Key.ToString());
             }
+
+            if (beforeSendCheck != null && !beforeSendCheck())
+                return false;
 
             SteamWebResponse steamResponse = await SteamWeb.POSTRequestWithHeaders(
                 url,

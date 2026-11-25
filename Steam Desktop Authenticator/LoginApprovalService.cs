@@ -44,6 +44,7 @@ namespace Steam_Desktop_Authenticator
         public string DeviceName { get; set; }
         public string RequestedPersistence { get; set; }
         public string SecurityHistory { get; set; }
+        public bool IsNewLogin { get; set; }
         public bool LocationMismatch { get; set; }
         public bool HighUsageLogin { get; set; }
     }
@@ -58,6 +59,7 @@ namespace Steam_Desktop_Authenticator
     internal sealed class LoginApprovalActionResult
     {
         public bool Succeeded { get; set; }
+        public bool Skipped { get; set; }
         public LoginApprovalErrorKind ErrorKind { get; set; }
         public string ErrorMessage { get; set; }
     }
@@ -73,16 +75,33 @@ namespace Steam_Desktop_Authenticator
         private const int MaximumLoginTextLength = 256;
         private const int MaximumGeolocationLength = 512;
         private readonly Func<SteamGuardAccount, bool> persistAccount;
+        private readonly Func<SteamGuardAccount, long> getStorageRevision;
+        private readonly Func<SteamGuardAccount, SessionData, long?, bool> persistAccountWithRevision;
         private readonly IAuthenticatorProtocolTransport protocolTransport;
 
         public LoginApprovalService(Func<SteamGuardAccount, bool> persistAccount)
-            : this(persistAccount, new SteamProtobufAuthenticatorTransport())
+            : this(persistAccount, new SteamProtobufAuthenticatorTransport(), null, null)
         {
         }
 
-        internal LoginApprovalService(Func<SteamGuardAccount, bool> persistAccount, IAuthenticatorProtocolTransport protocolTransport)
+        public LoginApprovalService(
+            Func<SteamGuardAccount, long> getStorageRevision,
+            Func<SteamGuardAccount, SessionData, long?, bool> persistAccountWithRevision)
+            : this(null, new SteamProtobufAuthenticatorTransport(), getStorageRevision, persistAccountWithRevision)
         {
-            this.persistAccount = persistAccount ?? throw new ArgumentNullException(nameof(persistAccount));
+        }
+
+        internal LoginApprovalService(
+            Func<SteamGuardAccount, bool> persistAccount,
+            IAuthenticatorProtocolTransport protocolTransport,
+            Func<SteamGuardAccount, long> getStorageRevision = null,
+            Func<SteamGuardAccount, SessionData, long?, bool> persistAccountWithRevision = null)
+        {
+            if (persistAccount == null && persistAccountWithRevision == null)
+                throw new ArgumentNullException(nameof(persistAccount));
+            this.persistAccount = persistAccount;
+            this.getStorageRevision = getStorageRevision;
+            this.persistAccountWithRevision = persistAccountWithRevision;
             this.protocolTransport = protocolTransport ?? throw new ArgumentNullException(nameof(protocolTransport));
         }
 
@@ -190,7 +209,8 @@ namespace Steam_Desktop_Authenticator
             SteamGuardAccount account,
             PendingLoginRequest request,
             LoginApprovalDecision decision,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            Func<bool> shouldSubmitDecision = null)
         {
             try
             {
@@ -200,7 +220,11 @@ namespace Steam_Desktop_Authenticator
                 {
                     throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "The login request is invalid or belongs to another account.");
                 }
+                if (shouldSubmitDecision != null && !shouldSubmitDecision())
+                    return new LoginApprovalActionResult() { Succeeded = false, Skipped = true };
                 await EnsureAccessTokenAsync(account, false, cancellationToken);
+                if (shouldSubmitDecision != null && !shouldSubmitDecision())
+                    return new LoginApprovalActionResult() { Succeeded = false, Skipped = true };
                 await SubmitDecisionAsync(account, request, decision, cancellationToken);
                 return new LoginApprovalActionResult() { Succeeded = true };
             }
@@ -212,7 +236,11 @@ namespace Steam_Desktop_Authenticator
             {
                 try
                 {
+                    if (shouldSubmitDecision != null && !shouldSubmitDecision())
+                        return new LoginApprovalActionResult() { Succeeded = false, Skipped = true };
                     await EnsureAccessTokenAsync(account, true, cancellationToken);
+                    if (shouldSubmitDecision != null && !shouldSubmitDecision())
+                        return new LoginApprovalActionResult() { Succeeded = false, Skipped = true };
                     await SubmitDecisionAsync(account, request, decision, cancellationToken);
                     return new LoginApprovalActionResult() { Succeeded = true };
                 }
@@ -275,6 +303,7 @@ namespace Steam_Desktop_Authenticator
                 DeviceName = ValidateResponseText(details.DeviceFriendlyName, MaximumLoginTextLength, "device name"),
                 RequestedPersistence = PersistenceName((int)details.RequestedPersistence),
                 SecurityHistory = SecurityHistoryName((int)details.LoginHistory),
+                IsNewLogin = details.LoginHistory == EAuthSessionSecurityHistory.KEauthSessionSecurityHistoryNoPriorHistory,
                 LocationMismatch = details.RequestorLocationMismatch,
                 HighUsageLogin = details.HighUsageLogin
             };
@@ -320,10 +349,15 @@ namespace Steam_Desktop_Authenticator
             {
                 string previousAccessToken = account.Session.AccessToken;
                 string previousRefreshToken = account.Session.RefreshToken;
+                SessionData sessionAtStart = account.Session;
+                long? revisionAtStart = getStorageRevision != null ? getStorageRevision(account) : (long?)null;
                 try
                 {
                     await account.Session.RefreshAccessToken(false, cancellationToken);
-                    if (!persistAccount(account))
+                    bool persisted = persistAccountWithRevision != null
+                        ? persistAccountWithRevision(account, sessionAtStart, revisionAtStart)
+                        : persistAccount(account);
+                    if (!persisted)
                     {
                         RestoreSessionTokens(account.Session, previousAccessToken, previousRefreshToken);
                         throw new LoginApprovalException(LoginApprovalErrorKind.Unknown, "Steam refreshed the session, but Astro SDA could not save it securely.");

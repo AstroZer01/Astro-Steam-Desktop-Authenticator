@@ -148,17 +148,14 @@ namespace Steam_Desktop_Authenticator
                 maFile = JsonConvert.DeserializeObject<SteamGuardAccount>(fileContents, ImportJsonSettings);
                 if (maFile == null) throw new InvalidDataException("The selected file did not contain a Steam Guard account.");
 
-                if (expectedSteamId != 0 && maFile.Session != null && maFile.Session.SteamID != 0 &&
-                    maFile.Session.SteamID != expectedSteamId)
-                    throw new InvalidDataException("The selected account does not match its source manifest entry.");
+                expectedSteamId = ResolveExpectedSteamId(expectedSteamId, maFile);
 
                 if (maFile.Session == null || maFile.Session.SteamID == 0 || maFile.Session.IsAccessTokenExpired())
                 {
                     using (LoginForm loginForm = new LoginForm(LoginForm.LoginType.Import, maFile))
                     {
                         ShowOwnedDialog(loginForm, dialogOwner);
-                        if (loginForm.Session == null || loginForm.Session.SteamID == 0 ||
-                            (expectedSteamId != 0 && loginForm.Session.SteamID != expectedSteamId))
+                        if (loginForm.Session == null || !IsImportedSessionSteamIdMatch(expectedSteamId, loginForm.Session.SteamID))
                         {
                             MessageBox.Show("The login did not match the selected account. Try to import this account again.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             return;
@@ -185,6 +182,20 @@ namespace Steam_Desktop_Authenticator
                     MessageBox.Show("This file is not a valid SteamAuth maFile or decryption failed.\nImport Failed.", "Account Import", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
+        }
+
+        internal static ulong ResolveExpectedSteamId(ulong manifestExpectedSteamId, SteamGuardAccount maFile)
+        {
+            ulong fileSteamId = maFile?.Session?.SteamID ?? 0;
+            if (manifestExpectedSteamId != 0 && fileSteamId != 0 && fileSteamId != manifestExpectedSteamId)
+                throw new InvalidDataException("The selected account does not match its source manifest entry.");
+
+            return manifestExpectedSteamId != 0 ? manifestExpectedSteamId : fileSteamId;
+        }
+
+        internal static bool IsImportedSessionSteamIdMatch(ulong expectedSteamId, ulong authenticatedSteamId)
+        {
+            return authenticatedSteamId != 0 && (expectedSteamId == 0 || authenticatedSteamId == expectedSteamId);
         }
 
         private static ImportManifest ReadImportManifest(string manifestPath)

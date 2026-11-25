@@ -1,4 +1,3 @@
-using Microsoft.Win32.SafeHandles;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SteamAuth;
@@ -9,10 +8,8 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -97,11 +94,29 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("proxy_password")]
         public string ProxyPassword { get; set; } = String.Empty;
 
+        [JsonProperty("allow_saved_steam_passwords", DefaultValueHandling = DefaultValueHandling.Ignore)]
+        public bool AllowSavedSteamPasswords { get; set; } = false;
+
+        [JsonProperty("credentials_store_filename", NullValueHandling = NullValueHandling.Ignore)]
+        public string CredentialsStoreFilename { get; set; }
+
+        [JsonIgnore]
+        public bool CredentialsStoreMissingWarning { get; private set; }
+
         private static Manifest _manifest { get; set; }
         private static readonly object storageLock = new object();
-        private static long storageDirectoryValidationCount;
-        private static long canonicalDirectoryVerificationCount;
         private long storageRevision;
+        // Generation-scoped metadata-only cache (never caches plaintext passwords)
+        // so 1-second UI/monitor eligibility checks do not re-run 600k PBKDF2.
+        private string cachedCredentialMetadataFilename;
+        private string cachedCredentialMetadataPassKeyHash;
+        private Dictionary<ulong, SavedCredentialStatus> cachedCredentialMetadata;
+        private bool cachedCredentialMetadataFailed;
+        // Per-instance HMAC proof of a verified passkey (never stores plaintext passkey).
+        // Avoids re-decrypting every account file on ordinary SaveAccount writes and ensures
+        // an unrelated unreadable account file cannot block healthy encrypted account saves.
+        private readonly byte[] passkeyProofKey = RandomNumberGenerator.GetBytes(32);
+        private byte[] verifiedPasskeyProof;
         // Refresh persistence only needs to reject changes to the account it
         // captured. A manifest-wide revision would make an unrelated account
         // update abort an otherwise safe refresh.
@@ -133,9 +148,6 @@ namespace Steam_Desktop_Authenticator
                     return storageRevision;
             }
         }
-
-        internal static long StorageDirectoryValidationCount => Interlocked.Read(ref storageDirectoryValidationCount);
-        internal static long CanonicalDirectoryVerificationCount => Interlocked.Read(ref canonicalDirectoryVerificationCount);
 
         public long GetAccountStorageRevision(ulong steamId)
         {
@@ -172,94 +184,127 @@ namespace Steam_Desktop_Authenticator
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
             string manifestFile = Path.Combine(maDir, "manifest.json");
 
+            StoragePathGuard.PinnedStorageDirectory pinnedDir;
+            string validatedRoot;
             try
             {
-                if (Directory.Exists(maDir))
-                    ValidateStorageDirectory(maDir);
+                pinnedDir = StoragePathGuard.TryPinExistingDirectory(maDir, out validatedRoot);
             }
             catch (Exception ex)
             {
                 DiagnosticErrorLogger.Log("Authenticator storage", ex, "The account-data directory is not a supported local directory.");
-                throw new ManifestParseException();
+                throw new ManifestStorageDirectoryException();
             }
-            if (!RecoverPendingStorageTransaction(maDir, manifestFile))
-                throw new ManifestRecoveryException();
-            if (!RestoreManifestBackupIfNeeded(manifestFile, Path.Combine(maDir, SettingsBackupFilename), false))
-                throw new ManifestParseException();
 
-            // If there's no config dir, create it
-            if (!Directory.Exists(maDir))
+            if (pinnedDir == null)
             {
+                // If there's no config dir, return a fresh manifest.
                 _manifest = GenerateNewManifest(false);
                 return _manifest;
             }
 
-            // If there's no manifest, throw exception
-            if (!File.Exists(manifestFile))
+            using (pinnedDir)
             {
-                // A failed first save can leave an empty data directory after recovery.
-                // Treat it like a clean install rather than permanently rejecting it.
-                if (!Directory.EnumerateFiles(maDir, "*.maFile").Any())
+                string expectedCanonicalDir = pinnedDir.CanonicalDirectoryPath;
+
+                if (!RecoverPendingStorageTransaction(maDir, manifestFile, expectedCanonicalDir: expectedCanonicalDir, validatedRoot: validatedRoot))
+                    throw new ManifestRecoveryException();
+                if (!RestoreManifestBackupIfNeeded(manifestFile, Path.Combine(maDir, SettingsBackupFilename), false, expectedCanonicalDir))
+                    throw new ManifestParseException();
+
+                // If there's no manifest, throw exception
+                if (!File.Exists(manifestFile))
                 {
-                    _manifest = GenerateNewManifest(false);
-                    return _manifest;
-                }
-                throw new ManifestParseException();
-            }
-
-            try
-            {
-                string manifestContents = ReadTextWithLimit(manifestFile, MaximumManifestFileSizeBytes);
-                JObject manifestJson;
-                using (StringReader stringReader = new StringReader(manifestContents))
-                using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = storageJsonSettings.MaxDepth, DateParseHandling = DateParseHandling.None })
-                {
-                    manifestJson = JObject.Load(jsonReader);
-                }
-                Manifest loadedManifest = manifestJson.ToObject<Manifest>(JsonSerializer.Create(storageJsonSettings));
-                if (loadedManifest == null || loadedManifest.Entries == null)
-                    throw new InvalidDataException("The account manifest does not contain a valid entries list.");
-
-                ValidateManifestEntries(loadedManifest, maDir);
-                bool migratedLegacyTradeSettings = loadedManifest.MigrateLegacyTradeConfirmationSettings(manifestJson);
-
-                loadedManifest.NormalizeTradeConfirmationSettings();
-                loadedManifest.NormalizeLoginActionSettings();
-
-                if (migratedLegacyTradeSettings)
-                {
-                    loadedManifest.Save();
+                    // A failed first save can leave an empty data directory after recovery.
+                    // Treat it like a clean install rather than permanently rejecting it.
+                    if (!Directory.EnumerateFiles(maDir, "*.maFile").Any())
+                    {
+                        _manifest = GenerateNewManifest(false);
+                        return _manifest;
+                    }
+                    throw new ManifestParseException();
                 }
 
-                if (loadedManifest.Encrypted && loadedManifest.Entries.Count == 0)
+                try
                 {
-                    loadedManifest.Encrypted = false;
-                    loadedManifest.Save();
+                    string manifestContents = StoragePathGuard.ReadTextWithLimit(manifestFile, MaximumManifestFileSizeBytes, expectedCanonicalDir);
+                    JObject manifestJson;
+                    using (StringReader stringReader = new StringReader(manifestContents))
+                    using (JsonTextReader jsonReader = new JsonTextReader(stringReader) { MaxDepth = storageJsonSettings.MaxDepth, DateParseHandling = DateParseHandling.None })
+                    {
+                        manifestJson = JObject.Load(jsonReader);
+                    }
+                    Manifest loadedManifest = manifestJson.ToObject<Manifest>(JsonSerializer.Create(storageJsonSettings));
+                    if (loadedManifest == null || loadedManifest.Entries == null)
+                        throw new InvalidDataException("The account manifest does not contain a valid entries list.");
+
+                    ValidateManifestState(loadedManifest.Entries, loadedManifest.Encrypted, validatedRoot, loadedManifest.CredentialsStoreFilename);
+                    bool migratedLegacyTradeSettings = loadedManifest.MigrateLegacyTradeConfirmationSettings(manifestJson);
+
+                    loadedManifest.NormalizeTradeConfirmationSettings();
+                    loadedManifest.NormalizeLoginActionSettings();
+
+                    if (migratedLegacyTradeSettings)
+                    {
+                        loadedManifest.Save();
+                    }
+
+                    if (loadedManifest.Encrypted && loadedManifest.Entries.Count == 0)
+                    {
+                        loadedManifest.Encrypted = false;
+                        loadedManifest.AllowSavedSteamPasswords = false;
+                        loadedManifest.CredentialsStoreFilename = null;
+                        loadedManifest.Save();
+                    }
+
+                    if (!loadedManifest.Encrypted &&
+                        (loadedManifest.AllowSavedSteamPasswords || !String.IsNullOrWhiteSpace(loadedManifest.CredentialsStoreFilename)))
+                    {
+                        loadedManifest.AllowSavedSteamPasswords = false;
+                        loadedManifest.CredentialsStoreFilename = null;
+                        loadedManifest.Save();
+                    }
+
+                    int entriesBeforePrune = loadedManifest.Entries.Count;
+                    loadedManifest.RecomputeExistingEntries(validatedRoot);
+                    if (entriesBeforePrune > 0 && loadedManifest.Entries.Count == 0)
+                    {
+                        loadedManifest.Encrypted = false;
+                        loadedManifest.AllowSavedSteamPasswords = false;
+                        loadedManifest.CredentialsStoreFilename = null;
+                        loadedManifest.Save();
+                    }
+
+                    if (!String.IsNullOrWhiteSpace(loadedManifest.CredentialsStoreFilename))
+                    {
+                        string credPath = ResolveValidatedCredentialStoreFilePath(validatedRoot, loadedManifest.CredentialsStoreFilename);
+                        if (!File.Exists(credPath))
+                            loadedManifest.CredentialsStoreMissingWarning = true;
+                    }
+
+                    // Migrate the GUID form used by previous releases while loading
+                    // the manifest. Arbitrary legacy names are handled by the full
+                    // startup normalization pass after the UI unlocks encryption.
+                    StorageResult guidNormalizationResult = loadedManifest.NormalizeAccountFilenames(true);
+                    if (!guidNormalizationResult.Succeeded)
+                        DiagnosticErrorLogger.Log("Authenticator storage", guidNormalizationResult.Exception, "A GUID-named authenticator file could not be normalized during startup.");
+
+                    lock (storageLock)
+                    {
+                        DeleteFileBestEffort(
+                            Path.Combine(maDir, SettingsBackupFilename),
+                            "A stale manifest backup could not be removed after the settings were loaded.");
+                        SweepOrphanedCredentialStoresLocked(maDir, loadedManifest.CredentialsStoreFilename);
+                    }
+
+                    _manifest = loadedManifest;
+                    return loadedManifest;
                 }
-
-                loadedManifest.RecomputeExistingEntries();
-
-                // Migrate the GUID form used by previous releases while loading
-                // the manifest. Arbitrary legacy names are handled by the full
-                // startup normalization pass after the UI unlocks encryption.
-                StorageResult guidNormalizationResult = loadedManifest.NormalizeAccountFilenames(true);
-                if (!guidNormalizationResult.Succeeded)
-                    DiagnosticErrorLogger.Log("Authenticator storage", guidNormalizationResult.Exception, "A GUID-named authenticator file could not be normalized during startup.");
-
-                lock (storageLock)
+                catch (Exception)
                 {
-                    DeleteFileBestEffort(
-                        Path.Combine(maDir, SettingsBackupFilename),
-                        "A stale manifest backup could not be removed after the settings were loaded.");
+                    _manifest = null;
+                    throw new ManifestParseException();
                 }
-
-                _manifest = loadedManifest;
-                return loadedManifest;
-            }
-            catch (Exception)
-            {
-                _manifest = null;
-                throw new ManifestParseException();
             }
         }
 
@@ -295,13 +340,13 @@ namespace Steam_Desktop_Authenticator
             }
 
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+            StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
             if (!Directory.Exists(maDir))
             {
                 return newManifest;
             }
 
-            ValidateStorageDirectory(maDir);
-            string expectedCanonicalDir = GetValidatedCanonicalDirectoryPath(maDir);
+            string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
             DirectoryInfo dir = new DirectoryInfo(maDir);
             var files = dir.GetFiles();
 
@@ -311,7 +356,7 @@ namespace Steam_Desktop_Authenticator
                 if ((file.Attributes & FileAttributes.ReparsePoint) != 0)
                     throw new MaFileEncryptedException();
 
-                string contents = ReadTextWithLimit(file.FullName, MaximumAccountFileSizeBytes, expectedCanonicalDir);
+                string contents = StoragePathGuard.ReadTextWithLimit(file.FullName, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                 try
                 {
                     SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
@@ -437,6 +482,7 @@ namespace Steam_Desktop_Authenticator
 
             ManifestEntry[] entriesSnapshot;
             bool isEncrypted;
+            string credentialsStoreFilenameSnapshot;
             lock (storageLock)
             {
                 isEncrypted = this.Encrypted;
@@ -445,15 +491,20 @@ namespace Steam_Desktop_Authenticator
                 if (this.Entries == null)
                     throw new InvalidDataException("The account manifest contains an invalid entries list.");
                 entriesSnapshot = this.Entries.ToArray();
+                credentialsStoreFilenameSnapshot = this.CredentialsStoreFilename;
             }
 
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
-            string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
-            string[] entryPaths = ValidateAndResolveManifestEntries(entriesSnapshot, isEncrypted, validatedRoot);
+            string validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
+            string[] entryPaths = ValidateAndResolveManifestEntries(
+                entriesSnapshot,
+                isEncrypted,
+                validatedRoot,
+                credentialsStoreFilenameSnapshot);
             if (entriesSnapshot.Length == 0 || !Directory.Exists(maDir))
                 return Array.Empty<SteamGuardAccount>();
 
-            string expectedCanonicalDir = GetValidatedCanonicalDirectoryPath(maDir);
+            string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
 
             List<SteamAuth.SteamGuardAccount> accounts = new List<SteamAuth.SteamGuardAccount>();
             for (int i = 0; i < entriesSnapshot.Length; i++)
@@ -461,7 +512,7 @@ namespace Steam_Desktop_Authenticator
                 ManifestEntry entry = entriesSnapshot[i];
                 try
                 {
-                    string fileText = ReadTextWithLimit(entryPaths[i], MaximumAccountFileSizeBytes, expectedCanonicalDir);
+                    string fileText = StoragePathGuard.ReadTextWithLimit(entryPaths[i], MaximumAccountFileSizeBytes, expectedCanonicalDir);
                     if (isEncrypted)
                     {
                         string decryptedText = FileEncryptor.DecryptData(passKey, entry.Salt, entry.IV, fileText);
@@ -555,8 +606,12 @@ namespace Steam_Desktop_Authenticator
                 try
                 {
                     string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
-                    string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
-                    string[] entryPaths = ValidateAndResolveManifestEntries(this.Entries, this.Encrypted, validatedRoot);
+                    string validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
+                    string[] entryPaths = ValidateAndResolveManifestEntries(
+                        this.Entries,
+                        this.Encrypted,
+                        validatedRoot,
+                        this.CredentialsStoreFilename);
                     string expectedCanonicalDir = null;
 
                     Manifest stagedManifest = CloneForStorage();
@@ -591,9 +646,9 @@ namespace Steam_Desktop_Authenticator
                         }
 
                         if (expectedCanonicalDir == null)
-                            expectedCanonicalDir = GetValidatedCanonicalDirectoryPath(maDir);
+                            expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
 
-                        string contents = ReadTextWithLimit(sourcePath, MaximumAccountFileSizeBytes, expectedCanonicalDir);
+                        string contents = StoragePathGuard.ReadTextWithLimit(sourcePath, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                         stagedFiles.Add(canonicalFilename, contents);
                         stagedManifest.Entries[i].Filename = canonicalFilename;
                         obsoleteFiles.Add(entry.Filename);
@@ -647,7 +702,7 @@ namespace Steam_Desktop_Authenticator
                     return candidates;
 
                 ValidateStorageDirectory(maDir);
-                string expectedCanonicalDir = GetValidatedCanonicalDirectoryPath(maDir);
+                string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
                 HashSet<string> managedFilenames = new HashSet<string>(
                     Entries.Select(entry => entry.Filename), StringComparer.OrdinalIgnoreCase);
                 HashSet<ulong> managedSteamIds = new HashSet<ulong>(Entries.Select(entry => entry.SteamID));
@@ -663,7 +718,7 @@ namespace Steam_Desktop_Authenticator
 
                     try
                     {
-                        string contents = ReadTextWithLimit(path, MaximumAccountFileSizeBytes, expectedCanonicalDir);
+                        string contents = StoragePathGuard.ReadTextWithLimit(path, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                         SteamGuardAccount account = JsonConvert.DeserializeObject<SteamGuardAccount>(contents, storageJsonSettings);
                         ulong steamId = account?.Session?.SteamID ?? 0;
                         if (steamId == 0 || managedSteamIds.Contains(steamId))
@@ -723,9 +778,9 @@ namespace Steam_Desktop_Authenticator
                 try
                 {
                     string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
-                    string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
-                    ValidateAndResolveManifestEntries(this.Entries, this.Encrypted, validatedRoot);
-                    string expectedCanonicalDir = GetValidatedCanonicalDirectoryPath(maDir);
+                    string validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
+                    ValidateManifestState(this.Entries, this.Encrypted, validatedRoot, this.CredentialsStoreFilename);
+                    string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
                     HashSet<ulong> managedSteamIds = new HashSet<ulong>(Entries.Select(entry => entry.SteamID));
                     HashSet<string> sourceNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     List<SteamGuardAccount> validatedAccounts = new List<SteamGuardAccount>();
@@ -737,7 +792,7 @@ namespace Steam_Desktop_Authenticator
                             return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files is no longer available for import.");
 
                         string path = ResolveValidatedManifestFilePath(validatedRoot, candidate.FileName);
-                        string contents = ReadTextWithLimit(path, MaximumAccountFileSizeBytes, expectedCanonicalDir);
+                        string contents = StoragePathGuard.ReadTextWithLimit(path, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                         if (!String.Equals(GetContentHash(contents), candidate.ContentHash, StringComparison.Ordinal))
                             return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files changed before it could be imported.");
 
@@ -775,7 +830,11 @@ namespace Steam_Desktop_Authenticator
                             IV = iv,
                             Salt = salt,
                             Filename = filename,
-                            SessionNeedsRenewal = account.Session.IsRefreshTokenExpired()
+                            SessionNeedsRenewal = account.Session.IsRefreshTokenExpired(),
+                            AutoConfirmOverrideEnabled = false,
+                            AutoConfirmTrades = false,
+                            AutoConfirmMarketTransactions = false,
+                            TradeConfirmationCheckInterval = null
                         });
                     }
 
@@ -824,8 +883,12 @@ namespace Steam_Desktop_Authenticator
                 Dictionary<string, string> stagedFiles = new Dictionary<string, string>();
                 List<string> obsoleteFiles = new List<string>();
                 string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
-                string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
-                string[] entryPaths = ValidateAndResolveManifestEntries(this.Entries, this.Encrypted, validatedRoot);
+                string validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
+                string[] entryPaths = ValidateAndResolveManifestEntries(
+                    this.Entries,
+                    this.Encrypted,
+                    validatedRoot,
+                    this.CredentialsStoreFilename);
                 string expectedCanonicalDir = null;
 
                 for (int i = 0; i < this.Entries.Count; i++)
@@ -838,9 +901,9 @@ namespace Steam_Desktop_Authenticator
                     }
 
                     if (expectedCanonicalDir == null)
-                        expectedCanonicalDir = GetValidatedCanonicalDirectoryPath(maDir);
+                        expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
 
-                    string fileContents = ReadTextWithLimit(existingFilename, MaximumAccountFileSizeBytes, expectedCanonicalDir);
+                    string fileContents = StoragePathGuard.ReadTextWithLimit(existingFilename, MaximumAccountFileSizeBytes, expectedCanonicalDir);
                     if (this.Encrypted)
                     {
                         fileContents = FileEncryptor.DecryptData(oldKey, existingEntry.Salt, existingEntry.IV, fileContents);
@@ -878,10 +941,48 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 stagedManifest.Encrypted = toEncrypt;
+                if (!toEncrypt)
+                {
+                    stagedManifest.AllowSavedSteamPasswords = false;
+                    if (!String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                    {
+                        obsoleteFiles.Add(this.CredentialsStoreFilename);
+                    }
+                    stagedManifest.CredentialsStoreFilename = null;
+                }
+                else if (!String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                {
+                    string existingCredPath = ResolveValidatedCredentialStoreFilePath(validatedRoot, this.CredentialsStoreFilename);
+                    if (File.Exists(existingCredPath))
+                    {
+                        if (!EncryptedCredentialStore.IsSupported)
+                            return StorageResult.Failure(StorageFailureKind.Encryption, "AES-GCM encryption is not supported on this system.");
+
+                        if (expectedCanonicalDir == null)
+                            expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
+
+                        string encryptedCredContents = StoragePathGuard.ReadTextWithLimit(existingCredPath, EncryptedCredentialStore.MaximumEnvelopeBytes, expectedCanonicalDir);
+                        Dictionary<ulong, SavedCredentialRecord> records = EncryptedCredentialStore.Decrypt(oldKey, encryptedCredContents);
+                        string newCredFilename = EncryptedCredentialStore.CreateNewFilename();
+                        string reencryptedCredContents = EncryptedCredentialStore.Encrypt(newKey, records);
+                        stagedFiles.Add(newCredFilename, reencryptedCredContents);
+                        obsoleteFiles.Add(this.CredentialsStoreFilename);
+                        stagedManifest.CredentialsStoreFilename = newCredFilename;
+                    }
+                    else
+                    {
+                        stagedManifest.CredentialsStoreFilename = null;
+                    }
+                }
+
                 StorageResult result = CommitStorageTransaction(stagedManifest, stagedFiles, obsoleteFiles);
                 if (result.Succeeded)
                 {
                     CopyStorageStateFrom(stagedManifest);
+                    if (toEncrypt)
+                        RecordVerifiedPasskeyProofLocked(newKey);
+                    else
+                        ClearVerifiedPasskeyProofLocked();
                     StorageResult normalizationResult = NormalizeAccountFilenames();
                     if (!normalizationResult.Succeeded)
                         DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "Encryption changed successfully, but canonical authenticator filenames could not be completed.");
@@ -899,14 +1000,171 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        public bool VerifyPasskey(string passkey)
+        private byte[] ComputePasskeyProof(string passkey)
         {
-            if (!this.Encrypted || this.Entries.Count == 0) return true;
-
+            byte[] keyBytes = Encoding.UTF8.GetBytes(passkey ?? String.Empty);
             try
             {
-                var accounts = this.GetAllAccounts(passkey);
-                return accounts != null && accounts.Length == this.Entries.Count;
+                using (var hmac = new HMACSHA256(passkeyProofKey))
+                {
+                    return hmac.ComputeHash(keyBytes);
+                }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(keyBytes);
+            }
+        }
+
+        private void RecordVerifiedPasskeyProofLocked(string passkey)
+        {
+            if (String.IsNullOrEmpty(passkey))
+            {
+                verifiedPasskeyProof = null;
+                return;
+            }
+            verifiedPasskeyProof = ComputePasskeyProof(passkey);
+        }
+
+        private void ClearVerifiedPasskeyProofLocked()
+        {
+            verifiedPasskeyProof = null;
+        }
+
+        private bool IsPasskeyValidForEncryptedWriteLocked(string passKey, ulong targetSteamId)
+        {
+            if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
+                return true;
+            if (String.IsNullOrEmpty(passKey))
+                return false;
+
+            if (verifiedPasskeyProof != null)
+            {
+                byte[] candidateProof = ComputePasskeyProof(passKey);
+                return CryptographicOperations.FixedTimeEquals(verifiedPasskeyProof, candidateProof);
+            }
+
+            // Cold-start validation when VerifyPasskey has not yet run on this Manifest instance:
+            // validate against the target entry first, then any readable entry. A single unreadable
+            // unrelated file does not block healthy encrypted writes, while a wrong passkey fails closed.
+            string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
+            string validatedRoot;
+            string expectedCanonicalDir;
+            try
+            {
+                validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
+                if (!Directory.Exists(maDir))
+                    return false;
+                expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "Could not validate the account-data directory during passkey write validation.");
+                return false;
+            }
+
+            IEnumerable<ManifestEntry> orderedEntries = this.Entries
+                .Where(entry => entry != null)
+                .OrderByDescending(entry => targetSteamId != 0 && entry.SteamID == targetSteamId);
+
+            foreach (ManifestEntry entry in orderedEntries)
+            {
+                string filename;
+                try
+                {
+                    filename = ResolveValidatedManifestFilePath(validatedRoot, entry);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (!File.Exists(filename))
+                    continue;
+
+                string rawContents;
+                try
+                {
+                    rawContents = StoragePathGuard.ReadTextWithLimit(filename, MaximumAccountFileSizeBytes, expectedCanonicalDir);
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Authenticator storage", ex, "Skipping an unreadable authenticator file during passkey write validation.");
+                    continue;
+                }
+
+                if (String.IsNullOrEmpty(rawContents) || String.IsNullOrEmpty(entry.Salt) || String.IsNullOrEmpty(entry.IV))
+                    continue;
+
+                string decrypted;
+                try
+                {
+                    decrypted = FileEncryptor.DecryptData(passKey, entry.Salt, entry.IV, rawContents);
+                }
+                catch (Exception ex) when (ex is ArgumentException || ex is FormatException || ex is CryptographicException)
+                {
+                    continue;
+                }
+
+                if (decrypted == null)
+                    continue;
+
+                try
+                {
+                    SteamGuardAccount parsed = JsonConvert.DeserializeObject<SteamGuardAccount>(decrypted, storageJsonSettings);
+                    if (parsed?.Session != null && parsed.Session.SteamID == entry.SteamID)
+                    {
+                        RecordVerifiedPasskeyProofLocked(passKey);
+                        return true;
+                    }
+                }
+                catch (JsonException)
+                {
+                    continue;
+                }
+            }
+
+            return false;
+        }
+
+        public bool VerifyPasskey(string passkey)
+        {
+            try
+            {
+                for (int attempt = 0; attempt < 2; attempt++)
+                {
+                    long revisionBefore;
+                    int expectedEntryCount;
+                    lock (storageLock)
+                    {
+                        if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
+                            return true;
+                        revisionBefore = this.storageRevision;
+                        expectedEntryCount = this.Entries.Count;
+                    }
+
+                    var accounts = this.GetAllAccounts(passkey);
+                    bool valid = accounts != null && accounts.Length == expectedEntryCount;
+
+                    lock (storageLock)
+                    {
+                        if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
+                            return true;
+
+                        if (this.storageRevision != revisionBefore)
+                        {
+                            // Storage mutated concurrently (e.g., passkey rotation or account update);
+                            // never publish a potentially stale passkey proof.
+                            continue;
+                        }
+
+                        if (valid)
+                            RecordVerifiedPasskeyProofLocked(passkey);
+
+                        return valid;
+                    }
+                }
+
+                return false;
             }
             catch (Exception ex)
             {
@@ -938,13 +1196,60 @@ namespace Steam_Desktop_Authenticator
                 if (stagedEntry == null)
                     return false;
                 stagedManifest.Entries.Remove(stagedEntry);
+                Dictionary<string, string> stagedFiles = new Dictionary<string, string>();
+                List<string> obsoleteFiles = new List<string>();
+                if (deleteMaFile)
+                    obsoleteFiles.Add(entry.Filename);
+
                 if (stagedManifest.Entries.Count == 0)
+                {
                     stagedManifest.Encrypted = false;
+                    stagedManifest.AllowSavedSteamPasswords = false;
+                    if (!String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                        obsoleteFiles.Add(this.CredentialsStoreFilename);
+                    stagedManifest.CredentialsStoreFilename = null;
+                }
+                else if (!String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                {
+                    string maDir = Path.Combine(GetExecutableDir(), "maFiles");
+                    string validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
+                    string existingCredPath = ResolveValidatedCredentialStoreFilePath(validatedRoot, this.CredentialsStoreFilename);
+                    if (File.Exists(existingCredPath))
+                    {
+                        if (String.IsNullOrEmpty(passKey) || !IsPasskeyValidForEncryptedWriteLocked(passKey, entry.SteamID))
+                        {
+                            DiagnosticErrorLogger.Log("Authenticator storage", new InvalidOperationException("Passkey required to update credential store during account removal."), "Removing an account with saved credentials requires a valid passkey.");
+                            return false;
+                        }
+
+                        string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
+                        string encryptedCredContents = StoragePathGuard.ReadTextWithLimit(existingCredPath, EncryptedCredentialStore.MaximumEnvelopeBytes, expectedCanonicalDir);
+                        Dictionary<ulong, SavedCredentialRecord> records = EncryptedCredentialStore.Decrypt(passKey, encryptedCredContents);
+                        if (records.Remove(entry.SteamID))
+                        {
+                            obsoleteFiles.Add(this.CredentialsStoreFilename);
+                            if (records.Count == 0)
+                            {
+                                stagedManifest.CredentialsStoreFilename = null;
+                            }
+                            else
+                            {
+                                string newCredFilename = EncryptedCredentialStore.CreateNewFilename();
+                                stagedFiles.Add(newCredFilename, EncryptedCredentialStore.Encrypt(passKey, records));
+                                stagedManifest.CredentialsStoreFilename = newCredFilename;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        stagedManifest.CredentialsStoreFilename = null;
+                    }
+                }
 
                 StorageResult result = CommitStorageTransaction(
                     stagedManifest,
-                    new Dictionary<string, string>(),
-                    deleteMaFile ? new[] { entry.Filename } : Enumerable.Empty<string>());
+                    stagedFiles,
+                    obsoleteFiles);
                 if (!result.Succeeded)
                 {
                     DiagnosticErrorLogger.Log("Authenticator storage", result.Exception, "Removing a local authenticator account failed.");
@@ -979,10 +1284,10 @@ namespace Steam_Desktop_Authenticator
             string expectedCanonicalDir;
             try
             {
-                validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
+                validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
                 if (!Directory.Exists(maDir))
                     return null;
-                expectedCanonicalDir = GetValidatedCanonicalDirectoryPath(maDir);
+                expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
             }
             catch (Exception ex)
             {
@@ -993,7 +1298,7 @@ namespace Steam_Desktop_Authenticator
             {
                 try
                 {
-                    string contents = ReadTextWithLimit(ResolveValidatedManifestFilePath(validatedRoot, candidate), MaximumAccountFileSizeBytes, expectedCanonicalDir);
+                    string contents = StoragePathGuard.ReadTextWithLimit(ResolveValidatedManifestFilePath(validatedRoot, candidate), MaximumAccountFileSizeBytes, expectedCanonicalDir);
                     if (Encrypted)
                     {
                         contents = FileEncryptor.DecryptData(passKey, candidate.Salt, candidate.IV, contents);
@@ -1023,12 +1328,29 @@ namespace Steam_Desktop_Authenticator
             return matchingEntries.Count == 1 ? matchingEntries[0] : null;
         }
 
+        public string GetLastTransferAttemptId(ulong steamId)
+        {
+            if (steamId == 0)
+                return null;
+
+            lock (storageLock)
+            {
+                return Entries?.FirstOrDefault(entry => entry != null && entry.SteamID == steamId)?.LastTransferAttemptId;
+            }
+        }
+
         public StorageResult SaveAccount(
             SteamGuardAccount account,
             bool encrypt,
             string passKey = null,
             long? expectedStorageRevision = null,
-            bool allowCreate = true)
+            bool allowCreate = true,
+            bool requireAllowSavedPasswords = false,
+            string expectedCredentialGenerationId = null,
+            string credentialPassKey = null,
+            string transferAttemptId = null,
+            string expectedPreviousTransferAttemptId = null,
+            bool enforceTransferAttemptBase = false)
         {
             lock (storageLock)
             {
@@ -1040,11 +1362,31 @@ namespace Steam_Desktop_Authenticator
                     return StorageResult.Failure(StorageFailureKind.Validation, "An encryption passkey is required to save this account.");
                 if (!encrypt && this.Encrypted)
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account must be saved using the existing encryption passkey.");
+                if (requireAllowSavedPasswords && (!this.Encrypted || !this.AllowSavedSteamPasswords))
+                    return StorageResult.Failure(StorageFailureKind.Validation, "Saved Steam passwords are no longer enabled.");
 
                 try
                 {
-                if (this.Encrypted && !this.VerifyPasskey(passKey))
+                if (this.Encrypted && !IsPasskeyValidForEncryptedWriteLocked(passKey, account.Session.SteamID))
                     return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid. The account was not saved.");
+
+                if (expectedCredentialGenerationId != null)
+                {
+                    if (!this.Encrypted || !this.AllowSavedSteamPasswords || String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                        return StorageResult.Failure(StorageFailureKind.Validation, "The saved credential is no longer active.");
+
+                    string effectiveCredPassKey = credentialPassKey ?? passKey;
+                    if (String.IsNullOrEmpty(effectiveCredPassKey))
+                        return StorageResult.Failure(StorageFailureKind.Validation, "A passkey is required to verify the saved credential.");
+
+                    SavedCredentialRecord currentRecord = TryLoadSavedCredentialRecordLocked(account.Session.SteamID, effectiveCredPassKey);
+                    if (currentRecord == null ||
+                        currentRecord.PasswordRejected ||
+                        !String.Equals(currentRecord.CredentialGenerationId, expectedCredentialGenerationId, StringComparison.Ordinal))
+                    {
+                        return StorageResult.Failure(StorageFailureKind.Validation, "The saved credential changed or was rejected while silent re-login was running.");
+                    }
+                }
 
                 string salt = null;
                 string iV = null;
@@ -1065,6 +1407,17 @@ namespace Steam_Desktop_Authenticator
                 ManifestEntry previousEntry = stagedManifest.Entries.FirstOrDefault(entry => entry.SteamID == account.Session.SteamID);
                 if (previousEntry == null && !allowCreate)
                     return StorageResult.Failure(StorageFailureKind.Validation, "The account is no longer managed by this authenticator.");
+                if (enforceTransferAttemptBase && previousEntry != null)
+                {
+                    string currentAttemptId = previousEntry.LastTransferAttemptId;
+                    bool matchesBaseline = String.Equals(currentAttemptId ?? String.Empty, expectedPreviousTransferAttemptId ?? String.Empty, StringComparison.Ordinal);
+                    bool matchesSameAttempt = !String.IsNullOrWhiteSpace(transferAttemptId) &&
+                        String.Equals(currentAttemptId, transferAttemptId, StringComparison.Ordinal);
+                    if (!matchesBaseline && !matchesSameAttempt)
+                    {
+                        return StorageResult.Failure(StorageFailureKind.Validation, "A newer authenticator transfer has already been saved for this account.");
+                    }
+                }
                 string filename = account.Session.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
                 ManifestEntry newEntry = new ManifestEntry()
                 {
@@ -1072,7 +1425,14 @@ namespace Steam_Desktop_Authenticator
                     IV = iV,
                     Salt = salt,
                     Filename = filename,
-                    SessionNeedsRenewal = account.Session.IsRefreshTokenExpired()
+                    SessionNeedsRenewal = account.Session.IsRefreshTokenExpired(),
+                    AutoConfirmOverrideEnabled = previousEntry?.AutoConfirmOverrideEnabled ?? false,
+                    AutoConfirmTrades = previousEntry?.AutoConfirmTrades ?? false,
+                    AutoConfirmMarketTransactions = previousEntry?.AutoConfirmMarketTransactions ?? false,
+                    TradeConfirmationCheckInterval = previousEntry?.TradeConfirmationCheckInterval,
+                    LastTransferAttemptId = !String.IsNullOrWhiteSpace(transferAttemptId)
+                        ? transferAttemptId
+                        : previousEntry?.LastTransferAttemptId
                 };
                 if (previousEntry == null)
                 {
@@ -1092,6 +1452,8 @@ namespace Steam_Desktop_Authenticator
                 if (result.Succeeded)
                 {
                     CopyStorageStateFrom(stagedManifest);
+                    if (stagedManifest.Encrypted && !String.IsNullOrEmpty(passKey))
+                        RecordVerifiedPasskeyProofLocked(passKey);
                     StorageResult normalizationResult = NormalizeAccountFilenames();
                     if (!normalizationResult.Succeeded)
                         DiagnosticErrorLogger.Log("Authenticator storage", normalizationResult.Exception, "The account was saved, but its canonical filename could not be completed.");
@@ -1118,33 +1480,46 @@ namespace Steam_Desktop_Authenticator
         {
             lock (storageLock)
             {
+                StoragePathGuard.PinnedStorageDirectory pinnedDir = null;
                 try
                 {
                     string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
                     string manifestFilename = Path.Combine(maDir, "manifest.json");
-                    bool maDirExisted = Directory.Exists(maDir);
-                    string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
-                    if (!maDirExisted)
-                    {
-                        Directory.CreateDirectory(maDir);
-                        ValidateStorageDirectory(maDir);
-                    }
-                    ValidateAndResolveManifestEntries(this.Entries, this.Encrypted, validatedRoot);
-                    List<string> retainedObsoleteFilenames = new List<string>();
-                    if (!RecoverPendingStorageTransaction(maDir, manifestFilename, retainedObsoleteFilenames))
-                    {
-                        return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data save could not be recovered safely. No settings were changed.");
-                    }
-                    ValidateStorageDirectory(maDir);
+                    pinnedDir = StoragePathGuard.TryPinExistingDirectory(maDir, out string validatedRoot);
+                    ValidateManifestState(this.Entries, this.Encrypted, validatedRoot, this.CredentialsStoreFilename);
                     string contents = JsonConvert.SerializeObject(this, storageJsonSettings);
                     if (Encoding.UTF8.GetByteCount(contents) > MaximumManifestFileSizeBytes)
                         throw new InvalidDataException("The account manifest is larger than the supported size limit.");
+
+                    List<string> retainedObsoleteFilenames = new List<string>();
+                    if (pinnedDir != null)
+                    {
+                        if (!RecoverPendingStorageTransaction(
+                            maDir,
+                            manifestFilename,
+                            retainedObsoleteFilenames,
+                            pinnedDir.CanonicalDirectoryPath,
+                            pinnedDir.ValidatedRoot))
+                        {
+                            return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data save could not be recovered safely. No settings were changed.");
+                        }
+                    }
+                    else
+                    {
+                        Directory.CreateDirectory(maDir);
+                        pinnedDir = StoragePathGuard.PinExistingDirectory(maDir);
+                    }
+
                     string backupFilename = Path.Combine(maDir, SettingsBackupFilename);
                     WriteAllTextAtomically(manifestFilename, contents, backupFilename);
                     if (retainedObsoleteFilenames.Count > 0)
                     {
-                        if (!RebaseRetainedStorageTransaction(maDir, contents) ||
-                            !RecoverPendingStorageTransaction(maDir, manifestFilename))
+                        if (!RebaseRetainedStorageTransaction(maDir, contents, pinnedDir.CanonicalDirectoryPath) ||
+                            !RecoverPendingStorageTransaction(
+                                maDir,
+                                manifestFilename,
+                                expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath,
+                                validatedRoot: pinnedDir.ValidatedRoot))
                         {
                             return StorageResult.Failure(
                                 StorageFailureKind.Io,
@@ -1152,6 +1527,7 @@ namespace Steam_Desktop_Authenticator
                         }
                     }
                     DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
+                    SweepOrphanedCredentialStoresLocked(maDir, this.CredentialsStoreFilename);
                     return StorageResult.Success();
                 }
                 catch (JsonException ex)
@@ -1168,6 +1544,10 @@ namespace Steam_Desktop_Authenticator
                 catch (Exception ex)
                 {
                     return StorageResult.Failure(StorageFailureKind.Manifest, "The application settings could not be saved. Check that the data folder is available and try again.", ex);
+                }
+                finally
+                {
+                    pinnedDir?.Dispose();
                 }
             }
         }
@@ -1191,6 +1571,34 @@ namespace Steam_Desktop_Authenticator
                         StorageFailureKind.Validation,
                         "The updated settings are invalid and were not saved.",
                         ex);
+                }
+
+                bool savedPasswordsChanged = staged.AllowSavedSteamPasswords != this.AllowSavedSteamPasswords;
+                if (savedPasswordsChanged)
+                {
+                    if (staged.AllowSavedSteamPasswords && !this.Encrypted)
+                        return StorageResult.Failure(StorageFailureKind.Validation, "Enable manifest encryption before saving Steam passwords.");
+                    if (staged.AllowSavedSteamPasswords && !EncryptedCredentialStore.IsSupported)
+                        return StorageResult.Failure(StorageFailureKind.Encryption, "AES-GCM encryption is not supported on this system.");
+
+                    List<string> obsoleteFiles = new List<string>();
+                    if (!staged.AllowSavedSteamPasswords && !String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                    {
+                        obsoleteFiles.Add(this.CredentialsStoreFilename);
+                        staged.CredentialsStoreFilename = null;
+                    }
+
+                    StorageResult txResult = CommitStorageTransaction(
+                        staged,
+                        new Dictionary<string, string>(),
+                        obsoleteFiles,
+                        preserveStagedSettings: true);
+                    if (txResult.Succeeded)
+                    {
+                        staged.CopySettingsInto(this);
+                        CopyStorageStateFrom(staged);
+                    }
+                    return txResult;
                 }
 
                 StorageResult result = staged.SaveWithResult();
@@ -1228,6 +1636,21 @@ namespace Steam_Desktop_Authenticator
 
             Entries = source.Entries;
             Encrypted = source.Encrypted;
+            if (!Encrypted || Entries == null || Entries.Count == 0)
+            {
+                ClearVerifiedPasskeyProofLocked();
+            }
+            AllowSavedSteamPasswords = source.AllowSavedSteamPasswords;
+            if (!String.Equals(CredentialsStoreFilename, source.CredentialsStoreFilename, StringComparison.Ordinal))
+            {
+                InvalidateCredentialMetadataCacheLocked();
+            }
+            CredentialsStoreFilename = source.CredentialsStoreFilename;
+            if (String.IsNullOrWhiteSpace(CredentialsStoreFilename))
+            {
+                CredentialsStoreMissingWarning = false;
+                InvalidateCredentialMetadataCacheLocked();
+            }
             storageRevision++;
         }
 
@@ -1286,7 +1709,8 @@ namespace Steam_Desktop_Authenticator
         private StorageResult CommitStorageTransaction(
             Manifest stagedManifest,
             IReadOnlyDictionary<string, string> stagedFiles,
-            IEnumerable<string> obsoleteFiles)
+            IEnumerable<string> obsoleteFiles,
+            bool preserveStagedSettings = false)
         {
             lock (storageLock)
             {
@@ -1303,15 +1727,22 @@ namespace Steam_Desktop_Authenticator
                 bool manifestCommitStarted = false;
                 bool journalWritten = false;
                 List<string> trackedRetainedObsoleteFilenames = new List<string>();
+                StoragePathGuard.PinnedStorageDirectory pinnedDir = null;
 
                 try
                 {
-                    string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
+                    pinnedDir = StoragePathGuard.TryPinExistingDirectory(maDir, out string validatedRoot);
 
                     // A cleanup failure leaves the previous journal intentionally. Complete it
                     // before replacing it so its obsolete files remain recoverable.
                     List<string> retainedObsoleteFilenames = new List<string>();
-                    if (!RecoverPendingStorageTransaction(maDir, manifestFilename, retainedObsoleteFilenames))
+                    if (pinnedDir != null &&
+                        !RecoverPendingStorageTransaction(
+                            maDir,
+                            manifestFilename,
+                            retainedObsoleteFilenames,
+                            pinnedDir.CanonicalDirectoryPath,
+                            pinnedDir.ValidatedRoot))
                     {
                         return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data transaction could not be recovered safely. No account data was changed.");
                     }
@@ -1327,17 +1758,27 @@ namespace Steam_Desktop_Authenticator
                         obsoleteFilenames.RemoveAll(filename => trackedRetainedSet.Contains(filename));
                     }
 
-                    CopySettingsInto(stagedManifest);
-                    ValidateAndResolveManifestEntries(stagedManifest.Entries, stagedManifest.Encrypted, validatedRoot);
+                    if (!preserveStagedSettings)
+                        CopySettingsInto(stagedManifest);
+                    if (!stagedManifest.Encrypted)
+                    {
+                        stagedManifest.AllowSavedSteamPasswords = false;
+                        if (!String.IsNullOrWhiteSpace(stagedManifest.CredentialsStoreFilename))
+                        {
+                            if (!obsoleteFilenames.Contains(stagedManifest.CredentialsStoreFilename, StringComparer.OrdinalIgnoreCase))
+                                obsoleteFilenames.Add(stagedManifest.CredentialsStoreFilename);
+                            stagedManifest.CredentialsStoreFilename = null;
+                        }
+                    }
+
+                    ValidateManifestState(
+                        stagedManifest.Entries,
+                        stagedManifest.Encrypted,
+                        validatedRoot,
+                        stagedManifest.CredentialsStoreFilename);
                     string manifestContents = JsonConvert.SerializeObject(stagedManifest, storageJsonSettings);
                     if (Encoding.UTF8.GetByteCount(manifestContents) > MaximumManifestFileSizeBytes)
                         throw new InvalidDataException("The account manifest is larger than the supported size limit.");
-                    if (!Directory.Exists(maDir))
-                    {
-                        ValidateStorageDirectory(maDir);
-                        Directory.CreateDirectory(maDir);
-                    }
-                    ValidateStorageDirectory(maDir);
 
                     foreach (string filename in obsoleteFilenames)
                         ValidateStorageFilename(filename);
@@ -1347,6 +1788,12 @@ namespace Steam_Desktop_Authenticator
 
                     foreach (string filename in createdFilenames)
                         ValidateStorageFilename(filename);
+
+                    if (pinnedDir == null)
+                    {
+                        Directory.CreateDirectory(maDir);
+                        pinnedDir = StoragePathGuard.PinExistingDirectory(maDir);
+                    }
 
                     StorageTransactionJournal journal = new StorageTransactionJournal()
                     {
@@ -1371,26 +1818,28 @@ namespace Steam_Desktop_Authenticator
                     manifestCommitted = true;
 
                     bool backupDeleted = DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.");
-                    if (backupDeleted &&
+                    bool obsoleteDeleted = backupDeleted &&
                         DeleteFilesBestEffort(
                             maDir,
                             obsoleteFilenames.Concat(trackedRetainedObsoleteFilenames),
-                            "The replaced authenticator file could not be removed after the manifest was committed."))
+                            "The replaced authenticator file could not be removed after the manifest was committed.");
+                    if (obsoleteDeleted)
                     {
                         DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed.");
                     }
-                    return StorageResult.Success();
+                    SweepOrphanedCredentialStoresLocked(maDir, stagedManifest.CredentialsStoreFilename);
+                    return StorageResult.Success(obsoleteCleanupPending: !obsoleteDeleted);
                 }
                 catch (JsonException ex)
                 {
                     if (journalWritten && !manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted);
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted, pinnedDir?.CanonicalDirectoryPath);
                     return StorageResult.Failure(StorageFailureKind.Serialization, "The account data could not be prepared for saving.", ex);
                 }
                 catch (NotSupportedException ex)
                 {
                     if (journalWritten && !manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted);
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted, pinnedDir?.CanonicalDirectoryPath);
                     return StorageResult.Failure(
                         StorageFailureKind.Io,
                         "The selected data folder does not support the safe atomic saves required for authenticator data. Move the data folder to a local drive and try again.",
@@ -1399,13 +1848,17 @@ namespace Steam_Desktop_Authenticator
                 catch (Exception ex)
                 {
                     if (journalWritten && !manifestCommitted)
-                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted);
+                        RollBackUncommittedTransaction(maDir, manifestFilename, journalFilename, backupFilename, createdFilenames, trackedRetainedObsoleteFilenames, manifestCommitStarted, pinnedDir?.CanonicalDirectoryPath);
                     return StorageResult.Failure(
                         manifestCommitStarted ? StorageFailureKind.Manifest : StorageFailureKind.Io,
                         manifestCommitStarted
                             ? "The account manifest could not be saved. The existing account data was kept unchanged."
                             : "The account files could not be saved. The existing account data was kept unchanged.",
                         ex);
+                }
+                finally
+                {
+                    pinnedDir?.Dispose();
                 }
             }
         }
@@ -1417,9 +1870,10 @@ namespace Steam_Desktop_Authenticator
             string backupFilename,
             IEnumerable<string> createdFilenames,
             IReadOnlyList<string> retainedObsoleteFilenames,
-            bool manifestCommitStarted)
+            bool manifestCommitStarted,
+            string expectedCanonicalDir)
         {
-            if (manifestCommitStarted && !RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, true))
+            if (manifestCommitStarted && !RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, true, expectedCanonicalDir))
                 return;
 
             if (DeleteFilesBestEffort(maDir, createdFilenames, "A temporary authenticator file could not be removed after a failed save."))
@@ -1433,7 +1887,7 @@ namespace Steam_Desktop_Authenticator
                     retainedObsoleteFilenames.Count > 0 &&
                     !DeleteFilesBestEffort(maDir, retainedObsoleteFilenames, "A retained obsolete authenticator file could not be removed after a failed save."))
                 {
-                    PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsoleteFilenames);
+                    PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsoleteFilenames, expectedCanonicalDir);
                     return;
                 }
 
@@ -1444,14 +1898,16 @@ namespace Steam_Desktop_Authenticator
         private static bool PreserveRetainedObsoleteJournal(
             string manifestFilename,
             string journalFilename,
-            IReadOnlyList<string> retainedObsoleteFilenames)
+            IReadOnlyList<string> retainedObsoleteFilenames,
+            string expectedCanonicalDir)
         {
             try
             {
                 if (!File.Exists(manifestFilename))
                     return false;
 
-                string currentManifestContents = ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes);
+                string canonicalDir = expectedCanonicalDir ?? StoragePathGuard.GetValidatedCanonicalDirectoryPath(Path.GetDirectoryName(manifestFilename));
+                string currentManifestContents = StoragePathGuard.ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes, canonicalDir);
                 StorageTransactionJournal retainedJournal = new StorageTransactionJournal()
                 {
                     ManifestHash = GetContentHash(currentManifestContents),
@@ -1470,7 +1926,12 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static bool RecoverPendingStorageTransaction(string maDir, string manifestFilename, ICollection<string> retainedObsoleteFilenames = null)
+        private static bool RecoverPendingStorageTransaction(
+            string maDir,
+            string manifestFilename,
+            ICollection<string> retainedObsoleteFilenames = null,
+            string expectedCanonicalDir = null,
+            string validatedRoot = null)
         {
             string journalFilename = Path.Combine(maDir, StorageJournalFilename);
             lock (storageLock)
@@ -1480,7 +1941,11 @@ namespace Steam_Desktop_Authenticator
 
                 try
                 {
-                    StorageTransactionJournal journal = JsonConvert.DeserializeObject<StorageTransactionJournal>(ReadTextWithLimit(journalFilename, MaximumManifestFileSizeBytes), storageJsonSettings);
+                    string root = validatedRoot ?? StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
+                    string canonicalDir = expectedCanonicalDir ?? StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
+                    StorageTransactionJournal journal = JsonConvert.DeserializeObject<StorageTransactionJournal>(
+                        StoragePathGuard.ReadTextWithLimit(journalFilename, MaximumManifestFileSizeBytes, canonicalDir),
+                        storageJsonSettings);
                     if (journal == null || String.IsNullOrWhiteSpace(journal.ManifestHash))
                         throw new InvalidDataException("The pending storage journal is invalid.");
 
@@ -1491,12 +1956,15 @@ namespace Steam_Desktop_Authenticator
                         ValidateStorageFilename(filename);
 
                     string backupFilename = GetValidatedStorageBackupPath(maDir, journal.BackupFilename);
-                    if (!RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, false))
+                    if (!RestoreManifestBackupIfNeeded(manifestFilename, backupFilename, false, canonicalDir))
                         return false;
 
                     bool manifestCommitted = File.Exists(manifestFilename) &&
-                        String.Equals(GetContentHash(ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes)), journal.ManifestHash, StringComparison.Ordinal);
-                    HashSet<string> manifestFilenames = GetManifestFilenamesForRecovery(manifestFilename);
+                        String.Equals(
+                            GetContentHash(StoragePathGuard.ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes, canonicalDir)),
+                            journal.ManifestHash,
+                            StringComparison.Ordinal);
+                    HashSet<string> manifestFilenames = GetManifestFilenamesForRecovery(manifestFilename, canonicalDir, root);
                     ValidateStorageTransactionFileOwnership(
                         created,
                         obsolete,
@@ -1551,7 +2019,7 @@ namespace Steam_Desktop_Authenticator
                     if (retainedObsolete.Count > 0 &&
                         !DeleteFilesBestEffort(maDir, retainedObsolete, "A retained obsolete authenticator file could not be removed during storage recovery."))
                     {
-                        if (!PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsolete))
+                        if (!PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, retainedObsolete, canonicalDir))
                             return false;
                         if (retainedObsoleteFilenames != null)
                         {
@@ -1572,7 +2040,7 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static bool RebaseRetainedStorageTransaction(string maDir, string manifestContents)
+        private static bool RebaseRetainedStorageTransaction(string maDir, string manifestContents, string expectedCanonicalDir = null)
         {
             string journalFilename = Path.Combine(maDir, StorageJournalFilename);
             lock (storageLock)
@@ -1582,7 +2050,10 @@ namespace Steam_Desktop_Authenticator
                     if (!File.Exists(journalFilename))
                         return true;
 
-                    StorageTransactionJournal journal = JsonConvert.DeserializeObject<StorageTransactionJournal>(ReadTextWithLimit(journalFilename, MaximumManifestFileSizeBytes), storageJsonSettings);
+                    string canonicalDir = expectedCanonicalDir ?? StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
+                    StorageTransactionJournal journal = JsonConvert.DeserializeObject<StorageTransactionJournal>(
+                        StoragePathGuard.ReadTextWithLimit(journalFilename, MaximumManifestFileSizeBytes, canonicalDir),
+                        storageJsonSettings);
                     if (journal == null || String.IsNullOrWhiteSpace(journal.ManifestHash))
                         throw new InvalidDataException("The retained storage journal is invalid.");
 
@@ -1617,7 +2088,11 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static bool RestoreManifestBackupIfNeeded(string manifestFilename, string backupFilename, bool overwriteManifest)
+        private static bool RestoreManifestBackupIfNeeded(
+            string manifestFilename,
+            string backupFilename,
+            bool overwriteManifest,
+            string expectedCanonicalDir = null)
         {
             if (String.IsNullOrWhiteSpace(backupFilename) || !File.Exists(backupFilename))
                 return !overwriteManifest || File.Exists(manifestFilename);
@@ -1626,7 +2101,10 @@ namespace Steam_Desktop_Authenticator
 
             try
             {
-                WriteAllTextAtomically(manifestFilename, ReadTextWithLimit(backupFilename, MaximumManifestFileSizeBytes));
+                string canonicalDir = expectedCanonicalDir ?? StoragePathGuard.GetValidatedCanonicalDirectoryPath(Path.GetDirectoryName(manifestFilename));
+                WriteAllTextAtomically(
+                    manifestFilename,
+                    StoragePathGuard.ReadTextWithLimit(backupFilename, MaximumManifestFileSizeBytes, canonicalDir));
                 return File.Exists(manifestFilename);
             }
             catch (Exception ex)
@@ -1654,21 +2132,36 @@ namespace Steam_Desktop_Authenticator
             return Path.Combine(maDir, filename);
         }
 
-        private static HashSet<string> GetManifestFilenamesForRecovery(string manifestFilename)
+        private static HashSet<string> GetManifestFilenamesForRecovery(
+            string manifestFilename,
+            string expectedCanonicalDir,
+            string validatedRoot)
         {
             HashSet<string> filenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (!File.Exists(manifestFilename))
                 return filenames;
 
             Manifest currentManifest = JsonConvert.DeserializeObject<Manifest>(
-                ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes),
+                StoragePathGuard.ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes, expectedCanonicalDir),
                 storageJsonSettings);
-            ValidateManifestEntries(currentManifest, Path.GetDirectoryName(manifestFilename));
+            if (currentManifest == null || currentManifest.Entries == null)
+                throw new InvalidDataException("The account manifest contains an invalid entries list.");
+
+            ValidateManifestState(
+                currentManifest.Entries,
+                currentManifest.Encrypted,
+                validatedRoot,
+                currentManifest.CredentialsStoreFilename);
 
             foreach (ManifestEntry entry in currentManifest.Entries)
             {
                 if (!filenames.Add(entry.Filename))
                     throw new InvalidDataException("The current account manifest contains duplicate account filenames.");
+            }
+
+            if (!String.IsNullOrWhiteSpace(currentManifest.CredentialsStoreFilename))
+            {
+                filenames.Add(currentManifest.CredentialsStoreFilename);
             }
 
             return filenames;
@@ -1788,233 +2281,6 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private const uint FileShareReadWriteDelete = 0x00000001 | 0x00000002 | 0x00000004;
-        private const uint OpenExisting = 3;
-        private const uint FileFlagBackupSemantics = 0x02000000;
-        private const uint FileFlagOpenReparsePoint = 0x00200000;
-        private const uint FileAttributeDirectory = 0x00000010;
-        private const uint FileAttributeReparsePoint = 0x00000400;
-        private const uint FileNameNormalized = 0x0;
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct ByHandleFileInformation
-        {
-            public uint FileAttributes;
-            public uint CreationTimeLow;
-            public uint CreationTimeHigh;
-            public uint LastAccessTimeLow;
-            public uint LastAccessTimeHigh;
-            public uint LastWriteTimeLow;
-            public uint LastWriteTimeHigh;
-            public uint VolumeSerialNumber;
-            public uint FileSizeHigh;
-            public uint FileSizeLow;
-            public uint NumberOfLinks;
-            public uint FileIndexHigh;
-            public uint FileIndexLow;
-        }
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern SafeFileHandle CreateFileW(
-            string lpFileName,
-            uint dwDesiredAccess,
-            uint dwShareMode,
-            IntPtr lpSecurityAttributes,
-            uint dwCreationDisposition,
-            uint dwFlagsAndAttributes,
-            IntPtr hTemplateFile);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetFileInformationByHandle(
-            SafeFileHandle hFile,
-            out ByHandleFileInformation lpFileInformation);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern uint GetFinalPathNameByHandleW(
-            SafeFileHandle hFile,
-            [Out] char[] lpszFilePath,
-            uint cchFilePath,
-            uint dwFlags);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern uint GetLongPathNameW(
-            string lpszShortPath,
-            [Out] char[] lpszLongPath,
-            uint cchBuffer);
-
-        private static string TryGetFinalPathNameByHandle(SafeFileHandle handle)
-        {
-            if (handle == null || handle.IsInvalid)
-                return null;
-
-            uint requiredLength = GetFinalPathNameByHandleW(handle, null, 0, FileNameNormalized);
-            if (requiredLength == 0)
-                return null;
-
-            char[] buffer = new char[requiredLength];
-            uint written = GetFinalPathNameByHandleW(handle, buffer, requiredLength, FileNameNormalized);
-            if (written == 0 || written >= requiredLength)
-                return null;
-
-            return new string(buffer, 0, (int)written);
-        }
-
-        private static string GetLongPathNameOrThrow(string fullPath)
-        {
-            uint requiredLength = GetLongPathNameW(fullPath, null, 0);
-            if (requiredLength == 0)
-                throw new InvalidDataException("The account-data directory path could not be normalized.");
-
-            char[] buffer = new char[requiredLength];
-            uint written = GetLongPathNameW(fullPath, buffer, requiredLength);
-            if (written == 0 || written >= requiredLength)
-                throw new InvalidDataException("The account-data directory path could not be normalized.");
-
-            return new string(buffer, 0, (int)written);
-        }
-
-        internal static string GetValidatedCanonicalDirectoryPath(string directoryPath)
-        {
-            Interlocked.Increment(ref canonicalDirectoryVerificationCount);
-            if (String.IsNullOrWhiteSpace(directoryPath))
-                throw new InvalidDataException("The account-data directory path is invalid.");
-
-            string fullPath = Path.GetFullPath(directoryPath);
-            using (SafeFileHandle handle = CreateFileW(
-                fullPath,
-                0,
-                FileShareReadWriteDelete,
-                IntPtr.Zero,
-                OpenExisting,
-                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
-                IntPtr.Zero))
-            {
-                if (handle == null || handle.IsInvalid)
-                    throw new InvalidDataException("The account-data directory could not be opened for verification.");
-
-                if (!GetFileInformationByHandle(handle, out ByHandleFileInformation fileInfo))
-                    throw new InvalidDataException("The account-data directory attributes could not be verified.");
-
-                if ((fileInfo.FileAttributes & FileAttributeReparsePoint) != 0)
-                    throw new InvalidDataException("The account-data directory uses an unsupported link.");
-
-                if ((fileInfo.FileAttributes & FileAttributeDirectory) == 0)
-                    throw new InvalidDataException("The account-data directory is not a valid directory.");
-
-                string canonicalPath = TryGetFinalPathNameByHandle(handle);
-                if (String.IsNullOrEmpty(canonicalPath))
-                    throw new InvalidDataException("The account-data directory canonical path could not be verified.");
-
-                VerifyCanonicalDirectoryMatchesExpectedPath(fullPath, canonicalPath);
-                return canonicalPath;
-            }
-        }
-
-        private static void VerifyCanonicalDirectoryMatchesExpectedPath(string fullPath, string canonicalDirectoryPath)
-        {
-            string longFullPath = GetLongPathNameOrThrow(fullPath);
-            string pathRoot = Path.GetPathRoot(longFullPath);
-            if (String.IsNullOrWhiteSpace(pathRoot))
-                throw new InvalidDataException("The account-data directory root could not be verified.");
-
-            string relativePath = longFullPath.Length > pathRoot.Length
-                ? longFullPath.Substring(pathRoot.Length).Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                : String.Empty;
-
-            string canonicalRoot;
-            using (SafeFileHandle rootHandle = CreateFileW(
-                pathRoot,
-                0,
-                FileShareReadWriteDelete,
-                IntPtr.Zero,
-                OpenExisting,
-                FileFlagBackupSemantics,
-                IntPtr.Zero))
-            {
-                canonicalRoot = TryGetFinalPathNameByHandle(rootHandle);
-            }
-
-            if (String.IsNullOrEmpty(canonicalRoot))
-                throw new InvalidDataException("The account-data directory volume root could not be verified.");
-
-            string trimmedCanonicalRoot = canonicalRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string expectedCanonical = String.IsNullOrEmpty(relativePath)
-                ? trimmedCanonicalRoot
-                : trimmedCanonicalRoot + Path.DirectorySeparatorChar + relativePath;
-            string actualCanonical = canonicalDirectoryPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-            if (!String.Equals(actualCanonical, expectedCanonical, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("The account-data directory resolved through an unsupported link.");
-        }
-
-        private static void VerifyOpenedFileWithinCanonicalDirectory(
-            SafeFileHandle fileHandle,
-            string expectedFilename,
-            string expectedCanonicalDirectory)
-        {
-            if (String.IsNullOrWhiteSpace(expectedCanonicalDirectory))
-                throw new InvalidDataException("The account-data directory canonical path could not be verified.");
-
-            string finalFilePath = TryGetFinalPathNameByHandle(fileHandle);
-            if (String.IsNullOrEmpty(finalFilePath))
-                throw new InvalidDataException("A storage file path could not be verified.");
-
-            string normalizedExpectedDir = expectedCanonicalDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            int lastSeparator = finalFilePath.LastIndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar });
-            if (lastSeparator <= 0)
-                throw new InvalidDataException("A storage file resolved outside the account-data directory.");
-
-            string actualDir = finalFilePath.Substring(0, lastSeparator);
-            string actualName = finalFilePath.Substring(lastSeparator + 1);
-            if (!String.Equals(actualDir, normalizedExpectedDir, StringComparison.OrdinalIgnoreCase) ||
-                !String.Equals(actualName, expectedFilename, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException("A storage file resolved outside the account-data directory.");
-            }
-        }
-
-        private static string ReadTextWithLimit(string filename, long maximumBytes)
-        {
-            string directoryPath = Path.GetDirectoryName(filename);
-            if (String.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
-                throw new FileNotFoundException("The expected storage file does not exist.", filename);
-
-            return ReadTextWithLimit(filename, maximumBytes, GetValidatedCanonicalDirectoryPath(directoryPath));
-        }
-
-        internal static string ReadTextWithLimit(string filename, long maximumBytes, string expectedCanonicalDirectory)
-        {
-            if (String.IsNullOrWhiteSpace(expectedCanonicalDirectory))
-                throw new InvalidDataException("The account-data directory canonical path could not be verified.");
-
-            FileInfo fileInfo = new FileInfo(filename);
-            if (!fileInfo.Exists)
-                throw new FileNotFoundException("The expected storage file does not exist.", filename);
-            if ((fileInfo.Attributes & FileAttributes.ReparsePoint) != 0)
-                throw new InvalidDataException("A storage file uses an unsupported link.");
-            if (fileInfo.Length > maximumBytes)
-                throw new InvalidDataException("A storage file is larger than the supported size limit.");
-
-            using (FileStream stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan))
-            using (MemoryStream contents = new MemoryStream())
-            {
-                VerifyOpenedFileWithinCanonicalDirectory(stream.SafeFileHandle, Path.GetFileName(filename), expectedCanonicalDirectory);
-                byte[] buffer = new byte[81920];
-                int bytesRead;
-                long totalBytes = 0;
-                while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
-                {
-                    totalBytes += bytesRead;
-                    if (totalBytes > maximumBytes)
-                        throw new InvalidDataException("A storage file is larger than the supported size limit.");
-                    contents.Write(buffer, 0, bytesRead);
-                }
-
-                return new UTF8Encoding(false, true).GetString(contents.ToArray());
-            }
-        }
-
         private static string ResolveValidatedManifestFilePath(string validatedRoot, ManifestEntry entry)
         {
             if (entry == null)
@@ -2033,48 +2299,56 @@ namespace Steam_Desktop_Authenticator
             return candidate;
         }
 
-        private static string ValidateStorageDirectoryAndGetRoot(string directoryPath)
+        private static string ResolveValidatedCredentialStoreFilePath(string validatedRoot, string credentialsStoreFilename)
         {
-            Interlocked.Increment(ref storageDirectoryValidationCount);
-            string fullPath = Path.GetFullPath(directoryPath);
-            DirectoryInfo current = new DirectoryInfo(fullPath);
-            while (current != null)
-            {
-                if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0)
-                    throw new InvalidDataException("The account-data directory uses an unsupported link.");
+            if (!EncryptedCredentialStore.IsValidCredentialStoreFilename(credentialsStoreFilename))
+                throw new InvalidDataException("The account manifest contains an invalid credential store filename.");
 
-                DirectoryInfo parent = current.Parent;
-                if (parent == null || String.Equals(parent.FullName, current.FullName, StringComparison.OrdinalIgnoreCase))
-                    break;
-                current = parent;
-            }
+            string candidate = Path.GetFullPath(Path.Combine(validatedRoot, credentialsStoreFilename));
+            if (!candidate.StartsWith(validatedRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The account manifest credential store path escapes the data directory.");
 
-            return fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return candidate;
         }
 
         private static void ValidateStorageDirectory(string directoryPath)
         {
-            ValidateStorageDirectoryAndGetRoot(directoryPath);
+            StoragePathGuard.ValidateDirectoryAndGetRoot(directoryPath);
         }
 
-        private static void ValidateManifestEntries(Manifest manifest, string maDir)
+        private static void ValidateManifestState(
+            IReadOnlyList<ManifestEntry> entries,
+            bool encrypted,
+            string validatedRoot,
+            string credentialsStoreFilename)
         {
-            if (manifest == null || manifest.Entries == null || manifest.Entries.Count > MaximumManifestEntries)
-                throw new InvalidDataException("The account manifest contains an invalid entries list.");
-
-            string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
-            ValidateAndResolveManifestEntries(manifest.Entries, manifest.Encrypted, validatedRoot);
+            ValidateManifestStateCore(entries, encrypted, validatedRoot, credentialsStoreFilename, resolvedPaths: null);
         }
 
         private static string[] ValidateAndResolveManifestEntries(
             IReadOnlyList<ManifestEntry> entries,
             bool encrypted,
-            string validatedRoot)
+            string validatedRoot,
+            string credentialsStoreFilename)
         {
             if (entries == null || entries.Count > MaximumManifestEntries)
                 throw new InvalidDataException("The account manifest contains an invalid entries list.");
 
             string[] resolvedPaths = new string[entries.Count];
+            ValidateManifestStateCore(entries, encrypted, validatedRoot, credentialsStoreFilename, resolvedPaths);
+            return resolvedPaths;
+        }
+
+        private static void ValidateManifestStateCore(
+            IReadOnlyList<ManifestEntry> entries,
+            bool encrypted,
+            string validatedRoot,
+            string credentialsStoreFilename,
+            string[] resolvedPaths)
+        {
+            if (entries == null || entries.Count > MaximumManifestEntries)
+                throw new InvalidDataException("The account manifest contains an invalid entries list.");
+
             HashSet<ulong> steamIds = new HashSet<ulong>();
             HashSet<string> filenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < entries.Count; i++)
@@ -2099,10 +2373,14 @@ namespace Steam_Desktop_Authenticator
                     throw new InvalidDataException("An unencrypted account entry contains encryption metadata.");
                 }
 
-                resolvedPaths[i] = resolvedPath;
+                if (resolvedPaths != null)
+                    resolvedPaths[i] = resolvedPath;
             }
 
-            return resolvedPaths;
+            if (!String.IsNullOrWhiteSpace(credentialsStoreFilename))
+            {
+                ResolveValidatedCredentialStoreFilePath(validatedRoot, credentialsStoreFilename);
+            }
         }
 
         private static void ValidateManifestFilename(string filename)
@@ -2131,6 +2409,9 @@ namespace Steam_Desktop_Authenticator
 
         private static void ValidateStorageFilename(string filename)
         {
+            if (EncryptedCredentialStore.IsValidCredentialStoreFilename(filename))
+                return;
+
             try
             {
                 ValidateManifestFilename(filename);
@@ -2138,6 +2419,34 @@ namespace Steam_Desktop_Authenticator
             catch (InvalidDataException)
             {
                 throw new InvalidDataException("A storage transaction contained an invalid filename.");
+            }
+        }
+
+        private static void SweepOrphanedCredentialStoresLocked(string maDir, string activeCredentialsFilename)
+        {
+            if (String.IsNullOrWhiteSpace(maDir) || !Directory.Exists(maDir))
+                return;
+
+            try
+            {
+                foreach (string filePath in Directory.EnumerateFiles(maDir, "credentials.*.asda-cred*", SearchOption.TopDirectoryOnly))
+                {
+                    string fileName = Path.GetFileName(filePath);
+                    if (!EncryptedCredentialStore.IsCredentialStoreOrTempFilename(fileName))
+                        continue;
+
+                    if (!String.IsNullOrWhiteSpace(activeCredentialsFilename) &&
+                        String.Equals(fileName, activeCredentialsFilename, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    DeleteFileBestEffort(filePath, "An orphaned encrypted credential file could not be removed.");
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "The orphaned credential store sweep could not enumerate the data directory.");
             }
         }
 
@@ -2194,15 +2503,15 @@ namespace Steam_Desktop_Authenticator
             public string BackupFilename { get; set; }
         }
 
-        private void RecomputeExistingEntries()
+        private void RecomputeExistingEntries(string validatedRoot = null)
         {
             List<ManifestEntry> newEntries = new List<ManifestEntry>();
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
-            string validatedRoot = ValidateStorageDirectoryAndGetRoot(maDir);
+            string root = validatedRoot ?? StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
 
             foreach (var entry in this.Entries)
             {
-                string filename = ResolveValidatedManifestFilePath(validatedRoot, entry);
+                string filename = ResolveValidatedManifestFilePath(root, entry);
                 if (File.Exists(filename))
                 {
                     newEntries.Add(entry);
@@ -2214,7 +2523,382 @@ namespace Steam_Desktop_Authenticator
             if (this.Entries.Count == 0)
             {
                 this.Encrypted = false;
+                this.AllowSavedSteamPasswords = false;
+                this.CredentialsStoreFilename = null;
             }
+        }
+
+        public StorageResult SetAllowSavedSteamPasswords(bool allow)
+        {
+            lock (storageLock)
+            {
+                if (allow && !this.Encrypted)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "Enable manifest encryption before saving Steam passwords.");
+                if (allow && !EncryptedCredentialStore.IsSupported)
+                    return StorageResult.Failure(StorageFailureKind.Encryption, "AES-GCM encryption is not supported on this system.");
+
+                try
+                {
+                    Manifest stagedManifest = CloneForStorage();
+                    stagedManifest.AllowSavedSteamPasswords = allow;
+                    List<string> obsoleteFiles = new List<string>();
+                    if (!allow && !String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                    {
+                        obsoleteFiles.Add(this.CredentialsStoreFilename);
+                        stagedManifest.CredentialsStoreFilename = null;
+                    }
+
+                    StorageResult result = CommitStorageTransaction(
+                        stagedManifest,
+                        new Dictionary<string, string>(),
+                        obsoleteFiles);
+                    if (result.Succeeded)
+                        CopyStorageStateFrom(stagedManifest);
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Io, "The saved-password preference could not be updated.", ex);
+                }
+            }
+        }
+
+        public StorageResult SaveAccountPassword(ulong steamId, string password, string passKey)
+        {
+            if (steamId == 0)
+                return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is invalid.");
+            if (String.IsNullOrEmpty(password) || password.Length > EncryptedCredentialStore.MaximumPasswordLength)
+                return StorageResult.Failure(StorageFailureKind.Validation, "Enter a valid Steam password.");
+            if (!EncryptedCredentialStore.IsSupported)
+                return StorageResult.Failure(StorageFailureKind.Encryption, "AES-GCM encryption is not supported on this system.");
+
+            lock (storageLock)
+            {
+                if (!this.Encrypted || !this.AllowSavedSteamPasswords)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "Enable encryption and opt into saved Steam passwords first.");
+                if (String.IsNullOrEmpty(passKey) || !IsPasskeyValidForEncryptedWriteLocked(passKey, steamId))
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid.");
+                if (Entries == null || !Entries.Any(entry => entry != null && entry.SteamID == steamId))
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is no longer managed by this authenticator.");
+
+                try
+                {
+                    Dictionary<ulong, SavedCredentialRecord> records = LoadCredentialRecordsLocked(passKey, createIfMissing: true);
+                    records[steamId] = new SavedCredentialRecord
+                    {
+                        SteamId = steamId,
+                        Password = password,
+                        CredentialGenerationId = EncryptedCredentialStore.CreateNewGenerationId(),
+                        PasswordRejected = false,
+                        PasswordRejectedUtc = null,
+                        UpdatedUtc = DateTime.UtcNow
+                    };
+
+                    return CommitCredentialRecordsLocked(records, passKey);
+                }
+                catch (CryptographicException ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Encryption, "The saved credential store could not be decrypted with the current passkey.", ex);
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Io, "The saved Steam password could not be stored securely.", ex);
+                }
+            }
+        }
+
+        public StorageResult RemoveAccountPassword(ulong steamId, string passKey)
+        {
+            if (steamId == 0)
+                return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is invalid.");
+
+            lock (storageLock)
+            {
+                if (String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                    return StorageResult.Success();
+                if (!this.Encrypted || String.IsNullOrEmpty(passKey) || !IsPasskeyValidForEncryptedWriteLocked(passKey, steamId))
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid.");
+
+                try
+                {
+                    Dictionary<ulong, SavedCredentialRecord> records = LoadCredentialRecordsLocked(passKey, createIfMissing: false);
+                    if (records == null)
+                    {
+                        Manifest stagedManifest = CloneForStorage();
+                        stagedManifest.CredentialsStoreFilename = null;
+                        StorageResult clearResult = CommitStorageTransaction(stagedManifest, new Dictionary<string, string>(), Enumerable.Empty<string>());
+                        if (clearResult.Succeeded)
+                            CopyStorageStateFrom(stagedManifest);
+                        return clearResult;
+                    }
+
+                    if (!records.Remove(steamId))
+                        return StorageResult.Success();
+
+                    return CommitCredentialRecordsLocked(records, passKey);
+                }
+                catch (CryptographicException ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Encryption, "The saved credential store could not be decrypted with the current passkey.", ex);
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Io, "The saved Steam password could not be removed.", ex);
+                }
+            }
+        }
+
+        public StorageResult MarkSavedPasswordRejected(
+            string passKey,
+            ulong steamId,
+            string expectedCredentialGenerationId,
+            DateTime? rejectedUtc = null)
+        {
+            if (steamId == 0 || String.IsNullOrWhiteSpace(expectedCredentialGenerationId))
+                return StorageResult.Failure(StorageFailureKind.Validation, "Invalid credential rejection parameters.");
+
+            lock (storageLock)
+            {
+                if (!this.Encrypted || !this.AllowSavedSteamPasswords || String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                    return StorageResult.Success();
+                if (String.IsNullOrEmpty(passKey) || !IsPasskeyValidForEncryptedWriteLocked(passKey, steamId))
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The encryption passkey is invalid.");
+
+                try
+                {
+                    Dictionary<ulong, SavedCredentialRecord> records = LoadCredentialRecordsLocked(passKey, createIfMissing: false);
+                    if (records == null || !records.TryGetValue(steamId, out SavedCredentialRecord record))
+                        return StorageResult.Success();
+
+                    // Only mark rejected when the non-reusable GUID generation matches exactly.
+                    if (!String.Equals(record.CredentialGenerationId, expectedCredentialGenerationId, StringComparison.Ordinal))
+                        return StorageResult.Success();
+
+                    if (record.PasswordRejected)
+                        return StorageResult.Success();
+
+                    record.PasswordRejected = true;
+                    record.PasswordRejectedUtc = rejectedUtc ?? DateTime.UtcNow;
+                    return CommitCredentialRecordsLocked(records, passKey);
+                }
+                catch (CryptographicException ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Encryption, "The saved credential store could not be decrypted.", ex);
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Io, "The saved-password rejection status could not be saved.", ex);
+                }
+            }
+        }
+
+        internal SavedCredentialRecord GetSavedCredentialRecord(ulong steamId, string passKey)
+        {
+            if (steamId == 0 || String.IsNullOrEmpty(passKey))
+                return null;
+
+            lock (storageLock)
+            {
+                if (!this.Encrypted || !this.AllowSavedSteamPasswords || String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                    return null;
+
+                return TryLoadSavedCredentialRecordLocked(steamId, passKey);
+            }
+        }
+
+        private void InvalidateCredentialMetadataCacheLocked()
+        {
+            cachedCredentialMetadataFilename = null;
+            cachedCredentialMetadataPassKeyHash = null;
+            cachedCredentialMetadata = null;
+            cachedCredentialMetadataFailed = false;
+        }
+
+        private Dictionary<ulong, SavedCredentialStatus> GetOrLoadCredentialMetadataCacheLocked(string passKey)
+        {
+            if (String.IsNullOrEmpty(passKey) ||
+                !this.Encrypted ||
+                !this.AllowSavedSteamPasswords ||
+                String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+            {
+                InvalidateCredentialMetadataCacheLocked();
+                return null;
+            }
+
+            string passKeyHash = GetContentHash(passKey);
+            if (String.Equals(cachedCredentialMetadataFilename, this.CredentialsStoreFilename, StringComparison.Ordinal) &&
+                String.Equals(cachedCredentialMetadataPassKeyHash, passKeyHash, StringComparison.Ordinal))
+            {
+                return cachedCredentialMetadataFailed ? null : cachedCredentialMetadata;
+            }
+
+            try
+            {
+                Dictionary<ulong, SavedCredentialRecord> records = LoadCredentialRecordsLocked(passKey, createIfMissing: false);
+                if (records == null)
+                {
+                    cachedCredentialMetadataFilename = this.CredentialsStoreFilename;
+                    cachedCredentialMetadataPassKeyHash = passKeyHash;
+                    cachedCredentialMetadata = new Dictionary<ulong, SavedCredentialStatus>();
+                    cachedCredentialMetadataFailed = false;
+                    return cachedCredentialMetadata;
+                }
+
+                Dictionary<ulong, SavedCredentialStatus> loaded = new Dictionary<ulong, SavedCredentialStatus>();
+                foreach (KeyValuePair<ulong, SavedCredentialRecord> kvp in records)
+                {
+                    loaded[kvp.Key] = new SavedCredentialStatus(
+                        hasSavedPassword: !String.IsNullOrEmpty(kvp.Value.Password),
+                        passwordRejected: kvp.Value.PasswordRejected,
+                        passwordRejectedUtc: kvp.Value.PasswordRejectedUtc,
+                        credentialGenerationId: kvp.Value.CredentialGenerationId,
+                        updatedUtc: kvp.Value.UpdatedUtc);
+                }
+
+                cachedCredentialMetadataFilename = this.CredentialsStoreFilename;
+                cachedCredentialMetadataPassKeyHash = passKeyHash;
+                cachedCredentialMetadata = loaded;
+                cachedCredentialMetadataFailed = false;
+                return loaded;
+            }
+            catch (Exception ex)
+            {
+                // Cache the failed state for this store generation + passkey so 1-second ticks
+                // do not repeatedly run 600k PBKDF2 on the UI thread against a corrupt/unreadable store.
+                cachedCredentialMetadataFilename = this.CredentialsStoreFilename;
+                cachedCredentialMetadataPassKeyHash = passKeyHash;
+                cachedCredentialMetadata = null;
+                cachedCredentialMetadataFailed = true;
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "Saved credential statuses could not be loaded.");
+                return null;
+            }
+        }
+
+        public StorageResult PruneOrphanedSavedCredentials(string passKey)
+        {
+            if (String.IsNullOrEmpty(passKey))
+                return StorageResult.Success();
+
+            lock (storageLock)
+            {
+                if (!this.Encrypted || !this.AllowSavedSteamPasswords || String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                    return StorageResult.Success();
+
+                try
+                {
+                    Dictionary<ulong, SavedCredentialRecord> records = LoadCredentialRecordsLocked(passKey, createIfMissing: false);
+                    if (records == null || records.Count == 0)
+                        return StorageResult.Success();
+
+                    HashSet<ulong> activeSteamIds = new HashSet<ulong>(
+                        (Entries ?? Enumerable.Empty<ManifestEntry>())
+                            .Where(entry => entry != null && entry.SteamID != 0)
+                            .Select(entry => entry.SteamID));
+                    ulong[] orphanedIds = records.Keys.Where(id => !activeSteamIds.Contains(id)).ToArray();
+                    if (orphanedIds.Length == 0)
+                        return StorageResult.Success();
+
+                    foreach (ulong orphanId in orphanedIds)
+                        records.Remove(orphanId);
+
+                    return CommitCredentialRecordsLocked(records, passKey);
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Io, "Orphaned saved credentials could not be pruned.", ex);
+                }
+            }
+        }
+
+        public SavedCredentialStatus GetSavedCredentialStatus(ulong steamId, string passKey)
+        {
+            if (steamId == 0 || String.IsNullOrEmpty(passKey))
+                return SavedCredentialStatus.None;
+
+            lock (storageLock)
+            {
+                Dictionary<ulong, SavedCredentialStatus> cache = GetOrLoadCredentialMetadataCacheLocked(passKey);
+                if (cache != null && cache.TryGetValue(steamId, out SavedCredentialStatus status))
+                    return status;
+                return SavedCredentialStatus.None;
+            }
+        }
+
+        public Dictionary<ulong, SavedCredentialStatus> GetSavedCredentialStatuses(string passKey)
+        {
+            if (String.IsNullOrEmpty(passKey))
+                return new Dictionary<ulong, SavedCredentialStatus>();
+
+            lock (storageLock)
+            {
+                Dictionary<ulong, SavedCredentialStatus> cache = GetOrLoadCredentialMetadataCacheLocked(passKey);
+                return cache != null
+                    ? new Dictionary<ulong, SavedCredentialStatus>(cache)
+                    : new Dictionary<ulong, SavedCredentialStatus>();
+            }
+        }
+
+        private SavedCredentialRecord TryLoadSavedCredentialRecordLocked(ulong steamId, string passKey)
+        {
+            try
+            {
+                Dictionary<ulong, SavedCredentialRecord> records = LoadCredentialRecordsLocked(passKey, createIfMissing: false);
+                if (records != null && records.TryGetValue(steamId, out SavedCredentialRecord record))
+                    return record.Clone();
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Authenticator storage", ex, "A saved credential record could not be loaded.");
+            }
+            return null;
+        }
+
+        private Dictionary<ulong, SavedCredentialRecord> LoadCredentialRecordsLocked(string passKey, bool createIfMissing)
+        {
+            if (String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                return createIfMissing ? new Dictionary<ulong, SavedCredentialRecord>() : null;
+
+            string maDir = Path.Combine(GetExecutableDir(), "maFiles");
+            string validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(maDir);
+            string fullPath = ResolveValidatedCredentialStoreFilePath(validatedRoot, this.CredentialsStoreFilename);
+            if (!File.Exists(fullPath))
+            {
+                CredentialsStoreMissingWarning = true;
+                return createIfMissing ? new Dictionary<ulong, SavedCredentialRecord>() : null;
+            }
+
+            string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(maDir);
+            string envelopeJson = StoragePathGuard.ReadTextWithLimit(fullPath, EncryptedCredentialStore.MaximumEnvelopeBytes, expectedCanonicalDir);
+            return EncryptedCredentialStore.Decrypt(passKey, envelopeJson);
+        }
+
+        private StorageResult CommitCredentialRecordsLocked(Dictionary<ulong, SavedCredentialRecord> records, string passKey)
+        {
+            Manifest stagedManifest = CloneForStorage();
+            Dictionary<string, string> stagedFiles = new Dictionary<string, string>();
+            List<string> obsoleteFiles = new List<string>();
+            if (!String.IsNullOrWhiteSpace(this.CredentialsStoreFilename))
+                obsoleteFiles.Add(this.CredentialsStoreFilename);
+
+            if (records == null || records.Count == 0)
+            {
+                stagedManifest.CredentialsStoreFilename = null;
+            }
+            else
+            {
+                string newCredFilename = EncryptedCredentialStore.CreateNewFilename();
+                string envelope = EncryptedCredentialStore.Encrypt(passKey, records);
+                stagedFiles.Add(newCredFilename, envelope);
+                stagedManifest.CredentialsStoreFilename = newCredFilename;
+            }
+
+            StorageResult result = CommitStorageTransaction(stagedManifest, stagedFiles, obsoleteFiles);
+            if (result.Succeeded)
+            {
+                CopyStorageStateFrom(stagedManifest);
+                CredentialsStoreMissingWarning = false;
+            }
+            return result;
         }
 
         public void NormalizeLoginActionSettings()
@@ -2245,6 +2929,123 @@ namespace Steam_Desktop_Authenticator
         {
             TradeConfirmationCheckInterval = Math.Clamp(TradeConfirmationCheckInterval, 3, 3600);
             TradeConfirmationSelectedTab = TradeConfirmationClassifier.NormalizeSelectableTab(TradeConfirmationSelectedTab);
+            if (Entries != null)
+            {
+                foreach (ManifestEntry entry in Entries)
+                {
+                    if (entry?.TradeConfirmationCheckInterval.HasValue == true)
+                    {
+                        entry.TradeConfirmationCheckInterval = Math.Clamp(entry.TradeConfirmationCheckInterval.Value, 3, 3600);
+                    }
+                }
+            }
+        }
+
+        public AccountConfirmationSettings GetAccountConfirmationSettings(ulong steamId)
+        {
+            if (steamId == 0)
+                return new AccountConfirmationSettings();
+
+            lock (storageLock)
+            {
+                ManifestEntry entry = Entries?.FirstOrDefault(item => item != null && item.SteamID == steamId);
+                if (entry == null)
+                    return new AccountConfirmationSettings();
+
+                return new AccountConfirmationSettings
+                {
+                    AutoConfirmOverrideEnabled = entry.AutoConfirmOverrideEnabled,
+                    AutoConfirmTrades = entry.AutoConfirmTrades,
+                    AutoConfirmMarketTransactions = entry.AutoConfirmMarketTransactions,
+                    TradeConfirmationCheckInterval = entry.TradeConfirmationCheckInterval.HasValue
+                        ? Math.Clamp(entry.TradeConfirmationCheckInterval.Value, 3, 3600)
+                        : (int?)null
+                };
+            }
+        }
+
+        public ResolvedAccountConfirmationPolicy ResolveConfirmationPolicy(ulong steamId, int eligibleInheritedCount = 1)
+        {
+            lock (storageLock)
+            {
+                int globalInterval = TradeConfirmationCustomIntervalEnabled
+                    ? Math.Clamp(TradeConfirmationCheckInterval, 3, 3600)
+                    : 15;
+
+                ManifestEntry entry = steamId == 0
+                    ? null
+                    : Entries?.FirstOrDefault(item => item != null && item.SteamID == steamId);
+
+                if (entry != null && entry.AutoConfirmOverrideEnabled)
+                {
+                    int customInterval = entry.TradeConfirmationCheckInterval.HasValue
+                        ? Math.Clamp(entry.TradeConfirmationCheckInterval.Value, 3, 3600)
+                        : globalInterval;
+
+                    return new ResolvedAccountConfirmationPolicy(
+                        overrideEnabled: true,
+                        intervalSeconds: customInterval,
+                        autoConfirmTrades: entry.AutoConfirmTrades,
+                        autoConfirmMarketTransactions: entry.AutoConfirmMarketTransactions);
+                }
+
+                long inheritedIntervalLong = (long)globalInterval * Math.Max(1, eligibleInheritedCount);
+                int inheritedInterval = inheritedIntervalLong > int.MaxValue ? int.MaxValue : (int)inheritedIntervalLong;
+
+                return new ResolvedAccountConfirmationPolicy(
+                    overrideEnabled: false,
+                    intervalSeconds: inheritedInterval,
+                    autoConfirmTrades: AutoConfirmTrades,
+                    autoConfirmMarketTransactions: AutoConfirmMarketTransactions);
+            }
+        }
+
+        public StorageResult SaveAccountConfirmationSettings(ulong steamId, AccountConfirmationSettings settings)
+        {
+            if (steamId == 0 || settings == null)
+                return StorageResult.Failure(StorageFailureKind.Validation, "The account confirmation settings are invalid.");
+
+            if (settings.TradeConfirmationCheckInterval.HasValue &&
+                (settings.TradeConfirmationCheckInterval.Value < 3 || settings.TradeConfirmationCheckInterval.Value > 3600))
+            {
+                return StorageResult.Failure(StorageFailureKind.Validation, "The custom check interval must be between 3 and 3600 seconds.");
+            }
+
+            lock (storageLock)
+            {
+                ManifestEntry liveEntry = Entries?.FirstOrDefault(item => item != null && item.SteamID == steamId);
+                if (liveEntry == null)
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is no longer managed by this authenticator.");
+
+                Manifest staged;
+                try
+                {
+                    staged = CloneForStorage();
+                    ManifestEntry stagedEntry = staged.Entries.FirstOrDefault(item => item != null && item.SteamID == steamId);
+                    if (stagedEntry == null)
+                        return StorageResult.Failure(StorageFailureKind.Validation, "The selected account is no longer managed by this authenticator.");
+
+                    stagedEntry.AutoConfirmOverrideEnabled = settings.AutoConfirmOverrideEnabled;
+                    stagedEntry.AutoConfirmTrades = settings.AutoConfirmTrades;
+                    stagedEntry.AutoConfirmMarketTransactions = settings.AutoConfirmMarketTransactions;
+                    stagedEntry.TradeConfirmationCheckInterval = settings.TradeConfirmationCheckInterval;
+                }
+                catch (Exception ex)
+                {
+                    return StorageResult.Failure(StorageFailureKind.Validation, "The account confirmation settings could not be prepared.", ex);
+                }
+
+                StorageResult result = staged.SaveWithResult();
+                if (result.Succeeded)
+                {
+                    liveEntry.AutoConfirmOverrideEnabled = settings.AutoConfirmOverrideEnabled;
+                    liveEntry.AutoConfirmTrades = settings.AutoConfirmTrades;
+                    liveEntry.AutoConfirmMarketTransactions = settings.AutoConfirmMarketTransactions;
+                    liveEntry.TradeConfirmationCheckInterval = settings.TradeConfirmationCheckInterval;
+                }
+
+                return result;
+            }
         }
 
         private bool MigrateLegacyTradeConfirmationSettings(JObject manifestJson)
@@ -2358,6 +3159,21 @@ namespace Steam_Desktop_Authenticator
 
             [JsonProperty("session_needs_renewal")]
             public bool SessionNeedsRenewal { get; set; }
+
+            [JsonProperty("auto_confirm_override_enabled", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public bool AutoConfirmOverrideEnabled { get; set; }
+
+            [JsonProperty("auto_confirm_trades", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public bool AutoConfirmTrades { get; set; }
+
+            [JsonProperty("auto_confirm_market_transactions", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public bool AutoConfirmMarketTransactions { get; set; }
+
+            [JsonProperty("trade_confirmation_check_interval", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public int? TradeConfirmationCheckInterval { get; set; }
+
+            [JsonProperty("last_transfer_attempt_id", NullValueHandling = NullValueHandling.Ignore)]
+            public string LastTransferAttemptId { get; set; }
         }
     }
 }

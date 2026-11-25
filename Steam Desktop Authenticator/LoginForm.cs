@@ -23,17 +23,35 @@ namespace Steam_Desktop_Authenticator
         public bool RefreshSucceeded { get; private set; }
 
         private readonly string suppliedPassKey;
+        private readonly Func<ulong, CancellationToken, Task<IDisposable>> beginTransferFenceAsync;
+        private readonly Action<SteamGuardAccount, string> onAccountCommitted;
+        private readonly Action<bool> onIrreversibleTransferStateChanged;
+        private readonly Func<bool> isDeferredExitRequested;
+        private bool savePasswordRequested;
+        public bool SavedPasswordUpdated { get; private set; }
+        public ulong? SavedPasswordUpdatedSteamId { get; private set; }
 
-        public LoginForm(LoginType loginReason = LoginType.Initial, SteamGuardAccount account = null, string passKey = null)
+        public LoginForm(
+            LoginType loginReason = LoginType.Initial,
+            SteamGuardAccount account = null,
+            string passKey = null,
+            Func<ulong, CancellationToken, Task<IDisposable>> beginTransferFenceAsync = null,
+            Action<SteamGuardAccount, string> onAccountCommitted = null,
+            Action<bool> onIrreversibleTransferStateChanged = null,
+            Func<bool> isDeferredExitRequested = null)
         {
             InitializeComponent();
             this.LoginReason = loginReason;
             this.account = account;
             this.suppliedPassKey = passKey;
+            this.beginTransferFenceAsync = beginTransferFenceAsync;
+            this.onAccountCommitted = onAccountCommitted;
+            this.onIrreversibleTransferStateChanged = onIrreversibleTransferStateChanged;
+            this.isDeferredExitRequested = isDeferredExitRequested;
 
             try
             {
-                if (this.LoginReason != LoginType.Initial)
+                if (this.account != null)
                 {
                     txtUsername.Text = account.AccountName;
                     txtUsername.Enabled = false;
@@ -46,6 +64,10 @@ namespace Steam_Desktop_Authenticator
                 else if (this.LoginReason == LoginType.Import)
                 {
                     labelLoginExplanation.Text = "Please login to your Steam account import it.";
+                }
+                else if (this.LoginReason == LoginType.Transfer)
+                {
+                    labelLoginExplanation.Text = "Transfer your existing Steam Mobile Authenticator to Astro SDA via SMS verification. Steam applies a 2-day trade and market hold after transfer.";
                 }
             }
             catch (Exception)
@@ -62,9 +84,54 @@ namespace Steam_Desktop_Authenticator
         private const int SteamConnectionTimeoutMilliseconds = 20000;
         private CancellationTokenSource loginCancellationSource;
         private SteamClient activeSteamClient;
+        private volatile bool transferContinueInFlight;
+        private volatile bool deferredCloseRequested;
+
+        internal bool ShouldCloseForDeferredExit()
+        {
+            return deferredCloseRequested || (isDeferredExitRequested?.Invoke() ?? false);
+        }
+
+        private void CompleteTransferNonClosingOutcome(CancellationToken attemptCancellationToken)
+        {
+            if (ShouldCloseForDeferredExit())
+            {
+                if (!IsDisposed && !Disposing)
+                    this.Close();
+                return;
+            }
+
+            ResetLoginButton(attemptCancellationToken);
+        }
+
+        internal void SetIrreversibleTransferInFlight(bool inFlight)
+        {
+            bool changed = transferContinueInFlight != inFlight;
+            transferContinueInFlight = inFlight;
+            if (changed)
+                onIrreversibleTransferStateChanged?.Invoke(inFlight);
+        }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            if (transferContinueInFlight &&
+                e.CloseReason != CloseReason.WindowsShutDown &&
+                e.CloseReason != CloseReason.TaskManagerClosing)
+            {
+                e.Cancel = true;
+                if (e.CloseReason == CloseReason.ApplicationExitCall || e.CloseReason == CloseReason.FormOwnerClosing)
+                    deferredCloseRequested = true;
+                if (e.CloseReason == CloseReason.UserClosing)
+                {
+                    AstroMessageBox.Show(
+                        "Completing authenticator transfer with Steam — please wait a few seconds so your replacement secrets are received and staged safely.",
+                        "Authenticator Transfer In Progress",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+                return;
+            }
+
             loginCancellationSource?.Cancel();
             activeSteamClient?.Disconnect();
             base.OnFormClosing(e);
@@ -197,11 +264,18 @@ namespace Steam_Desktop_Authenticator
                 string jsExp = Newtonsoft.Json.JsonConvert.SerializeObject(labelLoginExplanation.Text);
                 _ = ExecuteScriptSafelyAsync($"setExplanation({jsExp})", "Login explanation UI");
                 
-                if (this.LoginReason != LoginType.Initial)
+                if (this.account != null)
                 {
                     string jsAccountName = Newtonsoft.Json.JsonConvert.SerializeObject(account.AccountName ?? String.Empty);
                     _ = ExecuteScriptSafelyAsync($"setUsername({jsAccountName}, true)", "Login account UI");
                 }
+
+                Manifest currentManifest = Manifest.GetManifest();
+                bool allowSavePassword = currentManifest != null &&
+                    currentManifest.Encrypted &&
+                    currentManifest.AllowSavedSteamPasswords &&
+                    this.LoginReason != LoginType.Import;
+                _ = ExecuteScriptSafelyAsync($"setSavePasswordOption({allowSavePassword.ToString().ToLowerInvariant()})", "Login save password UI");
             };
 
             if (IsDisposed || loginCancellationSource?.IsCancellationRequested == true || webView == null)
@@ -236,6 +310,9 @@ namespace Steam_Desktop_Authenticator
 
             if (action == "login")
             {
+                if (transferContinueInFlight || !btnSteamLogin.Enabled)
+                    return;
+
                 if (payload["user"]?.Type != JTokenType.String || payload["pass"]?.Type != JTokenType.String)
                     return;
 
@@ -249,6 +326,7 @@ namespace Steam_Desktop_Authenticator
                 if (username == null || password == null || username.Length > 256 || password.Length > 4096)
                     return;
 
+                savePasswordRequested = payload["savePassword"]?.Type == JTokenType.Boolean && payload.Value<bool>("savePassword");
                 txtUsername.Text = username;
                 txtPassword.Text = password;
                 btnSteamLogin_Click(this, EventArgs.Empty);
@@ -307,6 +385,9 @@ namespace Steam_Desktop_Authenticator
 
         private async void btnSteamLogin_Click(object sender, EventArgs e)
         {
+            if (transferContinueInFlight || !btnSteamLogin.Enabled)
+                return;
+
             // Disable button while we login
             btnSteamLogin.Enabled = false;
             btnSteamLogin.Text = "Logging in...";
@@ -364,10 +445,10 @@ namespace Steam_Desktop_Authenticator
                     Username = username,
                     Password = password,
                     DeviceFriendlyName = "AstroSDA",
-                    IsPersistentSession = false,
+                    IsPersistentSession = LoginReason == LoginType.Transfer,
                     PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_MobileApp,
                     ClientOSType = EOSType.Android9,
-                    Authenticator = new UserFormAuthenticator(this.account, this, cancellationToken),
+                    Authenticator = new UserFormAuthenticator(this.account, this, cancellationToken, allowInteractiveDeviceAuth: LoginReason == LoginType.Transfer),
                 });
             }
             catch (AuthenticatorAlreadyLinkedException)
@@ -478,7 +559,7 @@ namespace Steam_Desktop_Authenticator
                 bool previousFullyEnrolled = account.FullyEnrolled;
                 account.FullyEnrolled = true;
                 account.Session = sessionData;
-                if (!HandleManifest(man, true, suppliedPassKey))
+                if (!HandleManifest(man, true, suppliedPassKey, out string usedPassKey))
                 {
                     // SaveAccount serializes and commits the candidate before the
                     // in-memory account becomes authoritative. Restore the old
@@ -488,8 +569,15 @@ namespace Steam_Desktop_Authenticator
                     ResetLoginButton(cancellationToken);
                     return;
                 }
+                TrySaveVerifiedPasswordAfterCommit(man, account.Session.SteamID, password, usedPassKey, showRefreshNotice: true);
                 RefreshSucceeded = true;
                 this.Close();
+                return;
+            }
+
+            if (LoginReason == LoginType.Transfer)
+            {
+                await ExecuteAuthenticatorTransferAsync(sessionData, username, password, cancellationToken);
                 return;
             }
 
@@ -596,7 +684,7 @@ namespace Steam_Desktop_Authenticator
                         confirmationCodeForm.ShowInputDialog(this);
                     if (confirmationCodeForm.Canceled)
                     {
-                        if (!manifest.RemoveAccount(linker.LinkedAccount))
+                        if (!manifest.RemoveAccount(linker.LinkedAccount, passKey))
                         {
                             const string removalError = "The unfinished authenticator record could not be removed safely. It may still be present in the app; restart the app before making further account changes.";
                             DiagnosticErrorLogger.Log("Authenticator storage", new InvalidOperationException(removalError), "Removing the unfinished authenticator record after setup cancellation failed.");
@@ -644,7 +732,7 @@ namespace Steam_Desktop_Authenticator
 
                     case AuthenticatorLinker.FinalizeResult.UnableToGenerateCorrectCodes:
                         AstroMessageBox.Show("Unable to generate the proper codes to finalize this authenticator. The authenticator should not have been linked. In the off-chance it was, please write down your revocation code, as this is the last chance to see it: " + linker.LinkedAccount.RevocationCode);
-                        manifest.RemoveAccount(linker.LinkedAccount);
+                        manifest.RemoveAccount(linker.LinkedAccount, passKey);
                         this.Close();
                         return;
 
@@ -685,6 +773,7 @@ namespace Steam_Desktop_Authenticator
                 this.Close();
                 return;
             }
+            TrySaveVerifiedPasswordAfterCommit(manifest, linker.LinkedAccount.Session.SteamID, password, passKey, showRefreshNotice: false);
             ShowRecoveryCode(
                 linker.LinkedAccount,
                 finalizeResponse == AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified
@@ -825,8 +914,9 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private bool HandleManifest(Manifest man, bool IsRefreshing = false, string suppliedPassKey = null)
+        private bool HandleManifest(Manifest man, bool IsRefreshing, string suppliedPassKey, out string usedPassKey)
         {
+            usedPassKey = null;
             string passKey = man.Encrypted ? suppliedPassKey : null;
             if (man.Entries.Count == 0)
             {
@@ -837,7 +927,7 @@ namespace Steam_Desktop_Authenticator
                 bool passKeyValid = !String.IsNullOrEmpty(passKey) && man.VerifyPasskey(passKey);
                 while (!passKeyValid)
                 {
-                    using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey."))
+                    using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey.", true))
                     {
                         passKeyForm.ShowInputDialog(this);
                         if (!passKeyForm.Canceled)
@@ -869,15 +959,59 @@ namespace Steam_Desktop_Authenticator
                     : "The finalized authenticator record could not be saved."), "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return false;
             }
-            if (IsRefreshing)
-            {
-                AstroMessageBox.Show("Your session was refreshed.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            else
+            usedPassKey = passKey;
+            if (!IsRefreshing)
             {
                 ShowRecoveryCode(account, "Mobile authenticator successfully linked. Keep this recovery code safe.");
             }
             return true;
+        }
+
+        private void TrySaveVerifiedPasswordAfterCommit(Manifest man, ulong steamId, string password, string usedPassKey, bool showRefreshNotice)
+        {
+            string extraNotice = String.Empty;
+            if (savePasswordRequested &&
+                man != null &&
+                man.Encrypted &&
+                man.AllowSavedSteamPasswords &&
+                steamId != 0 &&
+                !String.IsNullOrEmpty(password) &&
+                !String.IsNullOrEmpty(usedPassKey))
+            {
+                StorageResult credResult = man.SaveAccountPassword(steamId, password, usedPassKey);
+                if (credResult.Succeeded)
+                {
+                    SavedPasswordUpdated = true;
+                    SavedPasswordUpdatedSteamId = steamId;
+                    if (credResult.ObsoleteCleanupPending)
+                    {
+                        extraNotice = "\n\nYour password was saved. The previous encrypted credential file could not be removed immediately and will be cleaned up automatically on the next save or restart.";
+                    }
+                }
+                else
+                {
+                    DiagnosticErrorLogger.Log("Credential storage", credResult.Exception, "The verified Steam password could not be saved after account commit.");
+                    extraNotice = "\n\nNote: The Steam password could not be saved for silent renewal. You can update it later in Account Options.";
+                }
+            }
+            else if (showRefreshNotice &&
+                man != null &&
+                man.Encrypted &&
+                man.AllowSavedSteamPasswords &&
+                !String.IsNullOrEmpty(usedPassKey))
+            {
+                // Preserve rejection state unless user explicitly replaced or deleted the saved password.
+                SavedCredentialRecord existing = man.GetSavedCredentialRecord(steamId, usedPassKey);
+                if (existing != null && existing.PasswordRejected)
+                {
+                    extraNotice = "\n\nNote: Your previously saved Steam password is still marked as rejected. Update or remove it in Account Options to re-enable silent renewal.";
+                }
+            }
+
+            if (showRefreshNotice)
+            {
+                AstroMessageBox.Show("Your session was refreshed." + extraNotice, "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
 
         private void ShowRecoveryCode(SteamGuardAccount recoveryAccount, string statusMessage, bool requireBackupBeforeContinue = false)
@@ -907,11 +1041,376 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private async Task ExecuteAuthenticatorTransferAsync(
+            SessionData sessionData,
+            string username,
+            string password,
+            CancellationToken cancellationToken)
+        {
+            Manifest manifest = Manifest.GetManifest();
+            if (PendingTransferMarker.HasMarker(sessionData.SteamID))
+            {
+                AstroMessageBox.Show(
+                    "An unresolved authenticator transfer marker already exists for this account. Restart Astro SDA or dismiss the previous transfer notice once you have verified your Steam account before starting another transfer.",
+                    "Transfer Blocked",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                ResetLoginButton(cancellationToken);
+                return;
+            }
+
+            DialogResult confirmTransfer = AstroMessageBox.Show(
+                "Transferring your authenticator will immediately deactivate Steam Guard on your old device and activate it in Astro SDA.\n\nSteam applies a 2-day trade and market restriction after transferring.\n\nDo you want to request the SMS transfer code now?",
+                "Confirm Authenticator Transfer",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (confirmTransfer != DialogResult.Yes)
+            {
+                ResetLoginButton(cancellationToken);
+                return;
+            }
+
+            if (!TryResolvePasskeyForManifest(manifest, out string resolvedPassKey))
+            {
+                this.Close();
+                return;
+            }
+
+            bool encrypt = manifest.Encrypted || (manifest.Entries.Count == 0 && !String.IsNullOrEmpty(resolvedPassKey));
+            if (encrypt && String.IsNullOrEmpty(resolvedPassKey))
+            {
+                AstroMessageBox.Show("An encryption passkey is required before starting an authenticator transfer on an encrypted manifest.", "Authenticator Transfer", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ResetLoginButton(cancellationToken);
+                return;
+            }
+
+            string previousCommittedTransferAttemptId = manifest.GetLastTransferAttemptId(sessionData.SteamID);
+            IDisposable transferFence = null;
+            try
+            {
+                if (beginTransferFenceAsync != null)
+                    transferFence = await beginTransferFenceAsync(sessionData.SteamID, cancellationToken);
+
+                AuthenticatorLinker linker = new AuthenticatorLinker(sessionData);
+                LoginTransferInteraction transferInteraction = new LoginTransferInteraction(
+                    this,
+                    manifest,
+                    sessionData.SteamID,
+                    encrypt,
+                    resolvedPassKey,
+                    previousCommittedTransferAttemptId,
+                    committedAccount => onAccountCommitted?.Invoke(committedAccount, resolvedPassKey));
+
+                AuthenticatorTransferCoordinator coordinator = new AuthenticatorTransferCoordinator(
+                    linker,
+                    transferInteraction,
+                    sessionData.SteamID,
+                    username);
+
+                TransferCoordinatorOutcome outcome = await coordinator.ExecuteAsync(cancellationToken);
+                if ((IsDisposed || Disposing) && outcome.Kind != TransferCoordinatorResultKind.ReplacementReceivedSavePending)
+                    return;
+
+                switch (outcome.Kind)
+                {
+                    case TransferCoordinatorResultKind.Succeeded:
+                        TrySaveVerifiedPasswordAfterCommit(manifest, sessionData.SteamID, password, resolvedPassKey, showRefreshNotice: false);
+                        ShowRecoveryCode(
+                            outcome.LinkedAccount,
+                            "Authenticator transferred successfully! Steam applies a 2-day trade and market hold. Keep this new recovery code safe.",
+                            requireBackupBeforeContinue: true);
+                        this.Close();
+                        return;
+
+                    case TransferCoordinatorResultKind.Canceled:
+                        CompleteTransferNonClosingOutcome(cancellationToken);
+                        return;
+
+                    case TransferCoordinatorResultKind.ReplacementReceivedSavePending:
+                        using (TransferSaveRecoveryForm recoveryForm = new TransferSaveRecoveryForm(
+                            outcome.LinkedAccount,
+                            outcome.ErrorMessage,
+                            outcome.StagedRecoveryPath,
+                            outcome.StagingFailed,
+                            resolvedPassKey,
+                            candidate =>
+                            {
+                                StorageResult retryResult = manifest.SaveAccount(
+                                    candidate,
+                                    encrypt,
+                                    resolvedPassKey,
+                                    transferAttemptId: outcome.TransferAttemptId,
+                                    expectedPreviousTransferAttemptId: previousCommittedTransferAttemptId,
+                                    enforceTransferAttemptBase: true);
+                                if (retryResult.Succeeded)
+                                {
+                                    if (PendingTransferMarker.DeleteMarkerBestEffort(candidate.Session.SteamID, outcome.TransferAttemptId))
+                                        PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(candidate.Session.SteamID);
+                                    onAccountCommitted?.Invoke(candidate, resolvedPassKey);
+                                }
+                                return retryResult;
+                            },
+                            transferAttemptId: outcome.TransferAttemptId))
+                        {
+                            if (!IsDisposed && !Disposing && IsHandleCreated)
+                                recoveryForm.ShowDialog(this);
+                            else
+                                recoveryForm.ShowDialog();
+                            if (recoveryForm.LocalSaveSucceeded)
+                            {
+                                TrySaveVerifiedPasswordAfterCommit(manifest, sessionData.SteamID, password, resolvedPassKey, showRefreshNotice: false);
+                                if (!IsDisposed && !Disposing)
+                                {
+                                    ShowRecoveryCode(
+                                        outcome.LinkedAccount,
+                                        "Authenticator transferred and saved successfully! Keep this new recovery code safe.");
+                                }
+                            }
+                        }
+                        if (!IsDisposed && !Disposing)
+                            this.Close();
+                        return;
+
+                    case TransferCoordinatorResultKind.OutcomeUnknown:
+                    case TransferCoordinatorResultKind.IncompleteReplacement:
+                        AstroMessageBox.Show(
+                            (outcome.ErrorMessage ?? "The authenticator transfer outcome could not be confirmed.") +
+                            "\n\nDo not automatically resend the SMS code. Check your Steam Mobile App or Steam Support recovery options before attempting another transfer.",
+                            "Transfer Outcome Unknown",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        this.Close();
+                        return;
+
+                    case TransferCoordinatorResultKind.PhoneNumberRequired:
+                    case TransferCoordinatorResultKind.RateLimited:
+                    case TransferCoordinatorResultKind.BlockedByPendingTransfer:
+                    case TransferCoordinatorResultKind.Failed:
+                    default:
+                        if (!ShouldCloseForDeferredExit())
+                        {
+                            AstroMessageBox.Show(
+                                outcome.ErrorMessage ?? "The authenticator transfer could not be completed.",
+                                "Authenticator Transfer",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Error);
+                        }
+                        CompleteTransferNonClosingOutcome(cancellationToken);
+                        return;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                CompleteTransferNonClosingOutcome(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticErrorLogger.Log("Authenticator transfer", ex, "The authenticator transfer encountered an unexpected error.");
+                if (!ShouldCloseForDeferredExit())
+                {
+                    AstroMessageBox.Show("An unexpected error occurred during authenticator transfer.", "Authenticator Transfer", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                CompleteTransferNonClosingOutcome(cancellationToken);
+            }
+            finally
+            {
+                transferFence?.Dispose();
+            }
+        }
+
+        private bool TryResolvePasskeyForManifest(Manifest man, out string resolvedPassKey)
+        {
+            resolvedPassKey = man.Encrypted ? suppliedPassKey : null;
+            if (man.Entries.Count == 0)
+            {
+                resolvedPassKey = man.PromptSetupPassKey("Please enter an encryption passkey. Leave blank or hit cancel to not encrypt (VERY INSECURE).");
+                if (String.IsNullOrEmpty(resolvedPassKey) && man.Encrypted)
+                {
+                    StorageResult clearEncResult = man.ChangeEncryptionKey(null, null);
+                    if (!clearEncResult.Succeeded)
+                    {
+                        AstroMessageBox.Show(clearEncResult.UserMessage ?? "Could not reset empty manifest encryption state. Try again or enter an encryption passkey.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return false;
+                    }
+                    resolvedPassKey = null;
+                }
+                return true;
+            }
+            if (man.Encrypted)
+            {
+                bool passKeyValid = !String.IsNullOrEmpty(resolvedPassKey) && man.VerifyPasskey(resolvedPassKey);
+                while (!passKeyValid)
+                {
+                    using (InputForm passKeyForm = new InputForm("Please enter your current encryption passkey.", true))
+                    {
+                        passKeyForm.ShowInputDialog(this);
+                        if (passKeyForm.Canceled)
+                            return false;
+
+                        resolvedPassKey = passKeyForm.txtBox.Text;
+                        passKeyValid = man.VerifyPasskey(resolvedPassKey);
+                        if (!passKeyValid)
+                        {
+                            AstroMessageBox.Show("That passkey is invalid. Please enter the same passkey you used for your other accounts.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        private sealed class LoginTransferInteraction : IAuthenticatorTransferInteraction
+        {
+            private readonly LoginForm owner;
+            private readonly Manifest manifest;
+            private readonly ulong steamId;
+            private readonly bool encrypt;
+            private readonly string passKey;
+            private readonly string previousCommittedTransferAttemptId;
+            private readonly Action<SteamGuardAccount> onCommitted;
+
+            public LoginTransferInteraction(
+                LoginForm owner,
+                Manifest manifest,
+                ulong steamId,
+                bool encrypt,
+                string passKey,
+                string previousCommittedTransferAttemptId,
+                Action<SteamGuardAccount> onCommitted)
+            {
+                this.owner = owner;
+                this.manifest = manifest;
+                this.steamId = steamId;
+                this.encrypt = encrypt;
+                this.passKey = passKey;
+                this.previousCommittedTransferAttemptId = previousCommittedTransferAttemptId;
+                this.onCommitted = onCommitted;
+            }
+
+            public bool HasUnresolvedPendingTransfer(ulong steamId) => PendingTransferMarker.HasMarker(steamId);
+
+            public bool WritePreDispatchMarker(ulong steamId, string accountName, string deviceId, string transferAttemptId) =>
+                PendingTransferMarker.TryWriteMarker(steamId, accountName, deviceId, transferAttemptId);
+
+            public void ClearPreDispatchMarker(ulong steamId, string expectedTransferAttemptId) =>
+                PendingTransferMarker.DeleteMarkerBestEffort(steamId, expectedTransferAttemptId);
+
+            public IDisposable EnterIrreversibleContinueSection(out CancellationToken continueCancellationToken)
+            {
+                CancellationTokenSource boundedCts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                continueCancellationToken = boundedCts.Token;
+                owner?.SetIrreversibleTransferInFlight(true);
+                return new ContinueSectionGuard(owner, boundedCts);
+            }
+
+            private sealed class ContinueSectionGuard : IDisposable
+            {
+                private readonly LoginForm owner;
+                private CancellationTokenSource cts;
+                private int disposed;
+
+                public ContinueSectionGuard(LoginForm owner, CancellationTokenSource cts)
+                {
+                    this.owner = owner;
+                    this.cts = cts;
+                }
+
+                public void Dispose()
+                {
+                    if (Interlocked.Exchange(ref disposed, 1) == 0)
+                    {
+                        owner?.SetIrreversibleTransferInFlight(false);
+                    }
+                    CancellationTokenSource toDispose = Interlocked.Exchange(ref cts, null);
+                    toDispose?.Dispose();
+                }
+            }
+
+            public string RequestTransferSmsCode(bool previousCodeWasInvalid)
+            {
+                string prompt = previousCodeWasInvalid
+                    ? "That SMS code was not accepted. Enter the current SMS transfer code sent by Steam:"
+                    : "Enter the SMS verification code Steam sent to your phone to complete the authenticator transfer:";
+                if (owner == null || owner.IsDisposed || !owner.IsHandleCreated)
+                    return null;
+
+                Func<string> showDialog = () =>
+                {
+                    using (InputForm smsForm = new InputForm(prompt))
+                    {
+                        smsForm.ShowInputDialog(owner);
+                        return smsForm.Canceled ? null : smsForm.txtBox.Text;
+                    }
+                };
+                return owner.InvokeRequired ? (string)owner.Invoke(showDialog) : showDialog();
+            }
+
+            public string TryStageProtectedReplacement(SteamGuardAccount replacement, string transferAttemptId, out bool stagingFailed)
+            {
+                return PendingTransferMarker.TryStageProtectedReplacement(
+                    replacement,
+                    encrypt,
+                    passKey,
+                    out stagingFailed,
+                    transferAttemptId,
+                    previousCommittedTransferAttemptId);
+            }
+
+            public void CleanupStagedReplacement(string stagedRecoveryPath)
+            {
+                // Only purge staged recovery files once the pending marker is verified gone.
+                if (PendingTransferMarker.HasMarker(steamId))
+                    return;
+
+                if (!String.IsNullOrEmpty(stagedRecoveryPath))
+                    PendingTransferMarker.DeleteStagedRecoveryBestEffort(stagedRecoveryPath);
+                PendingTransferMarker.DeleteAllStagedRecoveriesForSteamIdBestEffort(steamId);
+            }
+
+            public bool PersistReplacementAccount(SteamGuardAccount replacement, string transferAttemptId, out string failureMessage)
+            {
+                StorageResult result = manifest.SaveAccount(
+                    replacement,
+                    encrypt,
+                    passKey,
+                    transferAttemptId: transferAttemptId,
+                    expectedPreviousTransferAttemptId: previousCommittedTransferAttemptId,
+                    enforceTransferAttemptBase: true);
+                if (result.Succeeded)
+                {
+                    failureMessage = null;
+                    // Synchronously retire the old account generation BEFORE RecoveryCodeForm!
+                    // Note: marker clearing and staged recovery cleanup run in the coordinator
+                    // strictly in order (ClearPreDispatchMarker -> CleanupStagedReplacement).
+                    onCommitted?.Invoke(replacement);
+                    return true;
+                }
+
+                DiagnosticErrorLogger.Log("Authenticator transfer", result.Exception, "Failed to persist transferred replacement authenticator.");
+                failureMessage = result.UserMessage ?? "The transferred authenticator could not be saved locally.";
+                return false;
+            }
+
+            public void PersistEnrichedDeviceId(SteamGuardAccount replacement, string transferAttemptId)
+            {
+                StorageResult result = manifest.SaveAccount(
+                    replacement,
+                    encrypt,
+                    passKey,
+                    transferAttemptId: transferAttemptId,
+                    expectedPreviousTransferAttemptId: transferAttemptId,
+                    enforceTransferAttemptBase: true);
+                if (result.Succeeded)
+                    onCommitted?.Invoke(replacement);
+            }
+        }
+
         public enum LoginType
         {
             Initial,
             Refresh,
-            Import
+            Import,
+            Transfer
         }
     }
 }

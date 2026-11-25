@@ -294,6 +294,20 @@ namespace Steam_Desktop_Authenticator
                 if (!filenames.Contains(Path.GetFileName(accountFile)))
                     throw new InvalidDataException("The imported configuration contains an account file that is not listed in its manifest.");
             }
+
+            // Strip any foreign saved-password flags or credential-store references from
+            // imported manifests case-insensitively so mixed-case or duplicate variants never survive.
+            List<JProperty> credentialProperties = manifestJson.Properties()
+                .Where(property =>
+                    String.Equals(property.Name, "allow_saved_steam_passwords", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(property.Name, "credentials_store_filename", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (credentialProperties.Count > 0)
+            {
+                foreach (JProperty property in credentialProperties)
+                    property.Remove();
+                File.WriteAllText(manifestPath, manifestJson.ToString(Formatting.None), new UTF8Encoding(false));
+            }
         }
 
         private static string CommitStagedImport(string stagingDirectory, string destinationDirectory)

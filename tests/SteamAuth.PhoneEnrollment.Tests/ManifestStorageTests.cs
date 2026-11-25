@@ -1303,97 +1303,194 @@ namespace SteamAuth.PhoneEnrollment.Tests
         [Fact]
         public void PathValidation_ValidatesStorageDirectoryOncePerOperationRegardlessOfEntryCount()
         {
-            Manifest manifest = Manifest.GenerateNewManifest(false);
-            const int accountCount = 8;
-            for (int i = 0; i < accountCount; i++)
+            (long GetAllDir, long GetAllCanon, long SaveDir, long MoveDir, long LoadDir, long NormalizeDir, long NormalizeCanon, long EncryptDir, long EncryptCanon, long ImportDir, long ImportCanon, long RemoveDir, long RemoveCanon) small =
+                MeasureOperationValidationCounts(accountCount: 2, guidRenameCount: 1, importCount: 1);
+            (long GetAllDir, long GetAllCanon, long SaveDir, long MoveDir, long LoadDir, long NormalizeDir, long NormalizeCanon, long EncryptDir, long EncryptCanon, long ImportDir, long ImportCanon, long RemoveDir, long RemoveCanon) large =
+                MeasureOperationValidationCounts(accountCount: 8, guidRenameCount: 5, importCount: 3);
+
+            // Every operation must do O(1) directory & canonical verifications independent of entry count.
+            Assert.Equal(small.GetAllDir, large.GetAllDir);
+            Assert.Equal(1, large.GetAllDir);
+            Assert.Equal(small.GetAllCanon, large.GetAllCanon);
+            Assert.Equal(1, large.GetAllCanon);
+
+            Assert.Equal(small.SaveDir, large.SaveDir);
+            Assert.Equal(1, large.SaveDir);
+
+            Assert.Equal(small.MoveDir, large.MoveDir);
+            Assert.Equal(1, large.MoveDir);
+
+            Assert.Equal(small.LoadDir, large.LoadDir);
+            Assert.True(large.LoadDir <= 2, $"Expected O(1) directory validations on GetManifest, got {large.LoadDir}");
+
+            Assert.Equal(small.NormalizeDir, large.NormalizeDir);
+            Assert.Equal(small.NormalizeCanon, large.NormalizeCanon);
+            Assert.True(large.NormalizeDir <= 2, $"Expected O(1) directory validations on NormalizeAccountFilenames, got {large.NormalizeDir}");
+
+            Assert.Equal(small.EncryptDir, large.EncryptDir);
+            Assert.Equal(small.EncryptCanon, large.EncryptCanon);
+            Assert.True(large.EncryptDir <= 4, $"Expected O(1) directory validations on ChangeEncryptionKey, got {large.EncryptDir}");
+
+            Assert.Equal(small.ImportDir, large.ImportDir);
+            Assert.Equal(small.ImportCanon, large.ImportCanon);
+            Assert.True(large.ImportDir <= 4, $"Expected O(1) directory validations on ImportUnmanagedMaFiles, got {large.ImportDir}");
+
+            Assert.Equal(small.RemoveDir, large.RemoveDir);
+            Assert.Equal(small.RemoveCanon, large.RemoveCanon);
+            Assert.True(large.RemoveDir <= 2, $"Expected O(1) directory validations on sessionless RemoveAccount, got {large.RemoveDir}");
+        }
+
+        private (long GetAllDir, long GetAllCanon, long SaveDir, long MoveDir, long LoadDir, long NormalizeDir, long NormalizeCanon, long EncryptDir, long EncryptCanon, long ImportDir, long ImportCanon, long RemoveDir, long RemoveCanon)
+            MeasureOperationValidationCounts(int accountCount, int guidRenameCount, int importCount)
+        {
+            string runDir = Path.Combine(dataDirectory, "scale-" + accountCount + "-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(runDir);
+            string previousDir = Environment.GetEnvironmentVariable("ASDA_DATA_DIRECTORY");
+            try
             {
-                Assert.True(manifest.SaveAccount(CreateAccount(76561198000001000UL + (ulong)i), false).Succeeded);
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", runDir);
+                Manifest manifest = Manifest.GenerateNewManifest(false);
+                for (int i = 0; i < accountCount; i++)
+                {
+                    Assert.True(manifest.SaveAccount(CreateAccount(76561198000001000UL + (ulong)i), false).Succeeded);
+                }
+
+                long beforeGetAllDir = StoragePathGuard.DirectoryValidationCount;
+                long beforeGetAllCanon = StoragePathGuard.CanonicalDirectoryVerificationCount;
+                SteamGuardAccount[] loaded = manifest.GetAllAccounts();
+                long getAllDir = StoragePathGuard.DirectoryValidationCount - beforeGetAllDir;
+                long getAllCanon = StoragePathGuard.CanonicalDirectoryVerificationCount - beforeGetAllCanon;
+                Assert.Equal(accountCount, loaded.Length);
+
+                long beforeSaveDir = StoragePathGuard.DirectoryValidationCount;
+                Assert.True(manifest.SaveWithResult().Succeeded);
+                long saveDir = StoragePathGuard.DirectoryValidationCount - beforeSaveDir;
+
+                long beforeMoveDir = StoragePathGuard.DirectoryValidationCount;
+                Assert.True(manifest.MoveEntryWithResult(0, 1).Succeeded);
+                long moveDir = StoragePathGuard.DirectoryValidationCount - beforeMoveDir;
+
+                long beforeLoadDir = StoragePathGuard.DirectoryValidationCount;
+                Manifest reloaded = Manifest.GetManifest(true);
+                long loadDir = StoragePathGuard.DirectoryValidationCount - beforeLoadDir;
+                Assert.Equal(accountCount, reloaded.Entries.Count);
+
+                string maDirectory = Path.Combine(runDir, "maFiles");
+                for (int i = 0; i < guidRenameCount; i++)
+                {
+                    Manifest.ManifestEntry entry = reloaded.Entries[i];
+                    string guidFilename = entry.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
+                    File.Move(Path.Combine(maDirectory, entry.Filename), Path.Combine(maDirectory, guidFilename));
+                    entry.Filename = guidFilename;
+                }
+                Assert.True(reloaded.Save());
+
+                long beforeNormalizeDir = StoragePathGuard.DirectoryValidationCount;
+                long beforeNormalizeCanon = StoragePathGuard.CanonicalDirectoryVerificationCount;
+                Assert.True(reloaded.NormalizeAccountFilenames().Succeeded);
+                long normalizeDir = StoragePathGuard.DirectoryValidationCount - beforeNormalizeDir;
+                long normalizeCanon = StoragePathGuard.CanonicalDirectoryVerificationCount - beforeNormalizeCanon;
+
+                long beforeEncryptDir = StoragePathGuard.DirectoryValidationCount;
+                long beforeEncryptCanon = StoragePathGuard.CanonicalDirectoryVerificationCount;
+                Assert.True(reloaded.ChangeEncryptionKey(null, "test-passkey").Succeeded);
+                long encryptDir = StoragePathGuard.DirectoryValidationCount - beforeEncryptDir;
+                long encryptCanon = StoragePathGuard.CanonicalDirectoryVerificationCount - beforeEncryptCanon;
+                Assert.Equal(accountCount, reloaded.GetAllAccounts("test-passkey").Length);
+
+                Assert.True(reloaded.ChangeEncryptionKey("test-passkey", null).Succeeded);
+                for (int i = 0; i < importCount; i++)
+                {
+                    ulong importId = 76561198000002000UL + (ulong)i;
+                    File.WriteAllText(
+                        Path.Combine(maDirectory, $"import-{i}.maFile"),
+                        JsonConvert.SerializeObject(CreateAccount(importId)));
+                }
+                var importCandidates = reloaded.FindUnmanagedMaFiles();
+                Assert.Equal(importCount, importCandidates.Count);
+
+                long beforeImportDir = StoragePathGuard.DirectoryValidationCount;
+                long beforeImportCanon = StoragePathGuard.CanonicalDirectoryVerificationCount;
+                Assert.True(reloaded.ImportUnmanagedMaFiles(importCandidates).Succeeded);
+                long importDir = StoragePathGuard.DirectoryValidationCount - beforeImportDir;
+                long importCanon = StoragePathGuard.CanonicalDirectoryVerificationCount - beforeImportCanon;
+
+                SteamGuardAccount uniqueNamed = CreateAccount(76561198000003000UL);
+                uniqueNamed.AccountName = "unique-removal-target";
+                Assert.True(reloaded.SaveAccount(uniqueNamed, false).Succeeded);
+                SteamGuardAccount sessionlessTarget = new SteamGuardAccount { AccountName = "unique-removal-target", Session = null };
+
+                long beforeRemoveDir = StoragePathGuard.DirectoryValidationCount;
+                long beforeRemoveCanon = StoragePathGuard.CanonicalDirectoryVerificationCount;
+                Assert.True(reloaded.RemoveAccount(sessionlessTarget, (string)null));
+                long removeDir = StoragePathGuard.DirectoryValidationCount - beforeRemoveDir;
+                long removeCanon = StoragePathGuard.CanonicalDirectoryVerificationCount - beforeRemoveCanon;
+
+                return (getAllDir, getAllCanon, saveDir, moveDir, loadDir, normalizeDir, normalizeCanon, encryptDir, encryptCanon, importDir, importCanon, removeDir, removeCanon);
             }
-
-            long beforeGetAll = Manifest.StorageDirectoryValidationCount;
-            long beforeGetAllCanonical = Manifest.CanonicalDirectoryVerificationCount;
-            SteamGuardAccount[] loaded = manifest.GetAllAccounts();
-            long getAllValidations = Manifest.StorageDirectoryValidationCount - beforeGetAll;
-            Assert.Equal(accountCount, loaded.Length);
-            Assert.Equal(1, getAllValidations);
-            Assert.Equal(1, Manifest.CanonicalDirectoryVerificationCount - beforeGetAllCanonical);
-
-            long beforeSaveWithResult = Manifest.StorageDirectoryValidationCount;
-            Assert.True(manifest.SaveWithResult().Succeeded);
-            // 1 pre-recovery + 1 post-recovery validation (constant, independent of entry count).
-            Assert.Equal(2, Manifest.StorageDirectoryValidationCount - beforeSaveWithResult);
-
-            long beforeMove = Manifest.StorageDirectoryValidationCount;
-            Assert.True(manifest.MoveEntryWithResult(0, 1).Succeeded);
-            // 1 pre-recovery + 1 post-recovery validation in CommitStorageTransaction.
-            Assert.Equal(2, Manifest.StorageDirectoryValidationCount - beforeMove);
-
-            long beforeGetManifest = Manifest.StorageDirectoryValidationCount;
-            Manifest reloaded = Manifest.GetManifest(true);
-            long getManifestValidations = Manifest.StorageDirectoryValidationCount - beforeGetManifest;
-            Assert.Equal(accountCount, reloaded.Entries.Count);
-            // Constant boundary validations (startup check, entry validation, recompute, guid normalization),
-            // never scaling with accountCount.
-            Assert.Equal(4, getManifestValidations);
-
-            // Convert 5 entries to GUID names and confirm NormalizeAccountFilenames does O(1) directory validations.
-            string maDirectory = Path.Combine(dataDirectory, "maFiles");
-            for (int i = 0; i < 5; i++)
+            finally
             {
-                Manifest.ManifestEntry entry = reloaded.Entries[i];
-                string guidFilename = entry.SteamID + "." + Guid.NewGuid().ToString("N") + ".maFile";
-                File.Move(Path.Combine(maDirectory, entry.Filename), Path.Combine(maDirectory, guidFilename));
-                entry.Filename = guidFilename;
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDir);
+                if (Directory.Exists(runDir))
+                    Directory.Delete(runDir, true);
             }
-            Assert.True(reloaded.Save());
+        }
 
-            long beforeNormalize = Manifest.StorageDirectoryValidationCount;
-            long beforeNormalizeCanonical = Manifest.CanonicalDirectoryVerificationCount;
-            Assert.True(reloaded.NormalizeAccountFilenames().Succeeded);
-            // 1 in NormalizeAccountFilenames + 2 (pre/post-recovery) in CommitStorageTransaction.
-            Assert.Equal(3, Manifest.StorageDirectoryValidationCount - beforeNormalize);
-            Assert.Equal(1, Manifest.CanonicalDirectoryVerificationCount - beforeNormalizeCanonical);
+        [Fact]
+        public void PathValidation_ColdPasskeyCheckValidatesDirectoryOnceAcrossCorruptEntries()
+        {
+            (long dirDelta, long canonDelta) fewCorrupt = MeasureColdPasskeySaveValidationCounts(totalAccounts: 3, corruptCount: 1);
+            (long dirDelta, long canonDelta) manyCorrupt = MeasureColdPasskeySaveValidationCounts(totalAccounts: 7, corruptCount: 5);
 
-            long beforeEncrypt = Manifest.StorageDirectoryValidationCount;
-            long beforeEncryptCanonical = Manifest.CanonicalDirectoryVerificationCount;
-            Assert.True(reloaded.ChangeEncryptionKey(null, "test-passkey").Succeeded);
-            // 1 in ChangeEncryptionKey + 2 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 2 in its commit.
-            Assert.Equal(6, Manifest.StorageDirectoryValidationCount - beforeEncrypt);
-            // 1 in ChangeEncryptionKey + 1 in NormalizeAccountFilenames (constant across all 8 accounts).
-            Assert.Equal(2, Manifest.CanonicalDirectoryVerificationCount - beforeEncryptCanonical);
-            Assert.Equal(accountCount, reloaded.GetAllAccounts("test-passkey").Length);
+            // Cold passkey check validates maFiles once regardless of how many corrupt entries are skipped.
+            Assert.Equal(fewCorrupt.dirDelta, manyCorrupt.dirDelta);
+            Assert.Equal(fewCorrupt.canonDelta, manyCorrupt.canonDelta);
+            Assert.True(manyCorrupt.dirDelta <= 4, $"Expected O(1) directory validations on cold SaveAccount, got {manyCorrupt.dirDelta}");
+            Assert.True(manyCorrupt.canonDelta <= 4, $"Expected O(1) canonical verifications on cold SaveAccount, got {manyCorrupt.canonDelta}");
+        }
 
-            // Verify ImportUnmanagedMaFiles and sessionless RemoveAccount also perform O(1) directory validations.
-            Assert.True(reloaded.ChangeEncryptionKey("test-passkey", null).Succeeded);
-            for (int i = 0; i < 3; i++)
+        private (long dirDelta, long canonDelta) MeasureColdPasskeySaveValidationCounts(int totalAccounts, int corruptCount)
+        {
+            string runDir = Path.Combine(dataDirectory, "cold-passkey-" + corruptCount + "-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(runDir);
+            string previousDir = Environment.GetEnvironmentVariable("ASDA_DATA_DIRECTORY");
+            try
             {
-                ulong importId = 76561198000002000UL + (ulong)i;
-                File.WriteAllText(
-                    Path.Combine(maDirectory, $"import-{i}.maFile"),
-                    JsonConvert.SerializeObject(CreateAccount(importId)));
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", runDir);
+                Manifest manifest = Manifest.GenerateNewManifest(false);
+                for (int i = 0; i < totalAccounts; i++)
+                {
+                    Assert.True(manifest.SaveAccount(CreateAccount(76561198000004000UL + (ulong)i), false).Succeeded);
+                }
+                Assert.True(manifest.ChangeEncryptionKey(null, "cold-passkey").Succeeded);
+
+                // Corrupt the first N account files so cold-start IsPasskeyValidForEncryptedWriteLocked
+                // must skip multiple unreadable/corrupt entries before matching the last healthy account.
+                string maDirectory = Path.Combine(runDir, "maFiles");
+                for (int i = 0; i < corruptCount; i++)
+                {
+                    File.WriteAllText(Path.Combine(maDirectory, manifest.Entries[i].Filename), "corrupt-ciphertext");
+                }
+
+                // Reload fresh Manifest instance so verifiedPasskeyProof is cold (null).
+                Manifest coldManifest = Manifest.GetManifest(true);
+                SteamGuardAccount newAccount = CreateAccount(76561198000004999UL);
+
+                long beforeDir = StoragePathGuard.DirectoryValidationCount;
+                long beforeCanon = StoragePathGuard.CanonicalDirectoryVerificationCount;
+                StorageResult saveResult = coldManifest.SaveAccount(newAccount, true, "cold-passkey");
+                long dirDelta = StoragePathGuard.DirectoryValidationCount - beforeDir;
+                long canonDelta = StoragePathGuard.CanonicalDirectoryVerificationCount - beforeCanon;
+
+                Assert.True(saveResult.Succeeded);
+                return (dirDelta, canonDelta);
             }
-            var importCandidates = reloaded.FindUnmanagedMaFiles();
-            Assert.Equal(3, importCandidates.Count);
-
-            long beforeImport = Manifest.StorageDirectoryValidationCount;
-            long beforeImportCanonical = Manifest.CanonicalDirectoryVerificationCount;
-            Assert.True(reloaded.ImportUnmanagedMaFiles(importCandidates).Succeeded);
-            // 1 in ImportUnmanagedMaFiles + 2 in CommitStorageTransaction + 1 in NormalizeAccountFilenames + 2 in its commit.
-            Assert.Equal(6, Manifest.StorageDirectoryValidationCount - beforeImport);
-            // 1 in ImportUnmanagedMaFiles + 1 in NormalizeAccountFilenames (constant across all imported accounts).
-            Assert.Equal(2, Manifest.CanonicalDirectoryVerificationCount - beforeImportCanonical);
-
-            SteamGuardAccount uniqueNamed = CreateAccount(76561198000003000UL);
-            uniqueNamed.AccountName = "unique-removal-target";
-            Assert.True(reloaded.SaveAccount(uniqueNamed, false).Succeeded);
-            SteamGuardAccount sessionlessTarget = new SteamGuardAccount { AccountName = "unique-removal-target", Session = null };
-
-            long beforeRemove = Manifest.StorageDirectoryValidationCount;
-            long beforeRemoveCanonical = Manifest.CanonicalDirectoryVerificationCount;
-            Assert.True(reloaded.RemoveAccount(sessionlessTarget, (string)null));
-            // 1 in FindEntryForRemoval + 2 in CommitStorageTransaction (independent of the 12 stored entries).
-            Assert.Equal(3, Manifest.StorageDirectoryValidationCount - beforeRemove);
-            Assert.Equal(1, Manifest.CanonicalDirectoryVerificationCount - beforeRemoveCanonical);
+            finally
+            {
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDir);
+                if (Directory.Exists(runDir))
+                    Directory.Delete(runDir, true);
+            }
         }
 
         [Fact]
@@ -1404,13 +1501,18 @@ namespace SteamAuth.PhoneEnrollment.Tests
             string linkedDataDir = Path.Combine(junctionRoot, "linked-data");
             string directJunctionDataDir = Path.Combine(junctionRoot, "direct-data");
             string directMaFilesJunction = Path.Combine(directJunctionDataDir, "maFiles");
+            string danglingTargetDir = Path.Combine(junctionRoot, "dangling-target");
+            string danglingJunction = Path.Combine(junctionRoot, "dangling-junction");
 
             try
             {
                 Directory.CreateDirectory(realTargetDir);
                 Directory.CreateDirectory(directJunctionDataDir);
+                Directory.CreateDirectory(danglingTargetDir);
                 CreateDirectoryJunction(linkedDataDir, realTargetDir);
                 CreateDirectoryJunction(directMaFilesJunction, realTargetDir);
+                CreateDirectoryJunction(danglingJunction, danglingTargetDir);
+                Directory.Delete(danglingTargetDir, false);
 
                 // Seed the junction target with a pending transaction journal, backup, and account file
                 // to prove CommitStorageTransaction validates maDir BEFORE recovery can restore or delete anything.
@@ -1422,8 +1524,9 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 WriteJournal(realTargetDir, "uncommitted-manifest", "uncommitted-target.maFile", "obsolete-target.maFile", TestBackupFilename);
 
                 // 1. Ancestor junction (ASDA_DATA_DIRECTORY itself is a junction and maFiles does not exist yet):
-                //    Saves must fail without creating maFiles inside the junction target.
+                //    GetManifest and saves must fail without creating maFiles inside the junction target.
                 Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", linkedDataDir);
+                Assert.Throws<ManifestStorageDirectoryException>(() => Manifest.GetManifest(true));
                 Manifest ancestorManifest = Manifest.GenerateNewManifest(false);
                 Assert.False(ancestorManifest.SaveWithResult().Succeeded);
                 Assert.False(ancestorManifest.SaveAccount(CreateAccount(), false).Succeeded);
@@ -1444,7 +1547,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     Filename = Manifest.GetCanonicalMaFileFilename(76561198000000001UL)
                 });
 
-                Assert.Throws<ManifestParseException>(() => Manifest.GetManifest(true));
+                Assert.Throws<ManifestStorageDirectoryException>(() => Manifest.GetManifest(true));
                 Assert.Throws<InvalidDataException>(() => directManifest.GetAllAccounts());
                 Assert.False(directManifest.SaveWithResult().Succeeded);
                 Assert.False(directManifest.SaveAccount(CreateAccount(76561198000000002UL), false).Succeeded);
@@ -1472,32 +1575,38 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Assert.True(File.Exists(targetJournalPath));
 
                 // 3. Canonical directory acquisition & opened-file handle verification fail closed:
-                //    - Direct junction is rejected via FILE_FLAG_OPEN_REPARSE_POINT (never followed to target).
+                //    - Direct junction (with and without trailing separator) is rejected via FILE_FLAG_OPEN_REPARSE_POINT.
+                //    - Dangling junction is rejected at both ancestor walk and canonical verification.
                 //    - Real subdirectory beneath an ancestor junction is rejected via canonical path comparison.
                 //    - Missing directory fails closed (throws instead of returning null).
                 //    - ReadTextWithLimit rejects null/empty canonical directory and mismatched opened handles.
                 string nestedRealDirInTarget = Path.Combine(realTargetDir, "nested");
                 Directory.CreateDirectory(nestedRealDirInTarget);
-                Assert.Throws<InvalidDataException>(() => Manifest.GetValidatedCanonicalDirectoryPath(directMaFilesJunction));
-                Assert.Throws<InvalidDataException>(() => Manifest.GetValidatedCanonicalDirectoryPath(Path.Combine(linkedDataDir, "nested")));
-                Assert.Throws<InvalidDataException>(() => Manifest.GetValidatedCanonicalDirectoryPath(Path.Combine(junctionRoot, "does-not-exist")));
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.GetValidatedCanonicalDirectoryPath(directMaFilesJunction));
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.GetValidatedCanonicalDirectoryPath(directMaFilesJunction + Path.DirectorySeparatorChar));
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.ValidateDirectoryAndGetRoot(danglingJunction));
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.GetValidatedCanonicalDirectoryPath(danglingJunction));
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.GetValidatedCanonicalDirectoryPath(Path.Combine(linkedDataDir, "nested")));
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.GetValidatedCanonicalDirectoryPath(Path.Combine(junctionRoot, "does-not-exist")));
 
                 string driveRoot = Path.GetPathRoot(dataDirectory);
                 Assert.False(String.IsNullOrEmpty(driveRoot));
-                Assert.False(String.IsNullOrEmpty(Manifest.GetValidatedCanonicalDirectoryPath(driveRoot)));
-                Assert.False(String.IsNullOrEmpty(Manifest.GetValidatedCanonicalDirectoryPath(@"\\?\" + driveRoot)));
+                Assert.False(String.IsNullOrEmpty(StoragePathGuard.GetValidatedCanonicalDirectoryPath(driveRoot)));
+                Assert.False(String.IsNullOrEmpty(StoragePathGuard.GetValidatedCanonicalDirectoryPath(@"\\?\" + driveRoot)));
 
                 string realMaFilesDir = Path.Combine(dataDirectory, "maFiles");
                 Directory.CreateDirectory(realMaFilesDir);
                 string realSampleFile = Path.Combine(realMaFilesDir, "sample.maFile");
                 File.WriteAllText(realSampleFile, "sample-content");
-                string expectedCanonicalDir = Manifest.GetValidatedCanonicalDirectoryPath(realMaFilesDir);
+                string expectedCanonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(realMaFilesDir);
+                string expectedCanonicalDirWithTrailingSep = StoragePathGuard.GetValidatedCanonicalDirectoryPath(realMaFilesDir + Path.DirectorySeparatorChar);
                 Assert.False(String.IsNullOrEmpty(expectedCanonicalDir));
-                Assert.Equal("sample-content", Manifest.ReadTextWithLimit(realSampleFile, 1024 * 1024, expectedCanonicalDir));
-                Assert.Throws<InvalidDataException>(() => Manifest.ReadTextWithLimit(realSampleFile, 1024 * 1024, null));
-                Assert.Throws<InvalidDataException>(() => Manifest.ReadTextWithLimit(realSampleFile, 1024 * 1024, String.Empty));
+                Assert.Equal(expectedCanonicalDir, expectedCanonicalDirWithTrailingSep, StringComparer.OrdinalIgnoreCase);
+                Assert.Equal("sample-content", StoragePathGuard.ReadTextWithLimit(realSampleFile, 1024 * 1024, expectedCanonicalDir));
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.ReadTextWithLimit(realSampleFile, 1024 * 1024, null));
+                Assert.Throws<InvalidDataException>(() => StoragePathGuard.ReadTextWithLimit(realSampleFile, 1024 * 1024, String.Empty));
                 Assert.Throws<InvalidDataException>(() =>
-                    Manifest.ReadTextWithLimit(
+                    StoragePathGuard.ReadTextWithLimit(
                         Path.Combine(directMaFilesJunction, "uncommitted-target.maFile"),
                         1024 * 1024,
                         expectedCanonicalDir));
@@ -1519,11 +1628,172 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 catch { }
                 try
                 {
+                    if ((File.GetAttributes(danglingJunction) & FileAttributes.ReparsePoint) != 0)
+                        Directory.Delete(danglingJunction, false);
+                }
+                catch { }
+                try
+                {
                     if (Directory.Exists(junctionRoot))
                         Directory.Delete(junctionRoot, true);
                 }
                 catch { }
             }
+        }
+
+        [Fact]
+        public void PathValidation_PinnedDirectoryBlocksDirectoryRenameAndDeleteWhileHeld()
+        {
+            string pinRoot = Path.Combine(dataDirectory, "pin-test");
+            string maFilesDir = Path.Combine(pinRoot, "maFiles");
+            string renamedDir = Path.Combine(pinRoot, "maFiles-renamed");
+            Directory.CreateDirectory(maFilesDir);
+
+            using (StoragePathGuard.PinnedStorageDirectory pinned = StoragePathGuard.PinExistingDirectory(maFilesDir))
+            {
+                Assert.False(String.IsNullOrEmpty(pinned.CanonicalDirectoryPath));
+                pinned.VerifyStillPinned();
+
+                // While pinned without FILE_SHARE_DELETE, OS rejects renaming or deleting the storage directory.
+                Assert.ThrowsAny<IOException>(() => Directory.Move(maFilesDir, renamedDir));
+                Assert.ThrowsAny<IOException>(() => Directory.Delete(maFilesDir, false));
+
+                // Child file reads/writes inside the pinned directory continue to succeed.
+                string childFile = Path.Combine(maFilesDir, "inside.maFile");
+                File.WriteAllText(childFile, "pinned-child-content");
+                Assert.Equal("pinned-child-content", StoragePathGuard.ReadTextWithLimit(childFile, 1024, pinned.CanonicalDirectoryPath));
+                File.Delete(childFile);
+            }
+
+            // Once disposed, directory can be renamed normally.
+            Directory.Move(maFilesDir, renamedDir);
+            Assert.True(Directory.Exists(renamedDir));
+        }
+
+        [Fact]
+        public void PathValidation_HandlesLongPathsAndUncNormalization()
+        {
+            // Verify Win32 normalization helpers preserve UNC and drive roots while stripping non-root trailing separators.
+            Assert.Equal(@"C:\", StoragePathGuard.StripNonRootTrailingSeparators(@"C:\"));
+            Assert.Equal(@"\\?\C:\", StoragePathGuard.StripNonRootTrailingSeparators(@"\\?\C:\"));
+            Assert.Equal(@"\\server\share\", StoragePathGuard.StripNonRootTrailingSeparators(@"\\server\share"));
+            Assert.Equal(@"\\server\share\", StoragePathGuard.StripNonRootTrailingSeparators(@"\\server\share\"));
+            Assert.Equal(@"\\?\UNC\server\share\", StoragePathGuard.StripNonRootTrailingSeparators(@"\\?\UNC\server\share\"));
+            Assert.Equal(@"C:\dir\sub", StoragePathGuard.StripNonRootTrailingSeparators(@"C:\dir\sub\"));
+            Assert.Equal(@"\\server\share\maFiles", StoragePathGuard.StripNonRootTrailingSeparators(@"\\server\share\maFiles\"));
+            Assert.Equal(@"\\server\share\", StoragePathGuard.ToWin32RootOpenPath(@"\\server\share"));
+
+            string longUnc = @"\\server\share\" + new string('a', 260);
+            Assert.StartsWith(@"\\?\UNC\server\share\", StoragePathGuard.ToWin32OpenPath(longUnc), StringComparison.Ordinal);
+
+            // Real filesystem test for an unprefixed path >= 260 chars.
+            string longDir = dataDirectory;
+            for (int i = 0; i < 6; i++)
+            {
+                longDir = Path.Combine(longDir, "segment_" + i + "_" + new string('x', 40));
+            }
+            Assert.True(longDir.Length >= 260, $"Expected path >= 260 chars, got {longDir.Length}");
+
+            Directory.CreateDirectory(longDir);
+            string longFile = Path.Combine(longDir, "long.maFile");
+            File.WriteAllText(longFile, "long-path-content");
+
+            string validatedRoot = StoragePathGuard.ValidateDirectoryAndGetRoot(longDir);
+            Assert.False(String.IsNullOrEmpty(validatedRoot));
+            string canonicalDir = StoragePathGuard.GetValidatedCanonicalDirectoryPath(longDir);
+            Assert.False(String.IsNullOrEmpty(canonicalDir));
+            Assert.Equal("long-path-content", StoragePathGuard.ReadTextWithLimit(longFile, 1024, canonicalDir));
+
+            using (StoragePathGuard.PinnedStorageDirectory pinned = StoragePathGuard.PinExistingDirectory(longDir))
+            {
+                pinned.VerifyStillPinned();
+                Assert.Equal("long-path-content", StoragePathGuard.ReadTextWithLimit(longFile, 1024, pinned.CanonicalDirectoryPath));
+            }
+        }
+
+        [Fact]
+        public void PathValidation_SaveWithResultDoesNotCreateDirectoryWhenValidationFails()
+        {
+            string freshDir = Path.Combine(dataDirectory, "no-dir-on-invalid-save");
+            Directory.CreateDirectory(freshDir);
+            string previousDir = Environment.GetEnvironmentVariable("ASDA_DATA_DIRECTORY");
+            try
+            {
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", freshDir);
+                Manifest invalidManifest = Manifest.GenerateNewManifest(false);
+                invalidManifest.Entries.Add(new Manifest.ManifestEntry
+                {
+                    SteamID = 76561198000009999UL,
+                    Filename = @"..\escape.maFile"
+                });
+
+                StorageResult result = invalidManifest.SaveWithResult();
+                Assert.False(result.Succeeded);
+                Assert.False(Directory.Exists(Path.Combine(freshDir, "maFiles")));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("ASDA_DATA_DIRECTORY", previousDir);
+            }
+        }
+
+        [Fact]
+        public void PathValidation_RejectsEscapingCredentialsStoreFilenameAcrossBoundaries()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = CreateAccount(76561198000008001UL);
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+            Assert.True(manifest.ChangeEncryptionKey(null, "cred-passkey").Succeeded);
+
+            string outsideFile = Path.Combine(dataDirectory, "outside-secret.txt");
+            File.WriteAllText(outsideFile, "outside-data");
+
+            // Point CredentialsStoreFilename outside maFiles and verify every boundary rejects it.
+            manifest.CredentialsStoreFilename = @"..\outside-secret.txt";
+
+            Assert.Throws<InvalidDataException>(() => manifest.GetAllAccounts("cred-passkey"));
+            Assert.False(manifest.SaveWithResult().Succeeded);
+            Assert.False(manifest.NormalizeAccountFilenames().Succeeded);
+            Assert.False(manifest.ChangeEncryptionKey("cred-passkey", "new-cred-passkey").Succeeded);
+            Assert.False(manifest.RemoveAccount(account, "cred-passkey"));
+            Assert.True(File.Exists(outsideFile));
+            Assert.Equal("outside-data", File.ReadAllText(outsideFile));
+        }
+
+        [Fact]
+        public void PathValidation_GetAllAccountsReturnsEmptyWhenMaFilesDirectoryMissing()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            manifest.Entries.Add(new Manifest.ManifestEntry
+            {
+                SteamID = 76561198000007001UL,
+                Filename = Manifest.GetCanonicalMaFileFilename(76561198000007001UL)
+            });
+
+            Assert.Empty(manifest.GetAllAccounts());
+        }
+
+        [Fact]
+        public void VerifyPasskey_DoesNotOverwriteRotatedPasskeyProofWithStaleKey()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            SteamGuardAccount account = CreateAccount(76561198000006001UL);
+            Assert.True(manifest.SaveAccount(account, false).Succeeded);
+            Assert.True(manifest.ChangeEncryptionKey(null, "old-passkey").Succeeded);
+
+            // Rotate key, then confirm VerifyPasskey with old key returns false and does not
+            // corrupt the cached passkey proof for subsequent encrypted writes.
+            Assert.True(manifest.ChangeEncryptionKey("old-passkey", "new-passkey").Succeeded);
+            Assert.False(manifest.VerifyPasskey("old-passkey"));
+            Assert.True(manifest.VerifyPasskey("new-passkey"));
+
+            // Attempting an encrypted write with the retired passkey must fail closed.
+            StorageResult staleWrite = manifest.SaveAccount(CreateAccount(76561198000006002UL), true, "old-passkey");
+            Assert.False(staleWrite.Succeeded);
+
+            // Writing with the current passkey succeeds.
+            StorageResult currentWrite = manifest.SaveAccount(CreateAccount(76561198000006002UL), true, "new-passkey");
+            Assert.True(currentWrite.Succeeded);
         }
 
         private static void CreateDirectoryJunction(string junctionPath, string targetPath)
