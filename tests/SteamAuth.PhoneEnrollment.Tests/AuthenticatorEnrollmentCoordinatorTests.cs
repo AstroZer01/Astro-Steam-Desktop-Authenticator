@@ -282,7 +282,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public async Task FinalizeAddAuthenticator_RejectsContradictoryAuthenticatorIdentity()
+        public async Task FinalizeAddAuthenticator_PreservesPendingRecordOnContradictoryAuthenticatorIdentity()
         {
             FakeTransport transport = new FakeTransport(
                 AwaitingFinalization(),
@@ -293,7 +293,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             AuthenticatorLinker.FinalizeResult result = await linker.FinalizeAddAuthenticator("email-code");
 
-            Assert.Equal(AuthenticatorLinker.FinalizeResult.NotFinalized, result);
+            Assert.Equal(AuthenticatorLinker.FinalizeResult.FinalizedIdentityMismatch, result);
+            Assert.True(linker.FinalizationAcceptedBySteam);
             Assert.False(linker.Finalized);
             Assert.False(linker.LinkedAccount.FullyEnrolled);
             Assert.Contains("different authenticator", linker.LastErrorMessage);

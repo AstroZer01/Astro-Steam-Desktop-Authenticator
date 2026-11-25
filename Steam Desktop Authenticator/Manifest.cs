@@ -580,18 +580,27 @@ namespace Steam_Desktop_Authenticator
                 root = JObject.Load(jsonReader);
             }
 
-            SteamGuardAccount account = root.ToObject<SteamGuardAccount>(JsonSerializer.Create(effectiveSettings));
-            if (account != null)
+            // Remove any null `fully_enrolled` property before converting to non-nullable bool,
+            // while preserving explicit `"fully_enrolled": false` as pending activation.
+            bool hasExplicitFullyEnrolled = false;
+            foreach (JProperty property in root.Properties()
+                .Where(p => String.Equals(p.Name, "fully_enrolled", StringComparison.OrdinalIgnoreCase))
+                .ToList())
             {
-                // Preserve explicit `"fully_enrolled": false` as pending activation, while
-                // treating legacy .maFile records that predate the field as enrolled.
-                bool hasExplicitFullyEnrolled = root.TryGetValue("fully_enrolled", StringComparison.OrdinalIgnoreCase, out JToken fullyEnrolledToken) &&
-                    fullyEnrolledToken != null &&
-                    fullyEnrolledToken.Type != JTokenType.Null;
-                if (!hasExplicitFullyEnrolled && !String.IsNullOrWhiteSpace(account.SharedSecret))
+                if (property.Value == null || property.Value.Type == JTokenType.Null)
                 {
-                    account.FullyEnrolled = true;
+                    property.Remove();
                 }
+                else
+                {
+                    hasExplicitFullyEnrolled = true;
+                }
+            }
+
+            SteamGuardAccount account = root.ToObject<SteamGuardAccount>(JsonSerializer.Create(effectiveSettings));
+            if (account != null && !hasExplicitFullyEnrolled && !String.IsNullOrWhiteSpace(account.SharedSecret))
+            {
+                account.FullyEnrolled = true;
             }
 
             return account;

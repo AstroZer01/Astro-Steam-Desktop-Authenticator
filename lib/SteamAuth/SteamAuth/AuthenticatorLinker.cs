@@ -49,6 +49,12 @@ namespace SteamAuth
             }
         }
 
+        /// <summary>
+        /// True if Steam accepted FinalizeAddAuthenticator for this enrollment, even if
+        /// follow-up activation verification could not confirm or disagreed on identity.
+        /// </summary>
+        public bool FinalizationAcceptedBySteam { get; private set; }
+
         private PhoneLinkStep phoneLinkStep;
 
         public AuthenticatorLinker(SessionData sessionData)
@@ -300,6 +306,8 @@ namespace SteamAuth
                     return FinalizeResult.GeneralFailure;
                 }
 
+                FinalizationAcceptedBySteam = true;
+
                 FinalizeResult statusResult;
                 try
                 {
@@ -360,8 +368,10 @@ namespace SteamAuth
                     return FinalizeResult.NotFinalized;
 
                 case AuthenticatorActivationStatus.ActiveForDifferentAuthenticator:
-                    LastErrorMessage = "Steam reported that a different authenticator is active on this account, so this record was kept inactive.";
-                    return FinalizeResult.NotFinalized;
+                    LinkedAccount.FullyEnrolled = false;
+                    Finalized = false;
+                    LastErrorMessage = "Steam accepted authenticator finalization, but reported a different authenticator identity. Your saved pending record and recovery code were preserved without activating it.";
+                    return FinalizeResult.FinalizedIdentityMismatch;
 
                 default:
                     LastErrorMessage = "Steam accepted authenticator finalization, but its activation status could not be verified yet.";
@@ -758,7 +768,8 @@ namespace SteamAuth
             GeneralFailure,
             RateLimited,
             NotFinalized,
-            FinalizedStatusUnverified
+            FinalizedStatusUnverified,
+            FinalizedIdentityMismatch
         }
 
         public enum ConfirmationCodeType

@@ -1262,6 +1262,9 @@
                 updateAccountOptionsPasswordSection(existing);
             }
             if (prevPending !== isPending) {
+                document.getElementById('account-options-subtitle').textContent = isPending
+                    ? 'SteamID ' + existing.steamId + ' • Pending activation'
+                    : 'SteamID ' + existing.steamId;
                 updateAccountOptionsExportSection(existing);
             }
         }

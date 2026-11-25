@@ -49,6 +49,11 @@ namespace Steam_Desktop_Authenticator
                 !String.IsNullOrEmpty(passKey);
         }
 
+        internal static bool ShouldDeletePendingOnExplicitCancel(bool finalizationAcceptedBySteam)
+        {
+            return !finalizationAcceptedBySteam;
+        }
+
         public LoginForm(
             LoginType loginReason = LoginType.Initial,
             SteamGuardAccount account = null,
@@ -440,6 +445,7 @@ namespace Steam_Desktop_Authenticator
             }
 
             // Create a new auth session
+            UserFormAuthenticator userAuthenticator = new UserFormAuthenticator(this.account, this, cancellationToken, allowInteractiveDeviceAuth: LoginReason == LoginType.Transfer);
             CredentialsAuthSession authSession;
             try
             {
@@ -451,7 +457,7 @@ namespace Steam_Desktop_Authenticator
                     IsPersistentSession = LoginReason == LoginType.Transfer,
                     PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_MobileApp,
                     ClientOSType = EOSType.Android9,
-                    Authenticator = new UserFormAuthenticator(this.account, this, cancellationToken, allowInteractiveDeviceAuth: LoginReason == LoginType.Transfer),
+                    Authenticator = userAuthenticator,
                 });
             }
             catch (AuthenticatorAlreadyLinkedException)
@@ -574,7 +580,9 @@ namespace Steam_Desktop_Authenticator
                             account,
                             sessionData,
                             resolvedKey,
-                            (candidate, ct) => candidate.VerifyAuthenticatorActivationAsync(ct),
+                            (candidate, ct) => candidate.VerifyAuthenticatorActivationAsync(
+                                ct,
+                                allowUncorroboratedActiveWhenDeviceCodeVerified: userAuthenticator.UsedLocalAccountDeviceCode),
                             cancellationToken,
                             expectedStorageRevision);
                     }
@@ -791,7 +799,8 @@ namespace Steam_Desktop_Authenticator
             AuthenticatorLinker.FinalizeResult finalizeResponse = AuthenticatorLinker.FinalizeResult.GeneralFailure;
             bool previousFinalizationCodeWasInvalid = false;
             while (finalizeResponse != AuthenticatorLinker.FinalizeResult.Success &&
-                finalizeResponse != AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified)
+                finalizeResponse != AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified &&
+                finalizeResponse != AuthenticatorLinker.FinalizeResult.FinalizedIdentityMismatch)
             {
                 string confirmationDestination = linker.FinalizationConfirmationType == AuthenticatorLinker.ConfirmationCodeType.Email
                     ? "email address associated with your Steam account"
@@ -825,6 +834,11 @@ namespace Steam_Desktop_Authenticator
 
                     if (promptDecision.Action == ConfirmationCodePromptAction.CancelAndRemovePending)
                     {
+                        if (!ShouldDeletePendingOnExplicitCancel(linker.FinalizationAcceptedBySteam))
+                        {
+                            this.Close();
+                            return;
+                        }
                         if (!manifest.RemoveAccount(linker.LinkedAccount, passKey, expectedStorageRevision: pendingStorageRevision))
                         {
                             const string removalError = "The unfinished authenticator record could not be removed safely. It may still be present in the app; restart the app before making further account changes.";
@@ -852,7 +866,8 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 if (finalizeResponse != AuthenticatorLinker.FinalizeResult.Success &&
-                    finalizeResponse != AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified)
+                    finalizeResponse != AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified &&
+                    finalizeResponse != AuthenticatorLinker.FinalizeResult.FinalizedIdentityMismatch)
                 {
                     DiagnosticErrorLogger.Log(
                         "Authenticator finalization",
@@ -875,9 +890,12 @@ namespace Steam_Desktop_Authenticator
 
                     case AuthenticatorLinker.FinalizeResult.UnableToGenerateCorrectCodes:
                         AstroMessageBox.Show("Unable to generate the proper codes to finalize this authenticator. The authenticator should not have been linked. In the off-chance it was, please write down your revocation code, as this is the last chance to see it: " + linker.LinkedAccount.RevocationCode);
-                        manifest.RemoveAccount(linker.LinkedAccount, passKey, expectedStorageRevision: pendingStorageRevision);
-                        if (!manifest.Encrypted)
-                            ResolvedPassKey = null;
+                        if (ShouldDeletePendingOnExplicitCancel(linker.FinalizationAcceptedBySteam))
+                        {
+                            manifest.RemoveAccount(linker.LinkedAccount, passKey, expectedStorageRevision: pendingStorageRevision);
+                            if (!manifest.Encrypted)
+                                ResolvedPassKey = null;
+                        }
                         this.Close();
                         return;
 
@@ -929,11 +947,12 @@ namespace Steam_Desktop_Authenticator
             {
                 TrySaveVerifiedPasswordAfterCommit(manifest, linker.LinkedAccount.Session.SteamID, password, encrypt ? passKey : null, showRefreshNotice: false);
             }
-            ShowRecoveryCode(
-                linker.LinkedAccount,
-                finalizeResponse == AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified
+            string finalRecoveryMessage = finalizeResponse == AuthenticatorLinker.FinalizeResult.FinalizedIdentityMismatch
+                ? "Steam accepted authenticator finalization, but reported a different authenticator identity. Your saved pending record was kept inactive; keep this recovery code safe and verify your Steam Guard status."
+                : finalizeResponse == AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified
                     ? "Steam accepted the authenticator finalization, but its activation status could not be verified yet. Your record was kept as pending activation until Steam confirms it; keep this recovery code safe."
-                    : "Mobile authenticator successfully linked. Keep this recovery code safe.");
+                    : "Mobile authenticator successfully linked. Keep this recovery code safe.";
+            ShowRecoveryCode(linker.LinkedAccount, finalRecoveryMessage);
             this.Close();
         }
 

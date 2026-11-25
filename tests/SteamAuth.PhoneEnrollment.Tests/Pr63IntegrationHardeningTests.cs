@@ -268,9 +268,10 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public void DeserializeAccountJson_DistinguishesMissingLegacyFullyEnrolledFromExplicitFalse()
+        public void DeserializeAccountJson_DistinguishesMissingOrNullLegacyFullyEnrolledFromExplicitFalse()
         {
             const ulong legacySteamId = 76561198000009007UL;
+            const ulong nullLegacySteamId = 76561198000009012UL;
             const ulong explicitPendingSteamId = 76561198000009008UL;
             string sharedSecret = Convert.ToBase64String(new byte[20]);
             string refresh = CreateJwt(DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds());
@@ -286,6 +287,17 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 Session = new { SteamID = legacySteamId, AccessToken = access, RefreshToken = refresh }
             });
 
+            // Legacy .maFile with explicit null fully_enrolled field must not throw on non-nullable bool.
+            string nullLegacyJson = JsonConvert.SerializeObject(new
+            {
+                shared_secret = sharedSecret,
+                identity_secret = sharedSecret,
+                account_name = "legacy-null-imported",
+                revocation_code = "R11112",
+                fully_enrolled = (bool?)null,
+                Session = new { SteamID = nullLegacySteamId, AccessToken = access, RefreshToken = refresh }
+            });
+
             // Explicit pending record with fully_enrolled: false.
             string pendingJson = JsonConvert.SerializeObject(new
             {
@@ -298,29 +310,91 @@ namespace SteamAuth.PhoneEnrollment.Tests
             });
 
             SteamGuardAccount legacyAccount = Manifest.DeserializeAccountJson(legacyJson, null);
+            SteamGuardAccount nullLegacyAccount = Manifest.DeserializeAccountJson(nullLegacyJson, null);
             SteamGuardAccount pendingAccount = Manifest.DeserializeAccountJson(pendingJson, null);
 
             Assert.NotNull(legacyAccount);
             Assert.True(legacyAccount.FullyEnrolled);
+            Assert.NotNull(nullLegacyAccount);
+            Assert.True(nullLegacyAccount.FullyEnrolled);
             Assert.NotNull(pendingAccount);
             Assert.False(pendingAccount.FullyEnrolled);
 
-            // Persist both through Manifest and reload from disk.
+            // Persist all three through Manifest and reload from disk.
             Manifest manifest = Manifest.GenerateNewManifest(false);
             Assert.True(manifest.SaveAccount(legacyAccount, encrypt: false).Succeeded);
+            Assert.True(manifest.SaveAccount(nullLegacyAccount, encrypt: false).Succeeded);
             Assert.True(manifest.SaveAccount(pendingAccount, encrypt: false).Succeeded);
 
             SteamGuardAccount[] reloaded = manifest.GetAllAccounts();
             SteamGuardAccount reloadedLegacy = Assert.Single(reloaded, a => a.Session.SteamID == legacySteamId);
+            SteamGuardAccount reloadedNullLegacy = Assert.Single(reloaded, a => a.Session.SteamID == nullLegacySteamId);
             SteamGuardAccount reloadedPending = Assert.Single(reloaded, a => a.Session.SteamID == explicitPendingSteamId);
 
             Assert.True(reloadedLegacy.FullyEnrolled);
             Assert.False(MainForm.IsPendingEnrollment(reloadedLegacy));
             Assert.Equal(5, MainForm.GetDisplayLoginToken(reloadedLegacy, 1700000000L).Length);
 
+            Assert.True(reloadedNullLegacy.FullyEnrolled);
+            Assert.False(MainForm.IsPendingEnrollment(reloadedNullLegacy));
+            Assert.Equal(5, MainForm.GetDisplayLoginToken(reloadedNullLegacy, 1700000000L).Length);
+
             Assert.False(reloadedPending.FullyEnrolled);
             Assert.True(MainForm.IsPendingEnrollment(reloadedPending));
             Assert.Equal(string.Empty, MainForm.GetDisplayLoginToken(reloadedPending, 1700000000L));
+        }
+
+        [Fact]
+        public void EvaluateActivationStatusResponse_RecoversPreviouslyImportedLegacyRecordOnlyWhenDeviceCodeVerified()
+        {
+            SteamGuardAccount legacyUpgraded = CreateAccount(76561198000009013UL, "upgraded-legacy", fullyEnrolled: false);
+            legacyUpgraded.TokenGID = null;
+            legacyUpgraded.DeviceID = null;
+
+            var activeStatus = new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+            {
+                Result = 1,
+                Body = new SteamAuth.Protocol.CTwoFactor_Status_Response
+                {
+                    State = 1,
+                    TokenGid = "gid-from-steam",
+                    DeviceIdentifier = "android:from-steam"
+                }
+            };
+
+            // Without device-code login proof, a record lacking identifiers stays Unverified.
+            Assert.Equal(
+                AuthenticatorActivationStatus.Unverified,
+                SteamGuardAccount.EvaluateActivationStatusResponse(legacyUpgraded, activeStatus, allowUncorroboratedActiveWhenDeviceCodeVerified: false));
+
+            // With cryptographic device-code login proof AND State == 1, a legacy record lacking identifiers recovers cleanly.
+            Assert.Equal(
+                AuthenticatorActivationStatus.ActiveForThisRecord,
+                SteamGuardAccount.EvaluateActivationStatusResponse(legacyUpgraded, activeStatus, allowUncorroboratedActiveWhenDeviceCodeVerified: true));
+
+            // If Steam reports State == 0, even device-code flag never promotes it.
+            var inactiveStatus = new SteamProtocolResponse<SteamAuth.Protocol.CTwoFactor_Status_Response>
+            {
+                Result = 1,
+                Body = new SteamAuth.Protocol.CTwoFactor_Status_Response { State = 0 }
+            };
+            Assert.Equal(
+                AuthenticatorActivationStatus.NotActive,
+                SteamGuardAccount.EvaluateActivationStatusResponse(legacyUpgraded, inactiveStatus, allowUncorroboratedActiveWhenDeviceCodeVerified: true));
+
+            // A genuine pending record that HAS local TokenGID/DeviceID still strictly rejects mismatch even with device-code flag.
+            SteamGuardAccount pendingWithIdentity = CreateAccount(76561198000009014UL, "pending-with-id", fullyEnrolled: false);
+            pendingWithIdentity.TokenGID = "gid-local";
+            Assert.Equal(
+                AuthenticatorActivationStatus.ActiveForDifferentAuthenticator,
+                SteamGuardAccount.EvaluateActivationStatusResponse(pendingWithIdentity, activeStatus, allowUncorroboratedActiveWhenDeviceCodeVerified: true));
+        }
+
+        [Fact]
+        public void ShouldDeletePendingOnExplicitCancel_PreservesPendingRecordAfterSteamAcceptsFinalization()
+        {
+            Assert.True(LoginForm.ShouldDeletePendingOnExplicitCancel(finalizationAcceptedBySteam: false));
+            Assert.False(LoginForm.ShouldDeletePendingOnExplicitCancel(finalizationAcceptedBySteam: true));
         }
 
         [Fact]
