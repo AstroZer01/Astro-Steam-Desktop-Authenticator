@@ -109,7 +109,6 @@ jobs:
           "publish\ASDA\Steam Desktop Authenticator.exe",
           "publish\ASDA\bin\Steam Desktop Authenticator.exe",
           "publish\ASDA\bin\WebView2Loader.dll",
-          "publish\ASDA\bin\runtimes",
           "publish\ASDA\bin\app\ui\index.html",
           "publish\ASDA\bin\app\ui\login.html",
           "publish\ASDA\bin\app\ui\input.html",
