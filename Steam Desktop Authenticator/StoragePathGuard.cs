@@ -38,6 +38,7 @@ namespace Steam_Desktop_Authenticator
         private const int ErrorFileNotFound = 2;
         private const int ErrorPathNotFound = 3;
         private const int Win32LongPathThreshold = 248;
+        private const byte InPlaceOverwriteSentinelByte = 0xFF;
 
         private static readonly char[] DirectorySeparators =
         {
@@ -51,6 +52,7 @@ namespace Steam_Desktop_Authenticator
         internal static long DirectoryValidationCount => Interlocked.Read(ref directoryValidationCount);
         internal static long CanonicalDirectoryVerificationCount => Interlocked.Read(ref canonicalDirectoryVerificationCount);
         internal static Action<string> OnBeforeFlushReplacementForTest { get; set; }
+        internal static Action<string> OnBeforePublishRestoredMissingTargetForTest { get; set; }
 
         internal sealed class PinnedStorageDirectory : IDisposable
         {
@@ -204,10 +206,38 @@ namespace Steam_Desktop_Authenticator
                 // Mark overwritten before mutating any bytes so a mid-write, truncate, or flush
                 // failure always forces verified restoration from backup during rollback.
                 Overwritten = true;
+
+                if (replacementBytes.Length == 0)
+                {
+                    targetStream.Seek(0, SeekOrigin.Begin);
+                    targetStream.SetLength(0);
+                    OnBeforeFlushReplacementForTest?.Invoke(TargetPath);
+                    targetStream.Flush(true);
+                    return;
+                }
+
+                // Two-phase in-place overwrite with a durable leading sentinel (0xFF, invalid in
+                // both UTF-8 JSON and Base64 ciphertext):
+                //   1. Flush 0xFF at byte 0 so any crash during body write or truncation leaves
+                //      an unambiguously in-progress file (even for block-aligned Base64 ciphertext).
+                //   2. Write bytes [1..N-1], set final length, and flush to disk.
+                //   3. Overwrite byte 0 with replacementBytes[0] and flush so the final single-byte
+                //      write transitions directly from sentinel-marked to ReplacementHash.
                 targetStream.Seek(0, SeekOrigin.Begin);
-                targetStream.Write(replacementBytes, 0, replacementBytes.Length);
+                targetStream.WriteByte(InPlaceOverwriteSentinelByte);
+                targetStream.Flush(true);
+
+                if (replacementBytes.Length > 1)
+                {
+                    targetStream.Seek(1, SeekOrigin.Begin);
+                    targetStream.Write(replacementBytes, 1, replacementBytes.Length - 1);
+                }
                 targetStream.SetLength(replacementBytes.Length);
                 OnBeforeFlushReplacementForTest?.Invoke(TargetPath);
+                targetStream.Flush(true);
+
+                targetStream.Seek(0, SeekOrigin.Begin);
+                targetStream.WriteByte(replacementBytes[0]);
                 targetStream.Flush(true);
             }
 
@@ -226,11 +256,7 @@ namespace Steam_Desktop_Authenticator
                     if (!String.Equals(backupHash, OriginalHash, StringComparison.Ordinal))
                         throw new InvalidDataException("A replaced authenticator backup did not match the expected original file hash.");
 
-                    backupStream.Seek(0, SeekOrigin.Begin);
-                    targetStream.Seek(0, SeekOrigin.Begin);
-                    CopyStreamExact(backupStream, targetStream);
-                    targetStream.SetLength(backupStream.Length);
-                    targetStream.Flush(true);
+                    RestoreStreamWithLeadingSentinel(backupStream, targetStream);
                     Overwritten = false;
                 }
             }
@@ -1012,7 +1038,8 @@ namespace Steam_Desktop_Authenticator
                             {
                                 // Allow recovery of an interrupted partial/corrupt in-place write when
                                 // the exact locked target file identity matches and the on-disk bytes
-                                // are NOT a valid intact account file (never clobbering intact live data).
+                                // are empty, carry our leading in-place write sentinel (0xFF), or are
+                                // not a valid intact account file (never clobbering intact live data).
                                 bool isRecoverablePartialWrite = false;
                                 if (expectedTargetIdentity.HasValue && actualIdentity.Equals(expectedTargetIdentity.Value))
                                 {
@@ -1020,10 +1047,18 @@ namespace Steam_Desktop_Authenticator
                                     {
                                         isRecoverablePartialWrite = true;
                                     }
-                                    else if (isIntactAccountFile != null)
+                                    else
                                     {
                                         targetStream.Seek(0, SeekOrigin.Begin);
-                                        isRecoverablePartialWrite = !isIntactAccountFile(targetStream);
+                                        if (targetStream.ReadByte() == InPlaceOverwriteSentinelByte)
+                                        {
+                                            isRecoverablePartialWrite = true;
+                                        }
+                                        else if (isIntactAccountFile != null)
+                                        {
+                                            targetStream.Seek(0, SeekOrigin.Begin);
+                                            isRecoverablePartialWrite = !isIntactAccountFile(targetStream);
+                                        }
                                     }
                                 }
 
@@ -1031,11 +1066,7 @@ namespace Steam_Desktop_Authenticator
                                     throw new InvalidDataException("A live authenticator file did not match the uncommitted replacement recorded in the storage journal.");
                             }
 
-                            backupStream.Seek(0, SeekOrigin.Begin);
-                            targetStream.Seek(0, SeekOrigin.Begin);
-                            CopyStreamExact(backupStream, targetStream);
-                            targetStream.SetLength(backupStream.Length);
-                            targetStream.Flush(true);
+                            RestoreStreamWithLeadingSentinel(backupStream, targetStream);
                         }
                     }
                     finally
@@ -1059,9 +1090,11 @@ namespace Steam_Desktop_Authenticator
                         openError != 0 ? new Win32Exception(openError) : null);
                 }
 
-                // Target file is missing: recreate it atomically with CREATE_NEW after verifying canonical directory.
+                // Target file is missing: stage the full verified backup into a temp file and publish
+                // via handle-bound FileRenameInfo (ReplaceIfExists = 0) so a crash mid-copy never
+                // leaves an incomplete target file with a new FileIndex at targetFullPath.
                 backupStream.Seek(0, SeekOrigin.Begin);
-                CopyStreamToCreateNewVerifiedFile(backupStream, targetFullPath, expectedCanonicalDirectory);
+                StageStreamAndPublishCreateNew(backupStream, targetFullPath, expectedCanonicalDirectory);
             }
         }
 
@@ -1437,74 +1470,132 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static void CopyStreamToCreateNewVerifiedFile(
+        private static void RestoreStreamWithLeadingSentinel(FileStream sourceStream, FileStream targetStream)
+        {
+            sourceStream.Seek(0, SeekOrigin.Begin);
+            if (sourceStream.Length == 0)
+            {
+                targetStream.Seek(0, SeekOrigin.Begin);
+                targetStream.SetLength(0);
+                targetStream.Flush(true);
+                return;
+            }
+
+            int firstByte = sourceStream.ReadByte();
+            if (firstByte < 0)
+                throw new EndOfStreamException("The verified backup stream ended unexpectedly.");
+
+            targetStream.Seek(0, SeekOrigin.Begin);
+            targetStream.WriteByte(InPlaceOverwriteSentinelByte);
+            targetStream.Flush(true);
+
+            targetStream.Seek(1, SeekOrigin.Begin);
+            CopyStreamExact(sourceStream, targetStream);
+            targetStream.SetLength(sourceStream.Length);
+            targetStream.Flush(true);
+
+            targetStream.Seek(0, SeekOrigin.Begin);
+            targetStream.WriteByte((byte)firstByte);
+            targetStream.Flush(true);
+        }
+
+        private static void StageStreamAndPublishCreateNew(
             Stream sourceStream,
             string destinationFullPath,
             string expectedCanonicalDirectory)
         {
-            string win32DestPath = ToWin32OpenPath(destinationFullPath);
+            string tempFullPath = destinationFullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            string win32TempPath = ToWin32OpenPath(tempFullPath);
 
-            SafeFileHandle destHandle = CreateFileW(
-                win32DestPath,
-                GenericWrite | FileReadAttributes,
+            SafeFileHandle tempHandle = CreateFileW(
+                win32TempPath,
+                GenericWrite | FileReadAttributes | DeleteAccess,
                 FileShareNone,
                 IntPtr.Zero,
                 CreateNew,
                 FileFlagOpenReparsePoint | FileFlagWriteThrough,
                 IntPtr.Zero);
 
-            if (destHandle == null || destHandle.IsInvalid)
+            if (tempHandle == null || tempHandle.IsInvalid)
             {
                 int error = Marshal.GetLastWin32Error();
-                destHandle?.Dispose();
+                tempHandle?.Dispose();
                 throw new IOException(
-                    "The destination authenticator file could not be created safely during rollback.",
+                    "The temporary authenticator file could not be created safely during rollback.",
                     error != 0 ? new Win32Exception(error) : null);
             }
 
-            bool handleOwnedByStream = false;
-            bool destVerified = false;
+            FileStream tempStream = null;
+            bool tempVerified = false;
+            bool published = false;
             try
             {
-                if (!GetFileInformationByHandle(destHandle, out ByHandleFileInformation destInfo))
+                if (!GetFileInformationByHandle(tempHandle, out ByHandleFileInformation tempInfo))
                 {
                     int error = Marshal.GetLastWin32Error();
                     throw new InvalidDataException(
-                        "The destination authenticator file attributes could not be verified.",
+                        "The temporary authenticator file attributes could not be verified during rollback.",
                         error != 0 ? new Win32Exception(error) : null);
                 }
 
-                if ((destInfo.FileAttributes & FileAttributeReparsePoint) != 0)
+                if ((tempInfo.FileAttributes & FileAttributeReparsePoint) != 0)
                     throw new InvalidDataException("A storage file uses an unsupported link.");
-                if ((destInfo.FileAttributes & FileAttributeDirectory) != 0)
+                if ((tempInfo.FileAttributes & FileAttributeDirectory) != 0)
                     throw new InvalidDataException("A storage file path points to a directory.");
 
-                VerifyOpenedFileWithinCanonicalDirectory(destHandle, Path.GetFileName(destinationFullPath), expectedCanonicalDirectory);
-                destVerified = true;
+                VerifyOpenedFileWithinCanonicalDirectory(tempHandle, Path.GetFileName(tempFullPath), expectedCanonicalDirectory);
+                tempVerified = true;
 
-                using (FileStream destStream = new FileStream(destHandle, FileAccess.Write, 81920, isAsync: false))
+                tempStream = new FileStream(tempHandle, FileAccess.Write, 81920, isAsync: false);
+                tempHandle = null;
+
+                CopyStreamExact(sourceStream, tempStream);
+                tempStream.Flush(true);
+
+                OnBeforePublishRestoredMissingTargetForTest?.Invoke(destinationFullPath);
+
+                string parentDirectory = Path.GetDirectoryName(destinationFullPath);
+                using (PinnedStorageDirectory pinnedDir = TryPinExistingDirectory(parentDirectory, out _))
                 {
-                    handleOwnedByStream = true;
-                    CopyStreamExact(sourceStream, destStream);
-                    destStream.Flush(true);
+                    if (pinnedDir == null ||
+                        !String.Equals(pinnedDir.CanonicalDirectoryPath, expectedCanonicalDirectory, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException("The account-data directory canonical path changed during rollback.");
+                    }
+
+                    pinnedDir.VerifyStillPinned();
+                    RenameHandleCreateNew(tempStream.SafeFileHandle, destinationFullPath);
+                    published = true;
                 }
             }
             catch
             {
-                if (!handleOwnedByStream)
-                    destHandle.Dispose();
-                if (destVerified)
+                if (tempVerified && !published)
                 {
                     try
                     {
-                        DeleteRegularFileWithinCanonicalDirectory(destinationFullPath, expectedCanonicalDirectory);
+                        SafeFileHandle handleToDelete = tempStream != null ? tempStream.SafeFileHandle : tempHandle;
+                        if (handleToDelete != null && !handleToDelete.IsInvalid && !handleToDelete.IsClosed)
+                        {
+                            FileDispositionInfo disposition = new FileDispositionInfo { DeleteFile = 1 };
+                            SetFileInformationByHandle(
+                                handleToDelete,
+                                FileDispositionInfoClass,
+                                ref disposition,
+                                (uint)Marshal.SizeOf<FileDispositionInfo>());
+                        }
                     }
                     catch
                     {
-                        // Best-effort cleanup of incomplete recreated file.
+                        // Best-effort handle-bound cleanup of unpublished rollback temp file.
                     }
                 }
                 throw;
+            }
+            finally
+            {
+                tempStream?.Dispose();
+                tempHandle?.Dispose();
             }
         }
 

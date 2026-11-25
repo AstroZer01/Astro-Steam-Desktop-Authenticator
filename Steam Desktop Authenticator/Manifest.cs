@@ -2049,7 +2049,8 @@ namespace Steam_Desktop_Authenticator
                     if (pinnedDir.TryVerifyStillPinned(out Exception postCommitPinError))
                     {
                         DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.", pinnedDir.CanonicalDirectoryPath);
-                        SweepOrphanedCredentialStoresLocked(maDir, this.CredentialsStoreFilename, pinnedDir.CanonicalDirectoryPath);
+                        if (!File.Exists(Path.Combine(maDir, StorageJournalFilename)))
+                            SweepOrphanedCredentialStoresLocked(maDir, this.CredentialsStoreFilename, pinnedDir.CanonicalDirectoryPath);
                     }
                     else
                     {

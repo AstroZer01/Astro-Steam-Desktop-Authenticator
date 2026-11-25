@@ -129,8 +129,9 @@ namespace Steam_Desktop_Authenticator
                     manifestPath,
                     retainedObsolete,
                     pinnedDir.CanonicalDirectoryPath,
-                    validatedRoot);
-                retainedCleanupJournalPresent = recovered && retainedObsolete.Count > 0 && File.Exists(journalPath);
+                    validatedRoot,
+                    allowLockedCompletedJournal: true);
+                retainedCleanupJournalPresent = recovered && File.Exists(journalPath);
                 return recovered;
             }
         }
@@ -790,7 +791,8 @@ namespace Steam_Desktop_Authenticator
             string manifestFilename,
             ICollection<string> retainedObsoleteFilenames = null,
             string expectedCanonicalDir = null,
-            string validatedRoot = null)
+            string validatedRoot = null,
+            bool allowLockedCompletedJournal = false)
         {
             string journalFilename = Path.Combine(maDir, StorageJournalFilename);
             lock (storageLock)
@@ -986,7 +988,9 @@ namespace Steam_Desktop_Authenticator
                         }
 
                         bool retainedJournalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.", canonicalDir);
-                        return retainedJournalDeleted && !File.Exists(journalFilename);
+                        if (retainedJournalDeleted && !File.Exists(journalFilename))
+                            return true;
+                        return allowLockedCompletedJournal;
                     }
 
                     Interlocked.Increment(ref storageMutationEpoch);
@@ -1126,29 +1130,10 @@ namespace Steam_Desktop_Authenticator
                     string journalText = StoragePathGuard.ReadTextWithLimit(journalFilename, MaximumManifestFileSizeBytes, canonicalDir);
                     StorageTransactionJournal journal = ParseStorageTransactionJournal(journalText);
 
-                    // A rebased journal must already be in retained-cleanup-only state (no live backups or replacements).
-                    if (!String.IsNullOrWhiteSpace(journal.BackupFilename) ||
-                        (journal.ReplacedFiles != null && journal.ReplacedFiles.Count > 0) ||
-                        (journal.CreatedFilenames != null && journal.CreatedFilenames.Count > 0) ||
-                        (journal.ObsoleteFilenames != null && journal.ObsoleteFilenames.Count > 0))
-                    {
-                        throw new InvalidDataException("The retained storage journal is not in a rebaseable cleanup-only state.");
-                    }
-
                     List<string> validatedExpected = (expectedRetainedObsoleteFilenames ?? Enumerable.Empty<string>())
                         .Where(filename => !String.IsNullOrWhiteSpace(filename))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList();
-                    HashSet<string> expectedSet = new HashSet<string>(validatedExpected, StringComparer.OrdinalIgnoreCase);
-
-                    // Carry forward only the cleanup list already validated by recovery; reject any
-                    // unexpected filenames injected into the journal before rebase.
-                    foreach (string journalEntry in journal.RetainedObsoleteFilenames ?? Enumerable.Empty<string>())
-                    {
-                        if (String.IsNullOrWhiteSpace(journalEntry) || !expectedSet.Contains(journalEntry))
-                            throw new InvalidDataException("The retained storage journal changed unexpectedly before rebase.");
-                    }
-
                     foreach (string filename in validatedExpected)
                         ValidateStorageFilename(filename);
 
@@ -1162,6 +1147,58 @@ namespace Steam_Desktop_Authenticator
                     List<string> pendingRetainedObsolete = validatedExpected
                         .Where(filename => Path.Exists(Path.Combine(maDir, filename)))
                         .ToList();
+
+                    HashSet<string> expectedSet = new HashSet<string>(validatedExpected, StringComparer.OrdinalIgnoreCase);
+
+                    // A rebased journal must still be in retained-cleanup-only state with no injected entries.
+                    bool hasUnexpectedState =
+                        !String.IsNullOrWhiteSpace(journal.BackupFilename) ||
+                        (journal.ReplacedFiles != null && journal.ReplacedFiles.Count > 0) ||
+                        (journal.CreatedFilenames != null && journal.CreatedFilenames.Count > 0) ||
+                        (journal.ObsoleteFilenames != null && journal.ObsoleteFilenames.Count > 0);
+                    bool hasUnexpectedRetainedEntry = (journal.RetainedObsoleteFilenames ?? Enumerable.Empty<string>())
+                        .Any(journalEntry => String.IsNullOrWhiteSpace(journalEntry) || !expectedSet.Contains(journalEntry));
+
+                    if (hasUnexpectedState || hasUnexpectedRetainedEntry)
+                    {
+                        // Scrub any rejected/injected entries from the on-disk journal before failing
+                        // so a subsequent startup recovery cannot delete an unvalidated filename.
+                        try
+                        {
+                            if (pendingRetainedObsolete.Count == 0)
+                            {
+                                DeleteFileBestEffort(
+                                    journalFilename,
+                                    "The tampered storage journal could not be removed while rejecting settings rebase.",
+                                    canonicalDir);
+                            }
+                            else
+                            {
+                                StorageTransactionJournal sanitizedJournal = new StorageTransactionJournal
+                                {
+                                    JournalVersion = CurrentStorageJournalVersion,
+                                    ManifestHash = GetContentHash(manifestContents),
+                                    PreviousManifestHash = null,
+                                    CreatedFilenames = new List<string>(),
+                                    CreatedFileHashes = null,
+                                    CreatedFileIdentities = null,
+                                    ReplacedFiles = null,
+                                    ObsoleteFilenames = new List<string>(),
+                                    RetainedObsoleteFilenames = pendingRetainedObsolete,
+                                    BackupFilename = null
+                                };
+                                WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(sanitizedJournal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
+                            }
+                        }
+                        catch
+                        {
+                            // Still fail closed below even if best-effort sanitization fails.
+                        }
+
+                        throw new InvalidDataException(hasUnexpectedState
+                            ? "The retained storage journal is not in a rebaseable cleanup-only state."
+                            : "The retained storage journal changed unexpectedly before rebase.");
+                    }
 
                     if (pendingRetainedObsolete.Count == 0)
                     {
@@ -1335,10 +1372,7 @@ namespace Steam_Desktop_Authenticator
                     stream.CopyTo(ms);
                     string text = new UTF8Encoding(false, true).GetString(ms.ToArray());
                     if (encrypted)
-                    {
-                        byte[] ciphertext = Convert.FromBase64String(text);
-                        return ciphertext.Length > 0 && ciphertext.Length % 16 == 0;
-                    }
+                        return FileEncryptor.IsValidCiphertext(text);
 
                     SteamAuth.SteamGuardAccount parsed = DeserializeAccountJson(text, storageJsonSettings);
                     return parsed?.Session != null && parsed.Session.SteamID != 0 && parsed.Session.SteamID == entry.SteamID;
@@ -1653,6 +1687,10 @@ namespace Steam_Desktop_Authenticator
         private static void SweepOrphanedCredentialStoresLocked(string maDir, string activeCredentialsFilename, string expectedCanonicalDir = null)
         {
             if (String.IsNullOrWhiteSpace(maDir) || !Directory.Exists(maDir))
+                return;
+
+            // Never sweep credential stores while a storage transaction journal exists on disk.
+            if (File.Exists(Path.Combine(maDir, StorageJournalFilename)))
                 return;
 
             try
