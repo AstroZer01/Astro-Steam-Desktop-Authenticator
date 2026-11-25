@@ -197,47 +197,7 @@ namespace SteamAuth
                     CTwoFactor_Status_Response.Parser,
                     cancellationToken: cancellationToken);
 
-                if (response == null)
-                    return AuthenticatorActivationStatus.Unverified;
-
-                if (response.Result != 1)
-                {
-                    SteamSessionFailureKind failureKind = SteamSessionFailureClassifier.ClassifyResult(
-                        response.Result,
-                        expiredResultInvalidatesSession: true);
-                    return failureKind == SteamSessionFailureKind.InvalidSession
-                        ? AuthenticatorActivationStatus.SessionInvalid
-                        : AuthenticatorActivationStatus.Unverified;
-                }
-
-                if (response.Body == null || !response.Body.HasState)
-                    return AuthenticatorActivationStatus.Unverified;
-
-                if (response.Body.State == 0)
-                    return AuthenticatorActivationStatus.NotActive;
-
-                bool hasLocalTokenGid = !String.IsNullOrWhiteSpace(TokenGID);
-                bool hasRemoteTokenGid = !String.IsNullOrWhiteSpace(response.Body.TokenGid);
-                if (hasLocalTokenGid && hasRemoteTokenGid &&
-                    !String.Equals(TokenGID.Trim(), response.Body.TokenGid.Trim(), StringComparison.OrdinalIgnoreCase))
-                {
-                    return AuthenticatorActivationStatus.ActiveForDifferentAuthenticator;
-                }
-
-                bool hasLocalDeviceId = !String.IsNullOrWhiteSpace(DeviceID);
-                bool hasRemoteDeviceId = !String.IsNullOrWhiteSpace(response.Body.DeviceIdentifier);
-                if (hasLocalDeviceId && hasRemoteDeviceId &&
-                    !String.Equals(DeviceID.Trim(), response.Body.DeviceIdentifier.Trim(), StringComparison.OrdinalIgnoreCase))
-                {
-                    return AuthenticatorActivationStatus.ActiveForDifferentAuthenticator;
-                }
-
-                bool corroboratedByTokenGid = hasLocalTokenGid && hasRemoteTokenGid;
-                bool corroboratedByDeviceId = hasLocalDeviceId && hasRemoteDeviceId;
-                if (!corroboratedByTokenGid && !corroboratedByDeviceId)
-                    return AuthenticatorActivationStatus.Unverified;
-
-                return AuthenticatorActivationStatus.ActiveForThisRecord;
+                return EvaluateActivationStatusResponse(this, response);
             }
             catch (OperationCanceledException)
             {
@@ -252,6 +212,56 @@ namespace SteamAuth
                 SteamAuthDiagnostics.Log(ex, "Steam authenticator activation status check failed.");
                 return AuthenticatorActivationStatus.Unverified;
             }
+        }
+
+        internal static AuthenticatorActivationStatus EvaluateActivationStatusResponse(
+            SteamGuardAccount account,
+            SteamProtocolResponse<CTwoFactor_Status_Response> response)
+        {
+            if (account == null || response == null)
+                return AuthenticatorActivationStatus.Unverified;
+
+            if (response.Result != 1)
+            {
+                SteamSessionFailureKind failureKind = SteamSessionFailureClassifier.ClassifyResult(
+                    response.Result,
+                    expiredResultInvalidatesSession: true);
+                return failureKind == SteamSessionFailureKind.InvalidSession
+                    ? AuthenticatorActivationStatus.SessionInvalid
+                    : AuthenticatorActivationStatus.Unverified;
+            }
+
+            if (response.Body == null || !response.Body.HasState)
+                return AuthenticatorActivationStatus.Unverified;
+
+            if (response.Body.State == 0)
+                return AuthenticatorActivationStatus.NotActive;
+
+            if (response.Body.State != 1)
+                return AuthenticatorActivationStatus.Unverified;
+
+            bool hasLocalTokenGid = !String.IsNullOrWhiteSpace(account.TokenGID);
+            bool hasRemoteTokenGid = !String.IsNullOrWhiteSpace(response.Body.TokenGid);
+            if (hasLocalTokenGid && hasRemoteTokenGid &&
+                !String.Equals(account.TokenGID.Trim(), response.Body.TokenGid.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return AuthenticatorActivationStatus.ActiveForDifferentAuthenticator;
+            }
+
+            bool hasLocalDeviceId = !String.IsNullOrWhiteSpace(account.DeviceID);
+            bool hasRemoteDeviceId = !String.IsNullOrWhiteSpace(response.Body.DeviceIdentifier);
+            if (hasLocalDeviceId && hasRemoteDeviceId &&
+                !String.Equals(account.DeviceID.Trim(), response.Body.DeviceIdentifier.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return AuthenticatorActivationStatus.ActiveForDifferentAuthenticator;
+            }
+
+            bool corroboratedByTokenGid = hasLocalTokenGid && hasRemoteTokenGid;
+            bool corroboratedByDeviceId = hasLocalDeviceId && hasRemoteDeviceId;
+            if (!corroboratedByTokenGid && !corroboratedByDeviceId)
+                return AuthenticatorActivationStatus.Unverified;
+
+            return AuthenticatorActivationStatus.ActiveForThisRecord;
         }
 
         public string GenerateSteamGuardCode()
@@ -410,10 +420,15 @@ namespace SteamAuth
             return (long)conf.Creator;
         }
 
-        public async Task<bool> AcceptMultipleConfirmations(Confirmation[] confs, CancellationToken cancellationToken = default)
+        public Task<bool> AcceptMultipleConfirmations(Confirmation[] confs, CancellationToken cancellationToken = default)
+        {
+            return AcceptMultipleConfirmations(confs, null, cancellationToken);
+        }
+
+        public async Task<bool> AcceptMultipleConfirmations(Confirmation[] confs, Func<bool> beforeSendCheck, CancellationToken cancellationToken)
         {
             ValidateConfirmations(confs);
-            return await _sendMultiConfirmationAjax(confs, "allow", cancellationToken);
+            return await _sendMultiConfirmationAjax(confs, "allow", cancellationToken, beforeSendCheck);
         }
 
         public async Task<bool> DenyMultipleConfirmations(Confirmation[] confs, CancellationToken cancellationToken = default)
@@ -460,7 +475,7 @@ namespace SteamAuth
             }
         }
 
-        private async Task<bool> _sendMultiConfirmationAjax(Confirmation[] confs, string op, CancellationToken cancellationToken)
+        private async Task<bool> _sendMultiConfirmationAjax(Confirmation[] confs, string op, CancellationToken cancellationToken, Func<bool> beforeSendCheck = null)
         {
             string url = APIEndpoints.COMMUNITY_BASE + "/mobileconf/multiajaxop";
             // tag is different from op now
@@ -472,6 +487,9 @@ namespace SteamAuth
                 body.Add("cid[]", conf.ID.ToString());
                 body.Add("ck[]", conf.Key.ToString());
             }
+
+            if (beforeSendCheck != null && !beforeSendCheck())
+                return false;
 
             SteamWebResponse steamResponse = await SteamWeb.POSTRequestWithHeaders(
                 url,

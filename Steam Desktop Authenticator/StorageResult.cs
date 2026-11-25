@@ -19,27 +19,37 @@ namespace Steam_Desktop_Authenticator
     /// </summary>
     public sealed class StorageResult
     {
-        private StorageResult(bool succeeded, StorageFailureKind failureKind, string userMessage, Exception exception)
+        private StorageResult(
+            bool succeeded,
+            StorageFailureKind failureKind,
+            string userMessage,
+            Exception exception,
+            bool obsoleteCleanupPending,
+            long? committedStorageRevision = null)
         {
             Succeeded = succeeded;
             FailureKind = failureKind;
             UserMessage = userMessage;
             Exception = exception;
+            ObsoleteCleanupPending = obsoleteCleanupPending;
+            CommittedStorageRevision = committedStorageRevision;
         }
 
         public bool Succeeded { get; }
         public StorageFailureKind FailureKind { get; }
         public string UserMessage { get; }
+        public bool ObsoleteCleanupPending { get; }
+        public long? CommittedStorageRevision { get; }
         internal Exception Exception { get; }
 
-        public static StorageResult Success()
+        public static StorageResult Success(bool obsoleteCleanupPending = false, long? committedStorageRevision = null)
         {
-            return new StorageResult(true, StorageFailureKind.None, null, null);
+            return new StorageResult(true, StorageFailureKind.None, null, null, obsoleteCleanupPending, committedStorageRevision);
         }
 
         public static StorageResult Failure(StorageFailureKind failureKind, string userMessage, Exception exception = null)
         {
-            return new StorageResult(false, failureKind, userMessage, exception);
+            return new StorageResult(false, failureKind, userMessage, exception, false);
         }
     }
 }

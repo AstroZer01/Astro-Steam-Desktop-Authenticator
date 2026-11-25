@@ -253,7 +253,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             FakeTransport transport = new FakeTransport(
                 AwaitingFinalization(),
                 Response(1, new CTwoFactor_FinalizeAddAuthenticator_Response { Success = true, WantMore = false }),
-                Response(1, new CTwoFactor_Status_Response { State = 1 }));
+                Response(1, new CTwoFactor_Status_Response { State = 1, TokenGid = "gid-test-1" }));
             AuthenticatorLinker linker = CreateLinker(transport);
             await linker.AddAuthenticator();
 
@@ -282,7 +282,25 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public async Task FinalizeAddAuthenticator_PersistsAnAcceptedFinalizationWhenStatusCannotBeVerified()
+        public async Task FinalizeAddAuthenticator_RejectsContradictoryAuthenticatorIdentity()
+        {
+            FakeTransport transport = new FakeTransport(
+                AwaitingFinalization(),
+                Response(1, new CTwoFactor_FinalizeAddAuthenticator_Response { Success = true, WantMore = false }),
+                Response(1, new CTwoFactor_Status_Response { State = 1, TokenGid = "gid-other-999" }));
+            AuthenticatorLinker linker = CreateLinker(transport);
+            await linker.AddAuthenticator();
+
+            AuthenticatorLinker.FinalizeResult result = await linker.FinalizeAddAuthenticator("email-code");
+
+            Assert.Equal(AuthenticatorLinker.FinalizeResult.NotFinalized, result);
+            Assert.False(linker.Finalized);
+            Assert.False(linker.LinkedAccount.FullyEnrolled);
+            Assert.Contains("different authenticator", linker.LastErrorMessage);
+        }
+
+        [Fact]
+        public async Task FinalizeAddAuthenticator_KeepsRecordPendingWhenStatusCannotBeVerified()
         {
             FakeTransport transport = new FakeTransport(
                 AwaitingFinalization(),
@@ -292,8 +310,23 @@ namespace SteamAuth.PhoneEnrollment.Tests
             await linker.AddAuthenticator();
 
             Assert.Equal(AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified, await linker.FinalizeAddAuthenticator("email-code"));
-            Assert.True(linker.Finalized);
-            Assert.True(linker.LinkedAccount.FullyEnrolled);
+            Assert.False(linker.Finalized);
+            Assert.False(linker.LinkedAccount.FullyEnrolled);
+        }
+
+        [Fact]
+        public async Task FinalizeAddAuthenticator_KeepsRecordPendingWhenStatusLacksCorroboratingIdentity()
+        {
+            FakeTransport transport = new FakeTransport(
+                AwaitingFinalization(),
+                Response(1, new CTwoFactor_FinalizeAddAuthenticator_Response { Success = true, WantMore = false }),
+                Response(1, new CTwoFactor_Status_Response { State = 1 }));
+            AuthenticatorLinker linker = CreateLinker(transport);
+            await linker.AddAuthenticator();
+
+            Assert.Equal(AuthenticatorLinker.FinalizeResult.FinalizedStatusUnverified, await linker.FinalizeAddAuthenticator("email-code"));
+            Assert.False(linker.Finalized);
+            Assert.False(linker.LinkedAccount.FullyEnrolled);
         }
 
         [Fact]
@@ -314,7 +347,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 AwaitingFinalization(),
                 Response(1, new CTwoFactor_FinalizeAddAuthenticator_Response { WantMore = true, ServerTime = 1700000030 }),
                 Response(1, new CTwoFactor_FinalizeAddAuthenticator_Response { Success = true }),
-                Response(1, new CTwoFactor_Status_Response { State = 1 }));
+                Response(1, new CTwoFactor_Status_Response { State = 1, TokenGid = "gid-test-1" }));
             List<TimeSpan> retryDelays = new List<TimeSpan>();
             AuthenticatorLinker linker = new AuthenticatorLinker(
                 new SessionData { SteamID = 76561198000000000, AccessToken = "test-access-token" },
@@ -609,6 +642,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
                 SharedSecret = ByteString.CopyFrom(new byte[20]),
                 IdentitySecret = ByteString.CopyFrom(new byte[20]),
                 RevocationCode = "R12345",
+                TokenGid = "gid-test-1",
                 ConfirmType = confirmType
             });
         }

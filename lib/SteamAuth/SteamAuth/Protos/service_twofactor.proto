@@ -93,3 +93,37 @@ message CTwoFactor_RemoveAuthenticator_Response {
   optional uint64 server_time = 3;
   optional uint32 revocation_attempts_remaining = 5;
 }
+
+message CTwoFactor_RemoveAuthenticatorViaChallengeStart_Request {
+}
+
+message CTwoFactor_RemoveAuthenticatorViaChallengeStart_Response {
+  optional bool success = 1;
+}
+
+message CTwoFactor_RemoveAuthenticatorViaChallengeContinue_Request {
+  optional string sms_code = 1;
+  optional bool generate_new_token = 2;
+  optional uint32 version = 3 [default = 1];
+  optional uint32 caller_version = 4;
+}
+
+message CRemoveAuthenticatorViaChallengeContinue_Replacement_Token {
+  optional bytes shared_secret = 1;
+  optional fixed64 serial_number = 2;
+  optional string revocation_code = 3;
+  optional string uri = 4;
+  optional uint64 server_time = 5;
+  optional string account_name = 6;
+  optional string token_gid = 7;
+  optional bytes identity_secret = 8;
+  optional bytes secret_1 = 9;
+  optional int32 status = 10;
+  optional uint32 steamguard_scheme = 11;
+  optional fixed64 steamid = 12;
+}
+
+message CTwoFactor_RemoveAuthenticatorViaChallengeContinue_Response {
+  optional bool success = 1;
+  optional CRemoveAuthenticatorViaChallengeContinue_Replacement_Token replacement_token = 2;
+}

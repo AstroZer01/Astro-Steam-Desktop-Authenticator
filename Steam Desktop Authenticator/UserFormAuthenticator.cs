@@ -12,23 +12,89 @@ namespace Steam_Desktop_Authenticator
         private SteamGuardAccount account;
         private readonly Form owner;
         private readonly CancellationToken cancellationToken;
+        private readonly bool allowInteractiveDeviceAuth;
         private int deviceCodesGenerated = 0;
 
-        public UserFormAuthenticator(SteamGuardAccount account, Form owner, CancellationToken cancellationToken = default)
+        public UserFormAuthenticator(
+            SteamGuardAccount account,
+            Form owner,
+            CancellationToken cancellationToken = default,
+            bool allowInteractiveDeviceAuth = false)
         {
             this.account = account;
             this.owner = owner;
             this.cancellationToken = cancellationToken;
+            this.allowInteractiveDeviceAuth = allowInteractiveDeviceAuth;
         }
 
         public Task<bool> AcceptDeviceConfirmationAsync()
         {
-            return Task.FromResult(false);
+            if (!allowInteractiveDeviceAuth || account != null)
+                return Task.FromResult(false);
+
+            if (cancellationToken.IsCancellationRequested)
+                return Task.FromCanceled<bool>(cancellationToken);
+
+            return RunOnUiThreadAsync(() =>
+            {
+                DialogResult choice = AstroMessageBox.ShowWithCustomButtons(
+                    "Steam requires confirmation from your existing Steam Mobile Authenticator to start the transfer.\n\nChoose 'Approve on Mobile' to confirm the prompt on your current device, or 'Enter 5-Char Code' to type a Steam Guard code.",
+                    "Authenticator Transfer Login",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Information,
+                    "Approve on Mobile",
+                    "Enter 5-Char Code",
+                    "Cancel");
+
+                if (choice == DialogResult.Cancel)
+                    throw new OperationCanceledException(cancellationToken);
+
+                return choice == DialogResult.Yes;
+            });
         }
 
         public async Task<string> GetDeviceCodeAsync(bool previousCodeWasIncorrect)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (account == null && allowInteractiveDeviceAuth)
+            {
+                return await RunOnUiThreadAsync(() =>
+                {
+                    string prompt = previousCodeWasIncorrect
+                        ? "That Steam Guard code was not accepted. Enter the current 5-character code from your existing authenticator:"
+                        : "Enter the 5-character Steam Guard code from your existing authenticator:";
+                    using (InputForm codeForm = new InputForm(prompt))
+                    {
+                        using (CancellationTokenRegistration cancellationRegistration = cancellationToken.Register(() =>
+                        {
+                            try
+                            {
+                                if (!owner.IsDisposed && owner.IsHandleCreated)
+                                {
+                                    owner.BeginInvoke((MethodInvoker)delegate
+                                    {
+                                        if (!codeForm.IsDisposed && codeForm.Visible)
+                                            codeForm.Close();
+                                    });
+                                }
+                            }
+                            catch (InvalidOperationException)
+                            {
+                            }
+                        }))
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            codeForm.ShowInputDialog(owner);
+                        }
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (codeForm.Canceled || !codeForm.UiReady || codeForm.LoadFailed)
+                            throw new OperationCanceledException(cancellationToken);
+                        return (codeForm.txtBox.Text ?? String.Empty).Trim().ToUpperInvariant();
+                    }
+                });
+            }
+
             // If a code fails wait 30 seconds for a new one to regenerate
             if (previousCodeWasIncorrect)
             {
@@ -51,7 +117,7 @@ namespace Steam_Desktop_Authenticator
             {
                 await RunOnUiThreadAsync(() =>
                 {
-                    AstroMessageBox.Show("This account already has an authenticator linked. You must remove that authenticator to add SDA as your authenticator.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    AstroMessageBox.Show("This account already has an authenticator linked. Use 'Transfer Authenticator' to move it via SMS, or remove the existing authenticator first.", "Steam Login", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return true;
                 });
                 throw new AuthenticatorAlreadyLinkedException();

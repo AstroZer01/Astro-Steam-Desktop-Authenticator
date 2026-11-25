@@ -38,5 +38,62 @@ namespace Steam_Desktop_Authenticator
                 accountLock.Release();
             }
         }
+
+        public async Task<(bool Acquired, T Result)> TryRunNowAsync<T>(
+            ulong steamId,
+            Func<Task<T>> operation,
+            Action<Exception> onFailure,
+            CancellationToken cancellationToken = default)
+        {
+            if (operation == null)
+                throw new ArgumentNullException(nameof(operation));
+
+            SemaphoreSlim accountLock = accountLocks.GetOrAdd(steamId, _ => new SemaphoreSlim(1, 1));
+            if (!await accountLock.WaitAsync(0, cancellationToken))
+                return (false, default);
+
+            try
+            {
+                if (onFailure == null)
+                    return (true, await operation());
+
+                try
+                {
+                    return (true, await operation());
+                }
+                catch (Exception exception)
+                {
+                    onFailure(exception);
+                    throw;
+                }
+            }
+            finally
+            {
+                accountLock.Release();
+            }
+        }
+
+        public async Task<IDisposable> AcquireExclusiveLockAsync(ulong steamId, CancellationToken cancellationToken = default)
+        {
+            SemaphoreSlim accountLock = accountLocks.GetOrAdd(steamId, _ => new SemaphoreSlim(1, 1));
+            await accountLock.WaitAsync(cancellationToken);
+            return new ReleaseHandle(accountLock);
+        }
+
+        private sealed class ReleaseHandle : IDisposable
+        {
+            private SemaphoreSlim semaphore;
+
+            public ReleaseHandle(SemaphoreSlim semaphore)
+            {
+                this.semaphore = semaphore;
+            }
+
+            public void Dispose()
+            {
+                SemaphoreSlim toRelease = Interlocked.Exchange(ref semaphore, null);
+                toRelease?.Release();
+            }
+        }
     }
 }
