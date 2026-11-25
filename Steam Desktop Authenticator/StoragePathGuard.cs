@@ -37,6 +37,7 @@ namespace Steam_Desktop_Authenticator
         private const int FileDispositionInfoClass = 4;
         private const int ErrorFileNotFound = 2;
         private const int ErrorPathNotFound = 3;
+        private const int ErrorAlreadyExists = 183;
         private const int Win32LongPathThreshold = 248;
         private const byte InPlaceOverwriteSentinelByte = 0xFF;
         internal const string RestoredTargetTempPrefix = ".mafile-restore.";
@@ -1473,6 +1474,76 @@ namespace Steam_Desktop_Authenticator
             {
                 if (!handleOwnedByStream)
                     destHandle.Dispose();
+            }
+        }
+
+        internal static void CreateExclusiveMarkerFileIfMissing(
+            string markerPath,
+            string expectedCanonicalDirectory,
+            string contents)
+        {
+            if (String.IsNullOrWhiteSpace(expectedCanonicalDirectory))
+                throw new InvalidDataException("The account-data directory canonical path could not be verified.");
+            if (String.IsNullOrWhiteSpace(markerPath))
+                throw new InvalidDataException("The storage marker file path is invalid.");
+
+            string fullPath = Path.GetFullPath(markerPath);
+            string win32Path = ToWin32OpenPath(fullPath);
+
+            // Publish the quarantine marker directly with a single CREATE_NEW call so there is
+            // no temporary-file rename window between creation and visibility on disk.
+            SafeFileHandle handle = CreateFileW(
+                win32Path,
+                GenericWrite | FileReadAttributes,
+                FileShareNone,
+                IntPtr.Zero,
+                CreateNew,
+                FileFlagOpenReparsePoint | FileFlagWriteThrough,
+                IntPtr.Zero);
+
+            if (handle == null || handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                handle?.Dispose();
+                if (error == ErrorAlreadyExists)
+                    return;
+
+                throw new IOException(
+                    "The storage quarantine marker file could not be created.",
+                    error != 0 ? new Win32Exception(error) : null);
+            }
+
+            bool handleOwnedByStream = false;
+            try
+            {
+                if (!GetFileInformationByHandle(handle, out ByHandleFileInformation info))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    throw new InvalidDataException(
+                        "The storage quarantine marker file attributes could not be verified.",
+                        error != 0 ? new Win32Exception(error) : null);
+                }
+
+                if ((info.FileAttributes & FileAttributeReparsePoint) != 0)
+                    throw new InvalidDataException("A storage marker file uses an unsupported link.");
+                if ((info.FileAttributes & FileAttributeDirectory) != 0)
+                    throw new InvalidDataException("A storage marker file path points to a directory.");
+
+                VerifyOpenedFileWithinCanonicalDirectory(handle, Path.GetFileName(fullPath), expectedCanonicalDirectory);
+
+                using (FileStream stream = new FileStream(handle, FileAccess.Write, 4096, isAsync: false))
+                {
+                    handleOwnedByStream = true;
+                    byte[] bytes = new UTF8Encoding(false).GetBytes(contents ?? String.Empty);
+                    if (bytes.Length > 0)
+                        stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
+            }
+            finally
+            {
+                if (!handleOwnedByStream)
+                    handle.Dispose();
             }
         }
 

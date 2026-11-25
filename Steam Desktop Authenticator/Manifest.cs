@@ -212,10 +212,16 @@ namespace Steam_Desktop_Authenticator
                 // If there's no manifest, throw exception
                 if (!File.Exists(manifestFile))
                 {
-                    // A failed first save can leave an empty data directory after recovery.
-                    // Treat it like a clean install rather than permanently rejecting it.
+                    // A failed first save can leave an empty data directory (or orphaned pre-journal
+                    // staging temp files) after recovery. Sweep any orphaned staging files and treat
+                    // it like a clean install rather than permanently rejecting it.
                     if (!Directory.EnumerateFiles(maDir, "*.maFile").Any())
                     {
+                        lock (storageLock)
+                        {
+                            if (!HasPendingOrQuarantinedStorageJournal(maDir))
+                                SweepOrphanedAccountBackupsLocked(maDir, expectedCanonicalDir);
+                        }
                         _manifest = GenerateNewManifest(false);
                         return _manifest;
                     }
@@ -694,7 +700,9 @@ namespace Steam_Desktop_Authenticator
 
                 lock (storageLock)
                 {
-                    bool unexpectedNewJournal = !retainedCleanupJournalPresent && HasPendingOrQuarantinedStorageJournal(maDir);
+                    bool unexpectedNewJournal =
+                        Path.Exists(Path.Combine(maDir, StorageJournalQuarantineFilename)) ||
+                        (!retainedCleanupJournalPresent && File.Exists(Path.Combine(maDir, StorageJournalFilename)));
                     if (this.storageRevision == revisionBefore &&
                         Interlocked.Read(ref storageMutationEpoch) == mutationEpochBefore &&
                         !unexpectedNewJournal)
@@ -1548,7 +1556,9 @@ namespace Steam_Desktop_Authenticator
                         if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
                             return true;
 
-                        bool unexpectedNewJournal = !retainedCleanupJournalPresent && HasPendingOrQuarantinedStorageJournal(maDir);
+                        bool unexpectedNewJournal =
+                            Path.Exists(Path.Combine(maDir, StorageJournalQuarantineFilename)) ||
+                            (!retainedCleanupJournalPresent && File.Exists(Path.Combine(maDir, StorageJournalFilename)));
                         if (this.storageRevision != revisionBefore ||
                             Interlocked.Read(ref storageMutationEpoch) != mutationEpochBefore ||
                             unexpectedNewJournal)
@@ -2027,22 +2037,38 @@ namespace Steam_Desktop_Authenticator
                     }
 
                     pinnedDir.VerifyStillPinned();
-                    string backupFilename = Path.Combine(maDir, SettingsBackupFilename);
-                    WriteAllTextAtomically(manifestFilename, contents, backupFilename, pinnedDir.CanonicalDirectoryPath);
                     if (retainedObsoleteFilenames.Count > 0)
                     {
+                        string previousManifestHash = File.Exists(manifestFilename)
+                            ? GetContentHash(StoragePathGuard.ReadTextWithLimit(manifestFilename, MaximumManifestFileSizeBytes, pinnedDir.CanonicalDirectoryPath))
+                            : null;
                         OnBeforeRebaseRetainedStorageTransactionForTest?.Invoke();
-                        if (!RebaseRetainedStorageTransaction(maDir, contents, retainedObsoleteFilenames, pinnedDir.CanonicalDirectoryPath, pinnedDir.ValidatedRoot) ||
-                            !RecoverPendingStorageTransaction(
-                                maDir,
-                                manifestFilename,
-                                expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath,
-                                validatedRoot: pinnedDir.ValidatedRoot))
+                        if (!RebaseRetainedStorageTransaction(
+                            maDir,
+                            contents,
+                            previousManifestHash,
+                            retainedObsoleteFilenames,
+                            pinnedDir.CanonicalDirectoryPath,
+                            pinnedDir.ValidatedRoot))
                         {
                             return StorageResult.Failure(
                                 StorageFailureKind.Io,
-                                "The settings were saved, but a previous account-data cleanup could not be completed safely. Restart the application and try again.");
+                                "A previous account-data cleanup could not be verified safely. No settings were changed.");
                         }
+                    }
+
+                    string backupFilename = Path.Combine(maDir, SettingsBackupFilename);
+                    WriteAllTextAtomically(manifestFilename, contents, backupFilename, pinnedDir.CanonicalDirectoryPath);
+                    if (retainedObsoleteFilenames.Count > 0 &&
+                        !RecoverPendingStorageTransaction(
+                            maDir,
+                            manifestFilename,
+                            expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath,
+                            validatedRoot: pinnedDir.ValidatedRoot))
+                    {
+                        return StorageResult.Failure(
+                            StorageFailureKind.Io,
+                            "The settings were saved, but a previous account-data cleanup could not be completed safely. Restart the application and try again.");
                     }
                     if (pinnedDir.TryVerifyStillPinned(out Exception postCommitPinError))
                     {

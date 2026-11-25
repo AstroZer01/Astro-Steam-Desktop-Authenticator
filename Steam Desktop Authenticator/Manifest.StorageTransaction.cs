@@ -197,7 +197,7 @@ namespace Steam_Desktop_Authenticator
                     // before replacing it so its obsolete files remain recoverable.
                     List<string> retainedObsoleteFilenames = new List<string>();
                     if (pinnedDir != null &&
-                        File.Exists(journalFilename) &&
+                        HasPendingOrQuarantinedStorageJournal(maDir) &&
                         !RecoverPendingStorageTransaction(
                             maDir,
                             manifestFilename,
@@ -702,7 +702,8 @@ namespace Steam_Desktop_Authenticator
             string manifestFilename,
             string journalFilename,
             IReadOnlyList<string> retainedObsoleteFilenames,
-            string expectedCanonicalDir)
+            string expectedCanonicalDir,
+            bool allowLockedJournal = false)
         {
             try
             {
@@ -721,7 +722,17 @@ namespace Steam_Desktop_Authenticator
                     RetainedObsoleteFilenames = retainedObsoleteFilenames.ToList(),
                     BackupFilename = null
                 };
-                WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
+                try
+                {
+                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(retainedJournal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
+                }
+                catch (Exception ex) when (allowLockedJournal && (ex is IOException || ex is UnauthorizedAccessException))
+                {
+                    DiagnosticErrorLogger.Log(
+                        "Authenticator storage",
+                        ex,
+                        "The retained cleanup journal could not be rewritten during read recovery because it is currently in use.");
+                }
                 return true;
             }
             catch (Exception ex)
@@ -996,7 +1007,7 @@ namespace Steam_Desktop_Authenticator
                                     {
                                         WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
                                     }
-                                    catch (Exception ex) when (allowLockedCompletedJournal)
+                                    catch (Exception ex) when (allowLockedCompletedJournal && (ex is IOException || ex is UnauthorizedAccessException))
                                     {
                                         DiagnosticErrorLogger.Log(
                                             "Authenticator storage",
@@ -1065,7 +1076,7 @@ namespace Steam_Desktop_Authenticator
                                     {
                                         WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
                                     }
-                                    catch (Exception ex) when (allowLockedCompletedJournal)
+                                    catch (Exception ex) when (allowLockedCompletedJournal && (ex is IOException || ex is UnauthorizedAccessException))
                                     {
                                         DiagnosticErrorLogger.Log(
                                             "Authenticator storage",
@@ -1113,6 +1124,12 @@ namespace Steam_Desktop_Authenticator
                         if (!uncommittedBackupDeleted)
                             return false;
 
+                        bool isCleanupOnlyUncommittedJournal =
+                            replaced.Count == 0 &&
+                            created.Count == 0 &&
+                            backupFilename == null &&
+                            retainedObsolete.Count > 0;
+
                         if (retainedObsolete.Count > 0 &&
                             !DeleteFilesBestEffort(maDir, retainedObsolete, "A retained obsolete authenticator file could not be removed during storage recovery.", canonicalDir))
                         {
@@ -1121,8 +1138,15 @@ namespace Steam_Desktop_Authenticator
                                 .ToList();
                             if (remainingRetainedObsolete.Count > 0)
                             {
-                                if (!PreserveRetainedObsoleteJournal(manifestFilename, journalFilename, remainingRetainedObsolete, canonicalDir))
+                                if (!PreserveRetainedObsoleteJournal(
+                                    manifestFilename,
+                                    journalFilename,
+                                    remainingRetainedObsolete,
+                                    canonicalDir,
+                                    allowLockedJournal: allowLockedCompletedJournal && isCleanupOnlyUncommittedJournal))
+                                {
                                     return false;
+                                }
                                 if (retainedObsoleteFilenames != null)
                                 {
                                     foreach (string filename in remainingRetainedObsolete)
@@ -1133,7 +1157,9 @@ namespace Steam_Desktop_Authenticator
                         }
 
                         bool journalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.", canonicalDir);
-                        return journalDeleted && !File.Exists(journalFilename);
+                        if (journalDeleted && !File.Exists(journalFilename))
+                            return true;
+                        return allowLockedCompletedJournal && isCleanupOnlyUncommittedJournal;
                     }
                     finally
                     {
@@ -1151,6 +1177,7 @@ namespace Steam_Desktop_Authenticator
         private static bool RebaseRetainedStorageTransaction(
             string maDir,
             string manifestContents,
+            string previousManifestHash,
             IReadOnlyList<string> expectedRetainedObsoleteFilenames,
             string expectedCanonicalDir = null,
             string validatedRoot = null)
@@ -1204,9 +1231,11 @@ namespace Steam_Desktop_Authenticator
                     {
                         // Scrub any rejected/injected entries from the on-disk journal before failing
                         // so a subsequent startup recovery cannot delete an unvalidated filename.
-                        // If a read-only handle prevents scrubbing the rejected journal, persist a
-                        // quarantine marker so subsequent startup fails closed instead of consuming
-                        // the un-scrubbed journal once the lock releases.
+                        // Because rebase runs BEFORE writing manifest.json, bind any scrubbed journal
+                        // back to previousManifestHash (the current manifest on disk). If a read-only
+                        // handle prevents scrubbing, publish a quarantine marker directly with a single
+                        // CREATE_NEW call and bump storageMutationEpoch so concurrent readers and future
+                        // startups fail closed instead of consuming the un-scrubbed journal.
                         bool scrubbed = false;
                         try
                         {
@@ -1222,7 +1251,9 @@ namespace Steam_Desktop_Authenticator
                                 StorageTransactionJournal sanitizedJournal = new StorageTransactionJournal
                                 {
                                     JournalVersion = CurrentStorageJournalVersion,
-                                    ManifestHash = GetContentHash(manifestContents),
+                                    ManifestHash = !String.IsNullOrWhiteSpace(previousManifestHash)
+                                        ? previousManifestHash
+                                        : GetContentHash(manifestContents),
                                     PreviousManifestHash = null,
                                     CreatedFilenames = new List<string>(),
                                     CreatedFileHashes = null,
@@ -1236,21 +1267,26 @@ namespace Steam_Desktop_Authenticator
                                 scrubbed = true;
                             }
                         }
-                        catch
+                        catch (Exception scrubEx)
                         {
                             scrubbed = false;
+                            DiagnosticErrorLogger.Log("Authenticator storage", scrubEx, "A tampered storage journal could not be scrubbed during settings rebase.");
                         }
 
                         if (!scrubbed)
                         {
+                            Interlocked.Increment(ref storageMutationEpoch);
                             try
                             {
                                 string quarantineFilename = Path.Combine(maDir, StorageJournalQuarantineFilename);
-                                WriteAllTextAtomically(quarantineFilename, "tampered-journal-rebase-rejected", expectedCanonicalDirectory: canonicalDir);
+                                StoragePathGuard.CreateExclusiveMarkerFileIfMissing(
+                                    quarantineFilename,
+                                    canonicalDir,
+                                    "tampered-journal-rebase-rejected");
                             }
-                            catch
+                            catch (Exception quarantineEx)
                             {
-                                // Still fail closed below.
+                                DiagnosticErrorLogger.Log("Authenticator storage", quarantineEx, "A storage journal quarantine marker could not be created after rejecting settings rebase.");
                             }
                         }
 
@@ -1271,7 +1307,7 @@ namespace Steam_Desktop_Authenticator
                     {
                         JournalVersion = CurrentStorageJournalVersion,
                         ManifestHash = GetContentHash(manifestContents),
-                        PreviousManifestHash = null,
+                        PreviousManifestHash = !String.IsNullOrWhiteSpace(previousManifestHash) ? previousManifestHash : null,
                         CreatedFilenames = new List<string>(),
                         CreatedFileHashes = null,
                         CreatedFileIdentities = null,

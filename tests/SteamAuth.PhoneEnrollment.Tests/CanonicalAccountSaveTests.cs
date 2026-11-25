@@ -2171,10 +2171,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
             File.WriteAllText(injectedPath, "{\"untracked\":\"must-survive-even-when-journal-read-locked\"}");
 
             FileStream journalReadLock = null;
+            string manifestBeforeRejectedSave = null;
             using (new FileStream(lockedSourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
                 Assert.True(manifest.ImportUnmanagedMaFiles(candidates).Succeeded);
                 Assert.True(File.Exists(journalPath));
+                manifestBeforeRejectedSave = File.ReadAllText(Path.Combine(maDirectory, "manifest.json"));
 
                 // Inject an unvalidated filename into the journal AND hold a read-only handle on the
                 // journal so scrubbing fails inside RebaseRetainedStorageTransaction.
@@ -2191,6 +2193,8 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     StorageResult result = manifest.SaveWithResult();
                     Assert.False(result.Succeeded);
                     Assert.True(File.Exists(quarantinePath));
+                    // Pre-write rebase rejects the save BEFORE mutating manifest.json on disk.
+                    Assert.Equal(manifestBeforeRejectedSave, File.ReadAllText(Path.Combine(maDirectory, "manifest.json")));
                 }
                 finally
                 {
@@ -2205,16 +2209,33 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
             Assert.True(File.Exists(injectedPath));
             Assert.Equal("{\"untracked\":\"must-survive-even-when-journal-read-locked\"}", File.ReadAllText(injectedPath));
+
+            // Even if the journal file itself is removed while the quarantine marker remains, direct
+            // CommitStorageTransaction callers (such as MoveEntryWithResult) must still fail closed.
+            File.Delete(journalPath);
+            StorageResult reorderWhileQuarantined = manifest.MoveEntryWithResult(1, 0);
+            Assert.False(reorderWhileQuarantined.Succeeded);
+            Assert.Equal(manifestBeforeRejectedSave, File.ReadAllText(Path.Combine(maDirectory, "manifest.json")));
         }
 
         [Fact]
         public void StartupAndEncryptionSetup_SweepOrphanedRestoreAndStageTempFilesFromHardCrash()
         {
+            // 0. First-save hard crash before any manifest.json or *.maFile exists: startup must sweep
+            //    the orphaned plaintext .mafile-stage.<guid>.tmp file instead of returning early.
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            Directory.CreateDirectory(maDirectory);
+            string firstSaveStageTmp = Path.Combine(maDirectory, ".mafile-stage.00000000000000000000000000000001.tmp");
+            File.WriteAllText(firstSaveStageTmp, "{\"plaintext\":\"first-save-hard-crash-stage\"}");
+
+            Manifest freshAfterFirstCrash = Manifest.GetManifest(true);
+            Assert.Empty(freshAfterFirstCrash.Entries);
+            Assert.False(File.Exists(firstSaveStageTmp));
+
             Manifest manifest = Manifest.GenerateNewManifest(false);
             ulong accountId = 76561198000031000UL;
             Assert.True(manifest.SaveAccount(CreateAccount(accountId), false).Succeeded);
 
-            string maDirectory = Path.Combine(dataDirectory, "maFiles");
             string orphanedRestoreTmp = Path.Combine(maDirectory, ".mafile-restore.11111111111111111111111111111111.tmp");
             string orphanedStageTmp = Path.Combine(maDirectory, ".mafile-stage.22222222222222222222222222222222.tmp");
             string unrelatedUserTmp = Path.Combine(maDirectory, "user-note.tmp");
@@ -2250,6 +2271,7 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.True(manifest.SaveAccount(CreateAccount(firstId), true, "multi-cleanup-key").Succeeded);
 
             string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string manifestPath = Path.Combine(maDirectory, "manifest.json");
             string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
             string obsoleteOnePath = Path.Combine(maDirectory, "multi-obsolete-1.maFile");
             string obsoleteTwoPath = Path.Combine(maDirectory, "multi-obsolete-2.maFile");
@@ -2289,6 +2311,14 @@ namespace SteamAuth.PhoneEnrollment.Tests
                     Assert.True(manifest.VerifyPasskey("multi-cleanup-key"));
                     Assert.False(File.Exists(obsoleteOnePath));
                     Assert.True(File.Exists(obsoleteTwoPath));
+                    Assert.True(manifest.VerifyPasskey("multi-cleanup-key"));
+                    Assert.Equal(3, manifest.GetAllAccounts("multi-cleanup-key").Length);
+
+                    // Even if manifest.json settings change (causing a hash mismatch against the
+                    // read-locked cleanup-only journal), VerifyPasskey and GetAllAccounts still succeed.
+                    JObject updatedManifest = JObject.Parse(File.ReadAllText(manifestPath));
+                    updatedManifest["minimize_to_tray"] = !(updatedManifest["minimize_to_tray"]?.Value<bool>() ?? true);
+                    File.WriteAllText(manifestPath, updatedManifest.ToString(Formatting.None));
                     Assert.True(manifest.VerifyPasskey("multi-cleanup-key"));
                     Assert.Equal(3, manifest.GetAllAccounts("multi-cleanup-key").Length);
                 }
