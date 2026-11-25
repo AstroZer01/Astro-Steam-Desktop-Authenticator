@@ -1,4 +1,6 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using Steam_Desktop_Authenticator;
@@ -9,21 +11,23 @@ namespace SteamAuth.PhoneEnrollment.Tests
     public sealed class PriorProcessLookupTests
     {
         [Fact]
-        public void FindPriorProcess_SkipsInaccessibleAndExitedProcessesAndDisposesNonMatches()
+        public void FindPriorProcess_SkipsInaccessibleExitedAndOtherSessionProcessesAndDisposesNonMatches()
         {
             const string currentPath = @"C:\Apps\AstroSDA\Steam Desktop Authenticator.exe";
 
-            FakeProcess current = new FakeProcess(100, currentPath);
-            FakeProcess accessDenied = new FakeProcess(101, () => throw new Win32Exception(5, "Access is denied"));
-            FakeProcess exited = new FakeProcess(102, () => throw new InvalidOperationException("Process has exited"));
-            FakeProcess differentInstall = new FakeProcess(103, @"D:\Other\Steam Desktop Authenticator.exe");
-            FakeProcess matchingMixedCase = new FakeProcess(104, @"c:\apps\astrosda\steam desktop authenticator.exe");
-            FakeProcess secondMatch = new FakeProcess(105, currentPath);
-            FakeProcess trailingProcess = new FakeProcess(106, () => throw new Win32Exception(5, "Should not be queried after match"));
+            FakeProcess current = new FakeProcess(100, currentPath, sessionId: 1);
+            FakeProcess otherSession = new FakeProcess(101, currentPath, sessionId: 2);
+            FakeProcess accessDenied = new FakeProcess(102, () => throw new Win32Exception(5, "Access is denied"), sessionId: 1);
+            FakeProcess exited = new FakeProcess(103, () => throw new InvalidOperationException("Process has exited"), sessionId: 1);
+            FakeProcess differentInstall = new FakeProcess(104, @"D:\Other\Steam Desktop Authenticator.exe", sessionId: 1);
+            FakeProcess matchingMixedCase = new FakeProcess(105, @"c:\apps\astrosda\steam desktop authenticator.exe", sessionId: 1);
+            FakeProcess secondMatch = new FakeProcess(106, currentPath, sessionId: 1);
+            FakeProcess trailingProcess = new FakeProcess(107, () => throw new Win32Exception(5, "Should not be queried after match"), sessionId: 1);
 
             FakeProcess[] candidates =
             {
                 current,
+                otherSession,
                 accessDenied,
                 exited,
                 differentInstall,
@@ -34,15 +38,19 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             FakeProcess found = Program.FindPriorProcess(
                 100,
+                currentSessionId: 1,
                 currentPath,
                 candidates,
                 p => p.Id,
+                p => p.SessionId,
                 p => p.GetExecutablePath());
 
             Assert.Same(matchingMixedCase, found);
             Assert.False(matchingMixedCase.IsDisposed);
 
             Assert.True(current.IsDisposed);
+            Assert.True(otherSession.IsDisposed);
+            Assert.False(otherSession.PathQueried);
             Assert.True(accessDenied.IsDisposed);
             Assert.True(exited.IsDisposed);
             Assert.True(differentInstall.IsDisposed);
@@ -53,21 +61,140 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public void FindPriorProcess_NormalizesExtendedAndRelativePathForms()
+        public void FindPriorProcess_NormalizesExtendedDeviceUncAndVolumePathFormsAndRejectsInvalidOrRelativePaths()
         {
+            // Extended local, device local, and rooted dot-segment paths all normalize to the same canonical path.
             FakeProcess extendedPathMatch = new FakeProcess(201, @"\\?\C:\Apps\AstroSDA\Steam Desktop Authenticator.exe");
-            FakeProcess relativePathNonMatch = new FakeProcess(202, @"C:\Other\Steam Desktop Authenticator.exe");
+            FakeProcess devicePathMatch = new FakeProcess(202, @"\\.\C:\Apps\AstroSDA\Steam Desktop Authenticator.exe");
+            FakeProcess otherInstallNonMatch = new FakeProcess(203, @"C:\Other\Steam Desktop Authenticator.exe");
 
-            FakeProcess found = Program.FindPriorProcess(
+            FakeProcess foundExtended = Program.FindPriorProcess(
                 200,
                 @"C:\Apps\Sub\..\AstroSDA\Steam Desktop Authenticator.exe",
-                new[] { relativePathNonMatch, extendedPathMatch },
+                new[] { otherInstallNonMatch, extendedPathMatch },
                 p => p.Id,
                 p => p.GetExecutablePath());
 
-            Assert.Same(extendedPathMatch, found);
+            Assert.Same(extendedPathMatch, foundExtended);
             Assert.False(extendedPathMatch.IsDisposed);
-            Assert.True(relativePathNonMatch.IsDisposed);
+            Assert.True(otherInstallNonMatch.IsDisposed);
+
+            FakeProcess foundDevice = Program.FindPriorProcess(
+                200,
+                @"C:\Apps\AstroSDA\Steam Desktop Authenticator.exe",
+                new[] { devicePathMatch },
+                p => p.Id,
+                p => p.GetExecutablePath());
+
+            Assert.Same(devicePathMatch, foundDevice);
+            Assert.False(devicePathMatch.IsDisposed);
+
+            // Extended UNC matches .NET MainModule.FileName ("UNC\...") and "\\.\UNC\..." forms.
+            FakeProcess mainModuleUncMatch = new FakeProcess(204, @"UNC\fileserver\apps\Steam Desktop Authenticator.exe");
+            FakeProcess foundMainModuleUnc = Program.FindPriorProcess(
+                200,
+                @"\\?\UNC\fileserver\apps\Steam Desktop Authenticator.exe",
+                new[] { mainModuleUncMatch },
+                p => p.Id,
+                p => p.GetExecutablePath());
+
+            Assert.Same(mainModuleUncMatch, foundMainModuleUnc);
+            Assert.False(mainModuleUncMatch.IsDisposed);
+
+            FakeProcess deviceUncMatch = new FakeProcess(205, @"\\.\UNC\fileserver\apps\Steam Desktop Authenticator.exe");
+            FakeProcess foundDeviceUnc = Program.FindPriorProcess(
+                200,
+                @"\\fileserver\apps\Steam Desktop Authenticator.exe",
+                new[] { deviceUncMatch },
+                p => p.Id,
+                p => p.GetExecutablePath());
+
+            Assert.Same(deviceUncMatch, foundDeviceUnc);
+            Assert.False(deviceUncMatch.IsDisposed);
+
+            // Non-drive volume paths must stay intact instead of being stripped and resolved against CWD.
+            const string volumePath = @"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\Apps\Steam Desktop Authenticator.exe";
+            Assert.Equal(volumePath, Program.NormalizeProcessPath(volumePath));
+
+            // Bare prefixes, whitespace-prefixed paths, NUL paths, unrooted relative paths, and drive-relative paths normalize to null.
+            Assert.Null(Program.NormalizeProcessPath(@"\\?\"));
+            Assert.Null(Program.NormalizeProcessPath(@"\\?\   "));
+            Assert.Null(Program.NormalizeProcessPath(@"\\?\UNC\"));
+            Assert.Null(Program.NormalizeProcessPath(@"\\?\UNC\   "));
+            Assert.Null(Program.NormalizeProcessPath(@"\\?\UNC\\fileserver\apps\app.exe"));
+            Assert.Null(Program.NormalizeProcessPath(@"\\.\"));
+            Assert.Null(Program.NormalizeProcessPath(@"\\.\UNC\"));
+            Assert.Null(Program.NormalizeProcessPath(@"UNC\"));
+            Assert.Null(Program.NormalizeProcessPath(@"UNC\\fileserver\apps\app.exe"));
+            Assert.Null(Program.NormalizeProcessPath(@"\\?\ C:\Apps\app.exe"));
+            Assert.Null(Program.NormalizeProcessPath(@" C:\Apps\app.exe"));
+            Assert.Null(Program.NormalizeProcessPath("C:\\Apps\\app\0.exe"));
+            Assert.Null(Program.NormalizeProcessPath("Steam Desktop Authenticator.exe"));
+            Assert.Null(Program.NormalizeProcessPath(@".\Steam Desktop Authenticator.exe"));
+            Assert.Null(Program.NormalizeProcessPath(@"\Apps\Steam Desktop Authenticator.exe"));
+            Assert.Null(Program.NormalizeProcessPath(@"C:Apps\Steam Desktop Authenticator.exe"));
+
+            // Literal trailing spaces in extended paths must not falsely collapse onto the untrimmed path.
+            string withTrailingSpace = Program.NormalizeProcessPath(@"\\?\C:\Apps\app.exe ");
+            string withoutTrailingSpace = Program.NormalizeProcessPath(@"C:\Apps\app.exe");
+            Assert.NotEqual(withoutTrailingSpace, withTrailingSpace, StringComparer.OrdinalIgnoreCase);
+
+            // Bare prefix and NUL-containing paths must never match each other.
+            FakeProcess barePrefixCandidate = new FakeProcess(206, @"\\?\");
+            FakeProcess barePrefixResult = Program.FindPriorProcess(
+                200,
+                @"\\?\",
+                new[] { barePrefixCandidate },
+                p => p.Id,
+                p => p.GetExecutablePath());
+            Assert.Null(barePrefixResult);
+            Assert.True(barePrefixCandidate.IsDisposed);
+
+            FakeProcess nulCandidate = new FakeProcess(207, "C:\\Apps\\app\0.exe");
+            FakeProcess nulResult = Program.FindPriorProcess(
+                200,
+                "C:\\Apps\\app\0.exe",
+                new[] { nulCandidate },
+                p => p.Id,
+                p => p.GetExecutablePath());
+            Assert.Null(nulResult);
+            Assert.True(nulCandidate.IsDisposed);
+        }
+
+        [Fact]
+        public void FindPriorProcess_PreservesMatchedInstanceOnDuplicateReferencesHandlesErrorsAndValidatesArguments()
+        {
+            const string currentPath = @"C:\Apps\AstroSDA\Steam Desktop Authenticator.exe";
+            FakeProcess matched = new FakeProcess(401, currentPath);
+            FakeProcess idThrows = new FakeProcess(402, currentPath);
+
+            FakeProcess found = Program.FindPriorProcess(
+                400,
+                currentPath,
+                new[] { idThrows, matched, matched },
+                p => ReferenceEquals(p, idThrows) ? throw new InvalidOperationException("Process exited before reading Id") : p.Id,
+                p => p.GetExecutablePath());
+
+            Assert.Same(matched, found);
+            Assert.False(matched.IsDisposed);
+            Assert.True(idThrows.IsDisposed);
+
+            Assert.Null(Program.FindPriorProcess<FakeProcess>(400, currentPath, null, p => p.Id, p => p.GetExecutablePath()));
+            Assert.Null(Program.FindPriorProcess<FakeProcess>(400, currentPath, Array.Empty<FakeProcess>(), p => p.Id, p => p.GetExecutablePath()));
+            Assert.Throws<ArgumentNullException>(() => Program.FindPriorProcess<FakeProcess>(400, currentPath, Array.Empty<FakeProcess>(), null, p => p.GetExecutablePath()));
+            Assert.Throws<ArgumentNullException>(() => Program.FindPriorProcess<FakeProcess>(400, currentPath, Array.Empty<FakeProcess>(), p => p.Id, null));
+            Assert.Throws<ArgumentNullException>(() => Program.FindPriorProcess<FakeProcess>(400, 1, currentPath, Array.Empty<FakeProcess>(), p => p.Id, null, p => p.GetExecutablePath()));
+
+            // If indexing the candidate list throws after a match is retained, the match is disposed before rethrowing.
+            FakeProcess retainedMatch = new FakeProcess(403, currentPath);
+            FaultingReadOnlyList<FakeProcess> faultingList = new FaultingReadOnlyList<FakeProcess>(retainedMatch);
+            Assert.Throws<InvalidOperationException>(() => Program.FindPriorProcess(
+                400,
+                currentPath,
+                faultingList,
+                p => p.Id,
+                p => p.GetExecutablePath()));
+            Assert.True(retainedMatch.IsDisposed);
         }
 
         [Fact]
@@ -105,8 +232,15 @@ namespace SteamAuth.PhoneEnrollment.Tests
         }
 
         [Fact]
-        public void PriorProcess_DoesNotReturnCurrentProcessAndCanBeDisposed()
+        public void GetCurrentExecutablePath_ReturnsNormalizedCurrentProcessPathAndPriorProcessExcludesSelf()
         {
+            using (Process current = Process.GetCurrentProcess())
+            {
+                string currentPath = Program.GetCurrentExecutablePath(current);
+                Assert.False(String.IsNullOrWhiteSpace(currentPath));
+                Assert.NotNull(Program.NormalizeProcessPath(currentPath));
+            }
+
             int currentId = Environment.ProcessId;
             using (Process prior = Program.PriorProcess())
             {
@@ -115,24 +249,41 @@ namespace SteamAuth.PhoneEnrollment.Tests
             }
         }
 
+        private sealed class FaultingReadOnlyList<T> : IReadOnlyList<T>
+        {
+            private readonly T first;
+
+            public FaultingReadOnlyList(T first)
+            {
+                this.first = first;
+            }
+
+            public T this[int index] => index == 0 ? first : throw new InvalidOperationException("Simulated list indexing failure.");
+            public int Count => 2;
+            public IEnumerator<T> GetEnumerator() => throw new NotSupportedException();
+            IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+
         private sealed class FakeProcess : IDisposable
         {
             private readonly Func<string> executablePathProvider;
             private readonly bool throwOnDispose;
 
-            public FakeProcess(int id, string executablePath, bool throwOnDispose = false)
-                : this(id, () => executablePath, throwOnDispose)
+            public FakeProcess(int id, string executablePath, bool throwOnDispose = false, int sessionId = 0)
+                : this(id, () => executablePath, throwOnDispose, sessionId)
             {
             }
 
-            public FakeProcess(int id, Func<string> executablePathProvider, bool throwOnDispose = false)
+            public FakeProcess(int id, Func<string> executablePathProvider, bool throwOnDispose = false, int sessionId = 0)
             {
                 Id = id;
+                SessionId = sessionId;
                 this.executablePathProvider = executablePathProvider;
                 this.throwOnDispose = throwOnDispose;
             }
 
             public int Id { get; }
+            public int SessionId { get; }
             public bool PathQueried { get; private set; }
             public bool DisposeAttempted { get; private set; }
             public bool IsDisposed { get; private set; }
