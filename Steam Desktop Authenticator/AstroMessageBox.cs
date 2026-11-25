@@ -62,12 +62,58 @@ namespace Steam_Desktop_Authenticator
 
         private static DialogResult ShowWithActiveOwner(AstroMessageBoxForm form)
         {
-            Form owner = Form.ActiveForm;
-            if (owner != null && owner.Visible && !owner.Disposing && !owner.IsDisposed && owner != form)
+            Form owner = ResolveDialogOwner(form);
+            if (owner != null)
+            {
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.CenterParent;
                 return form.ShowDialog(owner);
+            }
 
+            form.ShowInTaskbar = true;
             form.StartPosition = FormStartPosition.CenterScreen;
+            form.TopMost = true;
             return form.ShowDialog();
+        }
+
+        private static Form ResolveDialogOwner(Form excludedForm)
+        {
+            if (IsValidDialogOwner(Form.ActiveForm, excludedForm))
+                return Form.ActiveForm;
+
+            // When WebView2's child Chromium HWND has focus, Form.ActiveForm can be null.
+            // Walk open WinForms windows from topmost/most-recent back so error dialogs
+            // attach to the active modal (e.g. LoginForm) instead of opening behind it.
+            FormCollection openForms = Application.OpenForms;
+            for (int i = openForms.Count - 1; i >= 0; i--)
+            {
+                Form candidate;
+                try
+                {
+                    candidate = openForms[i];
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    continue;
+                }
+
+                if (IsValidDialogOwner(candidate, excludedForm))
+                    return candidate;
+            }
+
+            return null;
+        }
+
+        private static bool IsValidDialogOwner(Form candidate, Form excludedForm)
+        {
+            return candidate != null &&
+                candidate != excludedForm &&
+                candidate.Visible &&
+                !candidate.Disposing &&
+                !candidate.IsDisposed &&
+                candidate.WindowState != FormWindowState.Minimized &&
+                !(candidate is LoginNotificationPopup) &&
+                !(candidate is QrScanOverlayForm);
         }
     }
 }

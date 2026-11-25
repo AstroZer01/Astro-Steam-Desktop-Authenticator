@@ -1,105 +1,173 @@
 <!DOCTYPE html><html class="dark" lang="en"><head>
 <meta charset="utf-8">
 <meta content="width=device-width, initial-scale=1.0" name="viewport">
-<title>Astro SDA - Input</title>
+<title>Astro SDA — Input</title>
 <link href="assets/css/app.css" rel="stylesheet">
 <style>
-body { background-color: #0b1326; color: #dae2fd; font-family: 'Inter', sans-serif; overflow: hidden; }
-.glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
-input { background: #131B2E !important; color: white !important; border: 1px solid rgba(255, 255, 255, 0.2) !important; border-radius: 8px !important; padding: 12px !important; width: 100%; outline: none; transition: border-color 0.2s; }
-input:focus { border-color: #00daf3 !important; }
-.password-field { position: relative; }
-.password-field input { padding-right: 48px !important; }
-.password-toggle { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: #ffffff; padding: 6px; line-height: 0; cursor: pointer; }
-.password-toggle:hover, .password-toggle:focus { color: #c3f5ff; }
-.password-toggle:focus-visible { outline: 2px solid #00daf3; outline-offset: 2px; }
-.password-toggle svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-input::-ms-reveal { display: none; }
-.btn-primary { background: #00E5FF; color: #00363D; font-weight: bold; padding: 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s; border: none; }
-.btn-primary:hover { background: #9cf0ff; }
-.btn-secondary { background: #2D3449; color: #DAE2FD; font-weight: bold; padding: 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s; border: none; border: 1px solid rgba(255, 255, 255, 0.1); }
-.btn-secondary:hover { background: #31394D; }
+  html, body {
+    margin: 0;
+    background: linear-gradient(180deg, #101727 0%, #0d1320 40%);
+    color: #e4eaf4;
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  .input-panel {
+    padding: 22px 24px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+  }
+  .field-input {
+    width: 100%;
+    background: #090e19 !important;
+    color: #e4eaf4 !important;
+    border: 1px solid rgba(255, 255, 255, 0.14) !important;
+    border-radius: 8px !important;
+    padding: 10px 13px !important;
+    font-size: 13px !important;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .field-input:focus {
+    border-color: #4cc3d9 !important;
+    box-shadow: 0 0 0 2px rgba(76, 195, 217, 0.14) !important;
+  }
+  .field-input.code-mode {
+    text-align: center;
+    font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    font-size: 20px !important;
+    font-weight: 700;
+    letter-spacing: 0.28em;
+    color: #f5f8fc !important;
+  }
+  .password-field { position: relative; }
+  .password-field .field-input { padding-right: 44px !important; }
+  .password-toggle {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 0;
+    background: transparent;
+    color: #96a4b8;
+    padding: 6px;
+    line-height: 0;
+    cursor: pointer;
+    border-radius: 6px;
+  }
+  .password-toggle:hover, .password-toggle:focus { color: #85d6e6; }
+  .password-toggle:focus-visible { outline: 2px solid #4cc3d9; outline-offset: 2px; }
+  .password-toggle svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  input::-ms-reveal { display: none; }
+  .input-foot {
+    padding-top: 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.075);
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
 </style>
 </head>
-<body class="min-h-screen flex items-center justify-center p-4">
-<div class="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-[#00E5FF]/5 rounded-full blur-[120px] pointer-events-none"></div>
+<body>
+<div class="input-panel">
+  <div>
+    <h1 id="dialog-heading" class="text-base font-bold text-[#f3f6fb]">Input Required</h1>
+    <p id="label-text" class="text-xs text-[#96a4b8] mt-1.5 leading-relaxed">Please enter the required information.</p>
+  </div>
 
-<div class="glass-panel w-full max-w-sm p-8 rounded-2xl flex flex-col gap-6 shadow-2xl relative z-10">
-    <div class="flex flex-col mb-2">
-        <h1 class="text-xl font-bold text-[#c3f5ff]">Input Required</h1>
-        <p id="label-text" class="text-sm text-[#bac9cc] mt-2">Please enter the required information.</p>
-    </div>
-    
-    <div class="flex flex-col gap-2">
-        <div id="password-field" class="password-field">
-            <input type="password" id="input-box" aria-labelledby="label-text" placeholder="..." disabled />
-            <button id="password-toggle" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" style="display: none;">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
-            </button>
-        </div>
-    </div>
+  <div id="password-field" class="password-field">
+    <input type="password" id="input-box" class="field-input" aria-labelledby="label-text" placeholder="Enter value…" disabled />
+    <button id="password-toggle" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" style="display: none;">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+    </button>
+  </div>
 
-    <div class="flex gap-4 mt-2">
-        <button id="btn-cancel" class="btn-secondary flex-1 shadow-lg" disabled>CANCEL</button>
-        <button id="btn-accept" class="btn-primary flex-1 shadow-lg shadow-[#00E5FF]/20" disabled>ACCEPT</button>
-    </div>
+  <div class="input-foot">
+    <button id="btn-cancel" type="button" class="btn-ghost rounded-lg px-4 py-2 text-xs" disabled>Cancel</button>
+    <button id="btn-accept" type="button" class="btn-primary rounded-lg px-5 py-2 text-xs" disabled>Confirm</button>
+  </div>
 </div>
+
 <script>
-    document.getElementById('btn-accept').addEventListener('click', () => {
-        const input = document.getElementById('input-box');
-        if (input.disabled) return;
-        let val = input.value;
-        window.chrome.webview.postMessage({ action: 'accept', value: val });
-    });
-    
-    document.getElementById('btn-cancel').addEventListener('click', () => {
-        const cancelButton = document.getElementById('btn-cancel');
-        if (cancelButton.disabled) return;
-        window.chrome.webview.postMessage({ action: 'cancel' });
-    });
+  document.getElementById('btn-accept').addEventListener('click', () => {
+    const input = document.getElementById('input-box');
+    if (input.disabled) return;
+    let val = input.value;
+    window.chrome.webview.postMessage({ action: 'accept', value: val });
+  });
 
-    document.getElementById('input-box').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter' && !this.disabled) {
-            document.getElementById('btn-accept').click();
-        }
-    });
-    
-    const resizeObserver = new ResizeObserver(entries => {
-        for (let entry of entries) {
-            let h = entry.target.offsetHeight + 40; // 32px for body p-4 padding + 8px extra buffer
-            window.chrome.webview.postMessage({ action: 'resize', height: h });
-        }
-    });
+  document.getElementById('btn-cancel').addEventListener('click', () => {
+    const cancelButton = document.getElementById('btn-cancel');
+    if (cancelButton.disabled) return;
+    window.chrome.webview.postMessage({ action: 'cancel' });
+  });
 
-    function setupInput(label, isPassword) {
-        document.getElementById('label-text').innerText = label;
-        const input = document.getElementById('input-box');
-        const cancelButton = document.getElementById('btn-cancel');
-        const acceptButton = document.getElementById('btn-accept');
-        const toggle = document.getElementById('password-toggle');
-        const passwordField = document.getElementById('password-field');
-        const panel = document.querySelector('.glass-panel');
-        input.type = isPassword ? 'password' : 'text';
-        passwordField.classList.toggle('password-field', isPassword);
-        toggle.style.display = isPassword ? 'block' : 'none';
-        toggle.setAttribute('aria-label', 'Show password');
-        toggle.setAttribute('aria-pressed', 'false');
-        resizeObserver.observe(panel);
-        input.disabled = false;
-        cancelButton.disabled = false;
-        acceptButton.disabled = false;
-        input.focus();
-        return true;
+  document.getElementById('input-box').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !this.disabled) {
+      e.preventDefault();
+      document.getElementById('btn-accept').click();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      document.getElementById('btn-cancel').click();
+    }
+  });
+
+  const resizeObserver = new ResizeObserver(entries => {
+    for (let entry of entries) {
+      let h = Math.ceil(entry.target.offsetHeight) + 6;
+      window.chrome.webview.postMessage({ action: 'resize', height: h });
+    }
+  });
+
+  function setupInput(label, isPassword) {
+    const text = String(label || '');
+    document.getElementById('label-text').innerText = text;
+    const heading = document.getElementById('dialog-heading');
+    const input = document.getElementById('input-box');
+    const cancelButton = document.getElementById('btn-cancel');
+    const acceptButton = document.getElementById('btn-accept');
+    const toggle = document.getElementById('password-toggle');
+    const passwordField = document.getElementById('password-field');
+    const panel = document.querySelector('.input-panel');
+
+    const lower = text.toLowerCase();
+    const isCodePrompt = !isPassword && (lower.includes('code') || lower.includes('sms') || lower.includes('email'));
+    if (isPassword) {
+      heading.innerText = lower.includes('passkey') ? 'Enter Vault Passkey' : 'Password Required';
+      acceptButton.innerText = lower.includes('unlock') || lower.includes('current') ? 'Unlock' : 'Confirm';
+      input.placeholder = 'Enter passkey…';
+    } else if (isCodePrompt) {
+      heading.innerText = 'Enter Verification Code';
+      acceptButton.innerText = 'Verify Code';
+      input.placeholder = 'XXXXX';
+    } else {
+      heading.innerText = 'Input Required';
+      acceptButton.innerText = 'Confirm';
+      input.placeholder = 'Enter value…';
     }
 
-    document.getElementById('password-toggle').addEventListener('click', () => {
-        const input = document.getElementById('input-box');
-        const toggle = document.getElementById('password-toggle');
-        const visible = input.type === 'password';
-        input.type = visible ? 'text' : 'password';
-        toggle.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
-        toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
-        input.focus();
-    });
+    input.type = isPassword ? 'password' : 'text';
+    input.classList.toggle('code-mode', isCodePrompt);
+    passwordField.classList.toggle('password-field', isPassword);
+    toggle.style.display = isPassword ? 'block' : 'none';
+    toggle.setAttribute('aria-label', 'Show password');
+    toggle.setAttribute('aria-pressed', 'false');
+    resizeObserver.observe(panel);
+    input.disabled = false;
+    cancelButton.disabled = false;
+    acceptButton.disabled = false;
+    input.focus();
+    return true;
+  }
+
+  document.getElementById('password-toggle').addEventListener('click', () => {
+    const input = document.getElementById('input-box');
+    const toggle = document.getElementById('password-toggle');
+    const visible = input.type === 'password';
+    input.type = visible ? 'text' : 'password';
+    toggle.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
+    toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
+    input.focus();
+  });
 </script>
 </body></html>

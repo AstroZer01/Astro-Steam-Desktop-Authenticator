@@ -1,6 +1,6 @@
 using System;
 using System.Drawing;
-using System.Drawing.Text;
+using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -9,7 +9,7 @@ namespace Steam_Desktop_Authenticator
     internal sealed class QrScanOverlayForm : Form
     {
         private const int VisualSize = 350;
-        private const int InstructionsHeight = 48;
+        private const int InstructionsHeight = 52;
         private readonly Timer followCursorTimer = new Timer { Interval = 16 };
 
         [DllImport("user32.dll")]
@@ -94,42 +94,128 @@ namespace Steam_Desktop_Authenticator
         {
             base.OnPaint(e);
 
-            using (Pen borderPen = new Pen(Color.FromArgb(153, 153, 153), 3))
+            Graphics g = e.Graphics;
+            // Strict non-antialiased geometry avoids blending against TransparencyKey (Magenta).
+            g.SmoothingMode = SmoothingMode.None;
+            g.PixelOffsetMode = PixelOffsetMode.None;
+
+            Color darkBacking = Color.FromArgb(9, 14, 25);     // #090E19
+            Color cyanAccent = AstroTheme.PrimaryAccent;        // #4CC3D9
+            Color cyanLight = AstroTheme.PrimaryLight;          // #85D6E6
+            Color pillBg = Color.FromArgb(11, 17, 30);          // #0B111E
+            Color pillBorder = AstroTheme.OutlineVariant;       // #334155
+
+            int left = 3;
+            int top = 3;
+            int right = VisualSize - 4;
+            int bottom = VisualSize - 4;
+            int frameWidth = right - left;
+            int frameHeight = bottom - top;
+
+            // 1. Exact 350x350 capture perimeter: dark hairline + dashed glacier cyan (zero interior occlusion).
+            using (Pen backingPen = new Pen(darkBacking, 3f))
             {
-                e.Graphics.DrawRectangle(borderPen, 2, 2, VisualSize - 5, VisualSize - 5);
+                g.DrawRectangle(backingPen, left, top, frameWidth, frameHeight);
+            }
+            using (Pen dashedPen = new Pen(cyanAccent, 1f))
+            {
+                dashedPen.DashStyle = DashStyle.Custom;
+                dashedPen.DashPattern = new[] { 6f, 5f };
+                g.DrawRectangle(dashedPen, left, top, frameWidth, frameHeight);
             }
 
-            DrawOutlinedInstruction(e.Graphics, "Press Right Ctrl to scan the QR code",
-                new Rectangle(0, VisualSize + 2, VisualSize, 20));
-            DrawOutlinedInstruction(e.Graphics, "Press Esc to cancel",
-                new Rectangle(0, VisualSize + 22, VisualSize, 20));
+            // 2. Outer-edge midpoint alignment ticks (strictly on the perimeter, never inside the QR area).
+            int midX = VisualSize / 2;
+            int midY = VisualSize / 2;
+            DrawTick(g, darkBacking, cyanAccent, new Rectangle(midX - 6, top - 1, 12, 3));
+            DrawTick(g, darkBacking, cyanAccent, new Rectangle(midX - 6, bottom - 1, 12, 3));
+            DrawTick(g, darkBacking, cyanAccent, new Rectangle(left - 1, midY - 6, 3, 12));
+            DrawTick(g, darkBacking, cyanAccent, new Rectangle(right - 1, midY - 6, 3, 12));
+
+            // 3. Bold 24px corner L-brackets with 1px dark outline for contrast over light & dark Steam UIs.
+            const int arm = 24;
+            const int thick = 3;
+            DrawCornerBracket(g, darkBacking, cyanAccent, 1, 1, arm, thick, 1, 1);
+            DrawCornerBracket(g, darkBacking, cyanAccent, VisualSize - 2, 1, arm, thick, -1, 1);
+            DrawCornerBracket(g, darkBacking, cyanAccent, 1, VisualSize - 2, arm, thick, 1, -1);
+            DrawCornerBracket(g, darkBacking, cyanAccent, VisualSize - 2, VisualSize - 2, arm, thick, -1, -1);
+
+            // 4. Solid dark instruction pill below the capture frame (opaque bg = crisp text, zero magenta halo).
+            const int pillWidth = 282;
+            const int pillHeight = 32;
+            Rectangle pillRect = new Rectangle((VisualSize - pillWidth) / 2, VisualSize + 10, pillWidth, pillHeight);
+            using (SolidBrush bgBrush = new SolidBrush(pillBg))
+            using (Pen borderPen = new Pen(pillBorder, 1f))
+            {
+                g.FillRectangle(bgBrush, pillRect);
+                g.DrawRectangle(borderPen, pillRect.X, pillRect.Y, pillRect.Width - 1, pillRect.Height - 1);
+            }
+
+            DrawInstructionPillText(g, pillRect, pillBg, cyanLight, AstroTheme.OnSurfaceVariant);
         }
 
-        private void DrawOutlinedInstruction(Graphics graphics, string text, Rectangle bounds)
+        private static void DrawTick(Graphics g, Color backing, Color fill, Rectangle rect)
         {
-            using (Font boldFont = new Font(Font, FontStyle.Bold))
-            using (StringFormat textFormat = new StringFormat
+            using (SolidBrush backBrush = new SolidBrush(backing))
+            using (SolidBrush fillBrush = new SolidBrush(fill))
             {
-                Alignment = StringAlignment.Center,
-                LineAlignment = StringAlignment.Center
-            })
-            using (Brush outlineBrush = new SolidBrush(Color.Black))
-            using (Brush textBrush = new SolidBrush(Color.FromArgb(204, 204, 204)))
+                g.FillRectangle(backBrush, rect.X - 1, rect.Y - 1, rect.Width + 2, rect.Height + 2);
+                g.FillRectangle(fillBrush, rect);
+            }
+        }
+
+        private static void DrawCornerBracket(Graphics g, Color backing, Color fill, int cornerX, int cornerY, int armLength, int thickness, int dirX, int dirY)
+        {
+            int hX = dirX > 0 ? cornerX : cornerX - armLength + 1;
+            int hY = dirY > 0 ? cornerY : cornerY - thickness + 1;
+            Rectangle horizontal = new Rectangle(hX, hY, armLength, thickness);
+
+            int vX = dirX > 0 ? cornerX : cornerX - thickness + 1;
+            int vY = dirY > 0 ? cornerY : cornerY - armLength + 1;
+            Rectangle vertical = new Rectangle(vX, vY, thickness, armLength);
+
+            using (SolidBrush backBrush = new SolidBrush(backing))
+            using (SolidBrush fillBrush = new SolidBrush(fill))
             {
-                TextRenderingHint originalRenderingHint = graphics.TextRenderingHint;
-                graphics.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
-                foreach (Point offset in new[]
+                g.FillRectangle(backBrush, horizontal.X - 1, horizontal.Y - 1, horizontal.Width + 2, horizontal.Height + 2);
+                g.FillRectangle(backBrush, vertical.X - 1, vertical.Y - 1, vertical.Width + 2, vertical.Height + 2);
+                g.FillRectangle(fillBrush, horizontal);
+                g.FillRectangle(fillBrush, vertical);
+            }
+        }
+
+        private static void DrawInstructionPillText(Graphics g, Rectangle pillRect, Color pillBg, Color keyColor, Color mutedColor)
+        {
+            var segments = new (string Text, bool Bold, Color Color)[]
+            {
+                ("Right Ctrl", true, keyColor),
+                (" to scan   ·   ", false, mutedColor),
+                ("Esc", true, keyColor),
+                (" to cancel", false, mutedColor)
+            };
+
+            const TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
+
+            using (Font regularFont = new Font("Segoe UI", 8.5f, FontStyle.Regular))
+            using (Font boldFont = new Font("Segoe UI", 8.5f, FontStyle.Bold))
+            {
+                int totalWidth = 0;
+                int[] widths = new int[segments.Length];
+                for (int i = 0; i < segments.Length; i++)
                 {
-                    new Point(-1, 0), new Point(1, 0), new Point(0, -1), new Point(0, 1)
-                })
-                {
-                    graphics.DrawString(text, boldFont, outlineBrush,
-                        new Rectangle(bounds.X + offset.X, bounds.Y + offset.Y, bounds.Width, bounds.Height),
-                        textFormat);
+                    Font f = segments[i].Bold ? boldFont : regularFont;
+                    widths[i] = TextRenderer.MeasureText(g, segments[i].Text, f, Size.Empty, flags).Width;
+                    totalWidth += widths[i];
                 }
 
-                graphics.DrawString(text, boldFont, textBrush, bounds, textFormat);
-                graphics.TextRenderingHint = originalRenderingHint;
+                int cursorX = pillRect.X + Math.Max(8, (pillRect.Width - totalWidth) / 2);
+                for (int i = 0; i < segments.Length; i++)
+                {
+                    Font f = segments[i].Bold ? boldFont : regularFont;
+                    Rectangle segRect = new Rectangle(cursorX, pillRect.Y, widths[i] + 2, pillRect.Height);
+                    TextRenderer.DrawText(g, segments[i].Text, f, segRect, segments[i].Color, pillBg, flags);
+                    cursorX += widths[i];
+                }
             }
         }
     }

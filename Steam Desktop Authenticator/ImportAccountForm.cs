@@ -25,16 +25,6 @@ namespace Steam_Desktop_Authenticator
         };
         private Manifest mManifest;
 
-        [System.Runtime.InteropServices.DllImport("Gdi32.dll", EntryPoint = "CreateRoundRectRgn")]
-        private static extern IntPtr CreateRoundRectRgn(
-            int nLeftRect,
-            int nTopRect,
-            int nRightRect,
-            int nBottomRect,
-            int nWidthEllipse,
-            int nHeightEllipse
-        );
-
         private string mCurrentPassKey;
 
         public ImportAccountForm(string currentPassKey)
@@ -44,11 +34,51 @@ namespace Steam_Desktop_Authenticator
             this.mManifest = Manifest.GetManifest();
             this.mCurrentPassKey = currentPassKey;
 
-            // Round borders
-            btnImport.FlatAppearance.BorderSize = 0;
-            btnCancel.FlatAppearance.BorderSize = 0;
-            btnImport.Region = System.Drawing.Region.FromHrgn(CreateRoundRectRgn(0, 0, btnImport.Width, btnImport.Height, 8, 8));
-            btnCancel.Region = System.Drawing.Region.FromHrgn(CreateRoundRectRgn(0, 0, btnCancel.Width, btnCancel.Height, 8, 8));
+            ApplyRefinedImportLayout();
+        }
+
+        private void ApplyRefinedImportLayout()
+        {
+            ClientSize = new Size(440, 176);
+            BackColor = AstroTheme.Background;
+            Text = "Import Account";
+
+            label1.Visible = false;
+
+            Label heading = new Label
+            {
+                Text = "Import Steam Guard Account",
+                AutoSize = true,
+                Location = new Point(20, 16),
+                Font = new Font("Segoe UI", 11F, FontStyle.Bold),
+                ForeColor = AstroTheme.OnSurface,
+                BackColor = Color.Transparent
+            };
+
+            Panel callout = AstroTheme.CreateCalloutPanel(
+                "Select a .maFile to import into Astro SDA. If the file is encrypted, its matching manifest.json must be located in the same folder.",
+                AstroTheme.PrimaryAccent,
+                AstroTheme.SurfaceContainerLow,
+                Color.FromArgb(196, 208, 224),
+                400);
+            callout.Location = new Point(20, 44);
+
+            Panel divider = AstroTheme.CreateDivider(400);
+            divider.Location = new Point(20, 114);
+
+            btnCancel.Text = "Cancel";
+            btnCancel.Size = new Size(96, 34);
+            btnCancel.Location = new Point(168, 128);
+            AstroTheme.StyleSurfaceButton(btnCancel);
+
+            btnImport.Text = "Select .maFile…";
+            btnImport.Size = new Size(148, 34);
+            btnImport.Location = new Point(272, 128);
+            AstroTheme.StylePrimaryButton(btnImport);
+
+            Controls.Add(heading);
+            Controls.Add(callout);
+            Controls.Add(divider);
         }
 
         private void btnImport_Click(object sender, EventArgs e)

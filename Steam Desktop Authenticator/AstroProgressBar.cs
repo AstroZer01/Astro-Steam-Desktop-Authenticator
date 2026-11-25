@@ -40,15 +40,15 @@ namespace Steam_Desktop_Authenticator
 
         /// <summary>
         /// The color used for the filled portion of the progress bar (start of gradient).
-        /// Defaults to AstroTheme.SecondaryContainer (#00A572).
+        /// Defaults to AstroTheme.GradientStart (#276984).
         /// </summary>
-        public Color BarColorStart { get; set; } = AstroTheme.SecondaryContainer;
+        public Color BarColorStart { get; set; } = AstroTheme.GradientStart;
 
         /// <summary>
         /// The color used for the filled portion of the progress bar (end of gradient).
-        /// Defaults to AstroTheme.Secondary (#4EDEA3).
+        /// Defaults to AstroTheme.GradientEnd (#8AE0EF).
         /// </summary>
-        public Color BarColorEnd { get; set; } = AstroTheme.Secondary;
+        public Color BarColorEnd { get; set; } = AstroTheme.GradientEnd;
 
         /// <summary>
         /// The background (track) color of the progress bar.

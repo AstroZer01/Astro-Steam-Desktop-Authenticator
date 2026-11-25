@@ -27,13 +27,13 @@ namespace Steam_Desktop_Authenticator
             InitializeComponent();
             AstroTheme.ApplyTheme(this);
             BuildLayout();
-            this.ClientSize = new Size(540, 320);
-            this.MinimumSize = new Size(540, 320);
-            this.MaximumSize = new Size(720, 500);
+            this.ClientSize = new Size(520, 356);
+            this.MinimumSize = new Size(520, 356);
+            this.MaximumSize = new Size(720, 520);
             this.AutoScroll = true;
             this.MaximizeBox = false;
-            this.FormBorderStyle = FormBorderStyle.FixedSingle;
-            this.Text = "Add a phone number";
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.Text = "Add a Phone Number";
         }
 
         private void BuildLayout()
@@ -52,104 +52,145 @@ namespace Steam_Desktop_Authenticator
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 GrowStyle = TableLayoutPanelGrowStyle.AddRows,
-                Padding = new Padding(20),
+                Padding = new Padding(22, 20, 22, 18),
                 ColumnCount = 1,
-                RowCount = 5,
+                RowCount = 6,
                 BackColor = AstroTheme.Background
             };
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            for (int i = 0; i < 6; i++)
+                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             Label heading = new Label
             {
-                Text = "Verify a phone number",
+                Text = "Verify a Phone Number",
                 AutoSize = true,
-                Font = new Font("Segoe UI", 14f, FontStyle.Bold),
+                Font = new Font("Segoe UI", 13.5f, FontStyle.Bold),
                 ForeColor = AstroTheme.OnSurface,
                 Margin = new Padding(0, 0, 0, 4)
             };
             Label introduction = new Label
             {
-                Text = "Choose your country or region, then enter your phone number in international format. The country prefix is filled in for you and can be edited.",
+                Text = "Choose your country or region, then enter your phone number in international format. The dialing prefix is filled in automatically and can be edited.",
                 AutoSize = true,
-                MaximumSize = new Size(490, 0),
-                Font = new Font("Segoe UI", 9.5f),
+                MaximumSize = new Size(476, 0),
+                Font = new Font("Segoe UI", 9.25f),
                 ForeColor = AstroTheme.OnSurfaceVariant,
-                Margin = new Padding(0, 0, 0, 14)
+                Margin = new Padding(0, 0, 0, 16)
             };
 
+            Panel countryPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 60,
+                Margin = new Padding(0, 0, 0, 12),
+                BackColor = Color.Transparent
+            };
+            Label countryLabel = new Label
+            {
+                Text = "Country / Region",
+                AutoSize = true,
+                Location = new Point(0, 0),
+                Font = new Font("Segoe UI", 8.75f, FontStyle.Bold),
+                ForeColor = AstroTheme.OnSurfaceVariant
+            };
             countrySelector = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                Dock = DockStyle.Top,
+                Location = new Point(0, 22),
+                Width = 476,
                 Font = new Font("Segoe UI", 10f),
-                Margin = new Padding(0, 0, 0, 12),
-                Height = 32,
-                BackColor = AstroTheme.SurfaceVariant,
+                BackColor = AstroTheme.SurfaceContainerLowest,
                 ForeColor = AstroTheme.OnSurface,
                 FlatStyle = FlatStyle.Flat,
                 DrawMode = DrawMode.OwnerDrawFixed,
-                ItemHeight = 30,
-                DropDownWidth = 490
+                ItemHeight = 28,
+                DropDownWidth = 476
             };
             countrySelector.DataSource = CountryOptions;
             countrySelector.DisplayMember = nameof(CountryOption.DisplayName);
             countrySelector.SelectedIndexChanged += countrySelector_SelectedIndexChanged;
             countrySelector.DrawItem += countrySelector_DrawItem;
             SelectCurrentRegion();
+            countryPanel.Controls.Add(countryLabel);
+            countryPanel.Controls.Add(countrySelector);
 
-            Panel numberPanel = new Panel { Dock = DockStyle.Top, Height = 66, Margin = new Padding(0) };
+            Panel numberPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 66,
+                Margin = new Padding(0, 0, 0, 14),
+                BackColor = Color.Transparent
+            };
             Label numberLabel = new Label
             {
-                Text = "International phone number",
+                Text = "International Phone Number",
                 AutoSize = true,
                 Location = new Point(0, 0),
-                Font = new Font("Segoe UI", 9.5f),
+                Font = new Font("Segoe UI", 8.75f, FontStyle.Bold),
                 ForeColor = AstroTheme.OnSurfaceVariant
             };
             phoneNumberInput = new TextBox
             {
-                Location = new Point(0, 24),
-                Size = new Size(490, 34),
-                Font = new Font("Segoe UI", 14f),
+                Location = new Point(0, 22),
+                Size = new Size(476, 36),
+                Font = new Font("Consolas", 13.5f, FontStyle.Regular),
                 PlaceholderText = "+55 11 99999 9999",
-                BackColor = AstroTheme.SurfaceVariant,
+                BackColor = AstroTheme.SurfaceContainerLowest,
                 ForeColor = AstroTheme.OnSurface,
                 BorderStyle = BorderStyle.FixedSingle,
-                TextAlign = HorizontalAlignment.Center
+                TextAlign = HorizontalAlignment.Left
             };
             numberPanel.Controls.Add(numberLabel);
             numberPanel.Controls.Add(phoneNumberInput);
 
-            FlowLayoutPanel buttons = new FlowLayoutPanel
+            Panel divider = AstroTheme.CreateDivider(476);
+            divider.Dock = DockStyle.Top;
+            divider.Margin = new Padding(0, 0, 0, 14);
+
+            Panel footerPanel = new Panel
             {
-                AutoSize = true,
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.RightToLeft,
-                WrapContents = false,
-                Margin = new Padding(0)
+                Dock = DockStyle.Top,
+                Height = 36,
+                Width = 476,
+                Margin = new Padding(0),
+                BackColor = Color.Transparent
             };
-            Button continueWithoutPhone = new Button { Text = "Continue without phone", AutoSize = true, Height = 34, Margin = new Padding(8, 0, 0, 0) };
-            Button cancel = new Button { Text = "Cancel", AutoSize = true, Height = 34, DialogResult = DialogResult.Cancel, Margin = new Padding(8, 0, 0, 0) };
-            Button submit = new Button { Text = "Send verification", AutoSize = true, Height = 34, Margin = new Padding(0) };
-            AstroTheme.StyleSecondaryButton(continueWithoutPhone);
-            AstroTheme.StyleSecondaryButton(cancel);
+            Button continueWithoutPhone = new Button
+            {
+                Text = "Skip Phone",
+                Size = new Size(106, 34),
+                Location = new Point(0, 0)
+            };
+            Button cancel = new Button
+            {
+                Text = "Cancel",
+                Size = new Size(88, 34),
+                Location = new Point(222, 0),
+                DialogResult = DialogResult.Cancel
+            };
+            Button submit = new Button
+            {
+                Text = "Send Verification",
+                Size = new Size(156, 34),
+                Location = new Point(320, 0)
+            };
+            AstroTheme.StyleSurfaceButton(continueWithoutPhone);
+            AstroTheme.StyleSurfaceButton(cancel);
             AstroTheme.StylePrimaryButton(submit);
             continueWithoutPhone.Click += btnContinueWithoutPhone_Click;
             cancel.Click += btnCancel_Click;
             submit.Click += btnSubmit_Click;
-            buttons.Controls.Add(continueWithoutPhone);
-            buttons.Controls.Add(cancel);
-            buttons.Controls.Add(submit);
+            footerPanel.Controls.Add(continueWithoutPhone);
+            footerPanel.Controls.Add(cancel);
+            footerPanel.Controls.Add(submit);
 
             layout.Controls.Add(heading, 0, 0);
             layout.Controls.Add(introduction, 0, 1);
-            layout.Controls.Add(countrySelector, 0, 2);
+            layout.Controls.Add(countryPanel, 0, 2);
             layout.Controls.Add(numberPanel, 0, 3);
-            layout.Controls.Add(buttons, 0, 4);
+            layout.Controls.Add(divider, 0, 4);
+            layout.Controls.Add(footerPanel, 0, 5);
             Controls.Add(layout);
             AcceptButton = submit;
             CancelButton = cancel;
@@ -243,15 +284,18 @@ namespace Steam_Desktop_Authenticator
 
             CountryOption country = countrySelector.Items[e.Index] as CountryOption;
             bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-            Color background = selected ? AstroTheme.PrimaryContainer : AstroTheme.SurfaceVariant;
-            Color foreground = selected ? AstroTheme.OnPrimary : AstroTheme.OnSurface;
+            bool isComboEdit = (e.State & DrawItemState.ComboBoxEdit) == DrawItemState.ComboBoxEdit;
+            Color background = isComboEdit
+                ? AstroTheme.SurfaceContainerLowest
+                : (selected ? AstroTheme.SurfaceContainerHigh : AstroTheme.SurfaceContainerLow);
+            Color foreground = selected && !isComboEdit ? AstroTheme.PrimaryLight : AstroTheme.OnSurface;
 
             using (SolidBrush brush = new SolidBrush(background))
                 e.Graphics.FillRectangle(brush, e.Bounds);
 
+            Rectangle textBounds = new Rectangle(e.Bounds.X + 8, e.Bounds.Y, Math.Max(0, e.Bounds.Width - 16), e.Bounds.Height);
             TextRenderer.DrawText(e.Graphics, country == null ? String.Empty : country.DisplayName,
-                e.Font, e.Bounds, foreground, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            e.DrawFocusRectangle();
+                e.Font, textBounds, foreground, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
 
         private void SelectCurrentRegion()

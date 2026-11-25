@@ -6,14 +6,21 @@ namespace Steam_Desktop_Authenticator
 {
     public class AstroMessageBoxForm : Form
     {
-        private Label lblMessage;
-        private FlowLayoutPanel buttonPanel;
-        private CheckBox chkOption;
+        private const int MinDialogClientWidth = 360;
+        private const int MaxDialogClientWidth = 480;
+        private const int MaxDialogHeight = 680;
+
+        private readonly Label lblMessage;
+        private readonly FlowLayoutPanel buttonPanel;
+        private readonly CheckBox chkOption;
+        private readonly Panel dividerPanel;
+        private readonly Panel messageContainer;
         private readonly string primaryButtonText;
         private readonly string secondaryButtonText;
         private readonly string tertiaryButtonText;
         private readonly bool centerContent;
-        
+        private readonly bool useDestructivePrimary;
+
         public DialogResult Result { get; private set; } = DialogResult.None;
         public bool IsChecked => chkOption != null && chkOption.Checked;
 
@@ -23,108 +30,209 @@ namespace Steam_Desktop_Authenticator
             this.secondaryButtonText = secondaryButtonText;
             this.tertiaryButtonText = tertiaryButtonText;
             this.centerContent = centerContent;
+            this.useDestructivePrimary =
+                (icon == MessageBoxIcon.Warning || icon == MessageBoxIcon.Error) &&
+                buttons != MessageBoxButtons.OK;
+
             this.Text = caption;
-            this.Size = new Size(520, 200);
-            this.MinimumSize = new Size(520, 150);
-            this.MaximumSize = new Size(700, 800);
-            this.AutoSize = !centerContent;
-            this.AutoSizeMode = AutoSizeMode.GrowOnly;
             this.StartPosition = FormStartPosition.CenterParent;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.ShowIcon = false;
-            this.ShowInTaskbar = true;
+            this.ShowInTaskbar = false;
             this.BackColor = AstroTheme.Background;
             this.ForeColor = AstroTheme.OnSurface;
             AstroTheme.ApplyDarkTitleBar(this);
 
-            TableLayoutPanel layout = new TableLayoutPanel();
-            layout.AutoSize = !centerContent;
-            layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            layout.Dock = DockStyle.Fill;
-            layout.RowCount = string.IsNullOrEmpty(checkboxText) ? 2 : 3;
-            layout.ColumnCount = 1;
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            layout.RowStyles.Add(new RowStyle(centerContent ? SizeType.Percent : SizeType.AutoSize, centerContent ? 100f : 0f));
-            
-            if (!string.IsNullOrEmpty(checkboxText))
+            bool hasCheckbox = !string.IsNullOrEmpty(checkboxText);
+
+            using (Font measureFont = new Font("Segoe UI", 9.5f, FontStyle.Regular))
             {
-                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                Size singleLineSize = TextRenderer.MeasureText(
+                    text ?? string.Empty,
+                    measureFont,
+                    new Size(MaxDialogClientWidth - 56, int.MaxValue),
+                    TextFormatFlags.WordBreak);
+
+                int targetClientWidth = Math.Max(
+                    MinDialogClientWidth,
+                    Math.Min(MaxDialogClientWidth, singleLineSize.Width + 68));
+
+                int contentWidth = targetClientWidth - 40;
+
+                lblMessage = new Label
+                {
+                    Text = text,
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Regular),
+                    ForeColor = AstroTheme.OnSurface,
+                    BackColor = Color.Transparent,
+                    TextAlign = centerContent ? ContentAlignment.MiddleCenter : ContentAlignment.TopLeft,
+                    AutoSize = true,
+                    MaximumSize = new Size(centerContent ? contentWidth : contentWidth - 16, 0)
+                };
+
+                if (centerContent)
+                {
+                    lblMessage.Location = new Point(20, 18);
+                    lblMessage.MinimumSize = new Size(contentWidth, 0);
+                    Controls.Add(lblMessage);
+                }
+                else
+                {
+                    messageContainer = new Panel
+                    {
+                        Location = new Point(20, 18),
+                        Width = contentWidth,
+                        BackColor = Color.Transparent
+                    };
+
+                    Panel accentBar = new Panel
+                    {
+                        BackColor = ResolveAccentBarColor(icon),
+                        Location = new Point(0, 2),
+                        Width = 3
+                    };
+
+                    lblMessage.Location = new Point(14, 0);
+                    Size msgSize = lblMessage.GetPreferredSize(new Size(contentWidth - 16, 0));
+                    lblMessage.Size = msgSize;
+                    accentBar.Height = Math.Max(18, msgSize.Height - 2);
+                    messageContainer.Height = Math.Max(22, msgSize.Height);
+
+                    messageContainer.Controls.Add(accentBar);
+                    messageContainer.Controls.Add(lblMessage);
+                    Controls.Add(messageContainer);
+                }
+
+                int nextTop = (centerContent ? lblMessage.Bottom : messageContainer.Bottom) + 14;
+
+                if (hasCheckbox)
+                {
+                    chkOption = new CheckBox
+                    {
+                        Text = checkboxText,
+                        AutoSize = true,
+                        MaximumSize = new Size(contentWidth, 0),
+                        Location = new Point(20, nextTop),
+                        Font = new Font("Segoe UI", 8.75f, FontStyle.Regular)
+                    };
+                    AstroTheme.StyleCheckBox(chkOption);
+                    chkOption.ForeColor = Color.FromArgb(184, 196, 212);
+                    Controls.Add(chkOption);
+                    nextTop = chkOption.Bottom + 12;
+                }
+
+                dividerPanel = new Panel
+                {
+                    BackColor = AstroTheme.Divider,
+                    Location = new Point(20, nextTop),
+                    Size = new Size(contentWidth, 1)
+                };
+                Controls.Add(dividerPanel);
+                nextTop = dividerPanel.Bottom + 12;
+
+                buttonPanel = new FlowLayoutPanel
+                {
+                    FlowDirection = FlowDirection.RightToLeft,
+                    WrapContents = false,
+                    AutoSize = false,
+                    Location = new Point(20, nextTop),
+                    Size = new Size(contentWidth, 34),
+                    Margin = Padding.Empty,
+                    Padding = Padding.Empty,
+                    BackColor = Color.Transparent
+                };
+                Controls.Add(buttonPanel);
+
+                SetupButtons(buttons);
+
+                // Expand dialog width cleanly if custom button labels need extra horizontal room.
+                int requiredButtonsWidth = 0;
+                foreach (Control control in buttonPanel.Controls)
+                    requiredButtonsWidth += control.Width + control.Margin.Horizontal;
+
+                int finalClientWidth = Math.Max(targetClientWidth, Math.Min(640, requiredButtonsWidth + 40));
+                if (finalClientWidth != targetClientWidth)
+                {
+                    int newContentWidth = finalClientWidth - 40;
+                    dividerPanel.Width = newContentWidth;
+                    buttonPanel.Width = newContentWidth;
+                    if (centerContent)
+                    {
+                        lblMessage.MaximumSize = new Size(newContentWidth, 0);
+                        lblMessage.MinimumSize = new Size(newContentWidth, 0);
+                    }
+                    else
+                    {
+                        messageContainer.Width = newContentWidth;
+                    }
+                }
+
+                if (centerContent)
+                {
+                    int totalBtnWidth = Math.Min(buttonPanel.Width, requiredButtonsWidth);
+                    buttonPanel.Location = new Point(Math.Max(20, (finalClientWidth - totalBtnWidth) / 2), nextTop);
+                    buttonPanel.Width = Math.Max(totalBtnWidth, 88);
+                }
+
+                int finalClientHeight = Math.Min(MaxDialogHeight, buttonPanel.Bottom + 16);
+                ClientSize = new Size(finalClientWidth, finalClientHeight);
+                MinimumSize = Size;
+                MaximumSize = new Size(Math.Max(660, Width), MaxDialogHeight + 60);
             }
-            
-            layout.RowStyles.Add(new RowStyle(centerContent ? SizeType.AutoSize : SizeType.Absolute, centerContent ? 0f : 50f));
-            layout.Padding = new Padding(15);
-            this.Controls.Add(layout);
+        }
 
-            lblMessage = new Label();
-            lblMessage.Text = text;
-            lblMessage.Dock = DockStyle.Fill;
-            lblMessage.TextAlign = centerContent ? ContentAlignment.MiddleCenter : ContentAlignment.MiddleLeft;
-            lblMessage.Font = new Font("Segoe UI", 10f, FontStyle.Regular);
-            lblMessage.AutoSize = !centerContent;
-            lblMessage.MaximumSize = centerContent ? Size.Empty : new Size(470, 0); // Allow text wrapping
-            layout.Controls.Add(lblMessage, 0, 0);
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Activate();
+            BringToFront();
+        }
 
-            int currentRow = 1;
-
-            if (!string.IsNullOrEmpty(checkboxText))
+        private static Color ResolveAccentBarColor(MessageBoxIcon icon)
+        {
+            switch (icon)
             {
-                chkOption = new CheckBox();
-                chkOption.Text = checkboxText;
-                chkOption.AutoSize = true;
-                chkOption.Dock = DockStyle.Left;
-                chkOption.Margin = new Padding(10, 10, 0, 0);
-                chkOption.Font = new Font("Segoe UI", 9f, FontStyle.Regular);
-                layout.Controls.Add(chkOption, 0, currentRow);
-                currentRow++;
+                case MessageBoxIcon.Error:
+                    return AstroTheme.ErrorAccent;
+                case MessageBoxIcon.Warning:
+                    return AstroTheme.Warning;
+                default:
+                    return AstroTheme.PrimaryAccent;
             }
-
-            buttonPanel = new FlowLayoutPanel();
-            buttonPanel.AutoSize = centerContent;
-            buttonPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            buttonPanel.Dock = centerContent ? DockStyle.None : DockStyle.Fill;
-            buttonPanel.Anchor = centerContent ? AnchorStyles.None : AnchorStyles.Top | AnchorStyles.Left;
-            buttonPanel.Margin = Padding.Empty;
-            buttonPanel.MaximumSize = new Size(MaximumSize.Width - layout.Padding.Horizontal, 0);
-            buttonPanel.FlowDirection = FlowDirection.RightToLeft;
-            buttonPanel.WrapContents = true;
-            buttonPanel.AutoScroll = true;
-            layout.Controls.Add(buttonPanel, 0, currentRow);
-
-            SetupButtons(buttons);
-            if (centerContent)
-                SizeCenteredDialog(layout);
         }
 
         private void SetupButtons(MessageBoxButtons buttons)
         {
+            // FlowDirection.RightToLeft places the first added button on the far right,
+            // so primary/confirm always sits cleanly on the right with Cancel/No to its left.
             switch (buttons)
             {
                 case MessageBoxButtons.OK:
-                    AddButton("OK", DialogResult.OK, true);
+                    AddButton("OK", DialogResult.OK, isPrimary: true, isCancel: true);
                     break;
                 case MessageBoxButtons.OKCancel:
-                    AddButton(CustomLabelOrDefault(secondaryButtonText, "Cancel"), DialogResult.Cancel, false);
-                    AddButton(CustomLabelOrDefault(primaryButtonText, "OK"), DialogResult.OK, true);
+                    AddButton(CustomLabelOrDefault(primaryButtonText, "OK"), DialogResult.OK, isPrimary: true);
+                    AddButton(CustomLabelOrDefault(secondaryButtonText, "Cancel"), DialogResult.Cancel, isPrimary: false, isCancel: true);
                     break;
                 case MessageBoxButtons.YesNo:
-                    AddButton("No", DialogResult.No, false);
-                    AddButton("Yes", DialogResult.Yes, true);
+                    AddButton("Yes", DialogResult.Yes, isPrimary: true);
+                    AddButton("No", DialogResult.No, isPrimary: false, isCancel: true);
                     break;
                 case MessageBoxButtons.YesNoCancel:
-                    AddButton(CustomLabelOrDefault(tertiaryButtonText, "Cancel"), DialogResult.Cancel, false);
-                    AddButton(CustomLabelOrDefault(secondaryButtonText, "No"), DialogResult.No, false);
-                    AddButton(CustomLabelOrDefault(primaryButtonText, "Yes"), DialogResult.Yes, true);
+                    AddButton(CustomLabelOrDefault(primaryButtonText, "Yes"), DialogResult.Yes, isPrimary: true);
+                    AddButton(CustomLabelOrDefault(secondaryButtonText, "No"), DialogResult.No, isPrimary: false);
+                    AddButton(CustomLabelOrDefault(tertiaryButtonText, "Cancel"), DialogResult.Cancel, isPrimary: false, isCancel: true);
                     break;
                 case MessageBoxButtons.RetryCancel:
-                    AddButton("Cancel", DialogResult.Cancel, false);
-                    AddButton("Retry", DialogResult.Retry, true);
+                    AddButton("Retry", DialogResult.Retry, isPrimary: true);
+                    AddButton("Cancel", DialogResult.Cancel, isPrimary: false, isCancel: true);
                     break;
                 case MessageBoxButtons.AbortRetryIgnore:
-                    AddButton("Ignore", DialogResult.Ignore, false);
-                    AddButton("Retry", DialogResult.Retry, false);
-                    AddButton("Abort", DialogResult.Abort, true);
+                    AddButton("Abort", DialogResult.Abort, isPrimary: true);
+                    AddButton("Retry", DialogResult.Retry, isPrimary: false);
+                    AddButton("Ignore", DialogResult.Ignore, isPrimary: false);
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(buttons), buttons, "The dialog button set is not supported.");
@@ -136,25 +244,37 @@ namespace Steam_Desktop_Authenticator
             return String.IsNullOrWhiteSpace(label) ? fallback : label;
         }
 
-        private void AddButton(string text, DialogResult result, bool isPrimary)
+        private void AddButton(string text, DialogResult result, bool isPrimary, bool isCancel = false)
         {
-            Button btn = new Button();
-            btn.Text = text;
-            btn.FlatStyle = FlatStyle.Flat;
-            btn.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
-            int buttonWidth = Math.Max(80, TextRenderer.MeasureText(text, btn.Font, Size.Empty, TextFormatFlags.SingleLine).Width + 24);
+            Button btn = new Button
+            {
+                Text = text,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            int buttonWidth = Math.Max(82, TextRenderer.MeasureText(text, btn.Font, Size.Empty, TextFormatFlags.SingleLine).Width + 26);
             btn.Size = new Size(buttonWidth, 32);
-            btn.Cursor = Cursors.Hand;
-            btn.Margin = new Padding(10, 0, 0, 0);
-            
+            btn.Margin = buttonPanel.Controls.Count == 0
+                ? new Padding(0)
+                : new Padding(0, 0, 8, 0);
+
             if (isPrimary)
             {
-                AstroTheme.StylePrimaryButton(btn);
+                if (useDestructivePrimary)
+                    AstroTheme.StyleDangerSolidButton(btn);
+                else
+                    AstroTheme.StylePrimaryButton(btn);
+                AcceptButton = btn;
             }
             else
             {
-                AstroTheme.StyleSecondaryButton(btn);
+                AstroTheme.StyleSurfaceButton(btn);
             }
+
+            if (isCancel)
+                CancelButton = btn;
+
             btn.Click += (sender, e) =>
             {
                 this.Result = result;
@@ -163,38 +283,6 @@ namespace Steam_Desktop_Authenticator
             };
 
             buttonPanel.Controls.Add(btn);
-            EnsureButtonPanelWidth();
-        }
-
-        private void EnsureButtonPanelWidth()
-        {
-            int requiredPanelWidth = 0;
-            foreach (Control control in buttonPanel.Controls)
-                requiredPanelWidth += control.Width + control.Margin.Horizontal;
-
-            int requiredDialogWidth = Math.Min(MaximumSize.Width, Math.Max(Width, requiredPanelWidth + 70));
-            if (Width < requiredDialogWidth)
-                Width = requiredDialogWidth;
-
-            if (MinimumSize.Width < requiredDialogWidth)
-                MinimumSize = new Size(requiredDialogWidth, MinimumSize.Height);
-        }
-
-        private void SizeCenteredDialog(TableLayoutPanel layout)
-        {
-            layout.PerformLayout();
-
-            int availableMessageWidth = Math.Max(1, layout.GetColumnWidths()[0]);
-            int messageHeight = lblMessage.GetPreferredSize(new Size(availableMessageWidth, 0)).Height;
-            int checkboxHeight = chkOption == null
-                ? 0
-                : chkOption.GetPreferredSize(new Size(availableMessageWidth, 0)).Height + chkOption.Margin.Vertical;
-            int buttonHeight = Math.Max(50, buttonPanel.Height + buttonPanel.Margin.Vertical);
-            int desiredClientHeight = layout.Padding.Vertical + messageHeight + checkboxHeight + buttonHeight;
-            int desiredHeight = SizeFromClientSize(new Size(ClientSize.Width, desiredClientHeight)).Height;
-
-            Height = Math.Max(MinimumSize.Height, Math.Min(MaximumSize.Height, desiredHeight));
-            layout.PerformLayout();
         }
     }
 }

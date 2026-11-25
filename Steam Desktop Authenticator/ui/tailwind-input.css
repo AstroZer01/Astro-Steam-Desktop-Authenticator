@@ -12,24 +12,69 @@
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;
-  font-weight: 400 500;
+  font-weight: 400 700;
   font-display: swap;
   src: url("../fonts/jetbrains-mono-latin.woff2") format("woff2");
 }
 
+:root {
+  --astro-canvas: #070b13;
+  --astro-surface: #0d1320;
+  --astro-lowest: #090e19;
+  --astro-low: #121a2b;
+  --astro-container: #161f32;
+  --astro-high: #1e283e;
+  --astro-variant: #27324a;
+
+  --astro-accent: #4cc3d9;
+  --astro-accent-soft: #85d6e6;
+  --astro-accent-deep: #2a7891;
+  --astro-accent-bg: rgba(76, 195, 217, 0.10);
+  --astro-accent-bd: rgba(76, 195, 217, 0.26);
+
+  --astro-ok: #38b27c;
+  --astro-ok-soft: #6ad0a2;
+  --astro-ok-bg: rgba(56, 178, 124, 0.10);
+  --astro-ok-bd: rgba(56, 178, 124, 0.26);
+
+  --astro-warn: #d49e3d;
+  --astro-warn-soft: #e6be73;
+  --astro-warn-bg: rgba(212, 158, 61, 0.10);
+  --astro-warn-bd: rgba(212, 158, 61, 0.28);
+
+  --astro-err: #b34d50;
+  --astro-err-soft: #df8a8c;
+  --astro-err-bg: rgba(179, 77, 80, 0.10);
+  --astro-err-bd: rgba(179, 77, 80, 0.28);
+
+  --astro-text: #e4eaf4;
+  --astro-muted: #96a4b8;
+  --astro-subtle: #64748b;
+  --astro-border: rgba(255, 255, 255, 0.075);
+  --astro-border-strong: rgba(255, 255, 255, 0.13);
+  --astro-rim: inset 0 1px 0 rgba(255, 255, 255, 0.065);
+}
+
 @layer base {
-  /* Preserve the v3 defaults used by the existing WebView templates. */
   *,
   ::after,
   ::before,
   ::backdrop,
   ::file-selector-button {
-    border-color: #e5e7eb;
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+
+  html,
+  body {
+    background-color: var(--astro-surface);
+    color: var(--astro-text);
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
 
   input::placeholder,
   textarea::placeholder {
-    color: #9ca3af;
+    color: var(--astro-subtle);
   }
 
   button,
@@ -38,60 +83,392 @@
   }
 
   body[data-page="dashboard"] {
-    background-color: theme("colors.background");
-    color: theme("colors.on-surface");
-    font-family: "Inter", sans-serif;
-    min-height: max(884px, 100dvh);
+    background:
+      radial-gradient(ellipse 65% 30% at 15% 0%, rgba(76, 195, 217, 0.04), transparent 70%),
+      radial-gradient(ellipse 50% 25% at 88% 0%, rgba(56, 178, 124, 0.025), transparent 70%),
+      var(--astro-surface);
+    color: var(--astro-text);
+    height: 100vh;
+    overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
   }
 
   body[data-page="dashboard"] input,
-  body[data-page="dashboard"] textarea {
+  body[data-page="dashboard"] textarea,
+  body[data-page="dashboard"] select {
     user-select: text;
     -webkit-user-select: text;
   }
 }
 
 @layer components {
-  .glass-panel {
-    background: rgba(30, 41, 59, 0.7);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+  /* Satin top-lit desktop surfaces */
+  .glass-panel,
+  .astro-card {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0) 48%), var(--astro-low);
+    border: 1px solid var(--astro-border);
+    box-shadow: var(--astro-rim);
   }
 
+  .astro-card-elevated {
+    background: linear-gradient(180deg, #182236 0%, #131b2c 100%);
+    border: 1px solid var(--astro-border-strong);
+    box-shadow: 0 22px 48px rgba(0, 0, 0, 0.52), var(--astro-rim);
+  }
+
+  .astro-hero {
+    background:
+      radial-gradient(ellipse 70% 95% at 14% 0%, rgba(76, 195, 217, 0.10) 0%, transparent 66%),
+      linear-gradient(180deg, #162136 0%, #101829 100%);
+    border: 1px solid rgba(133, 214, 230, 0.20);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 10px 24px rgba(0, 0, 0, 0.24);
+  }
+
+  .astro-qr-active {
+    background:
+      radial-gradient(ellipse 80% 100% at 0% 0%, rgba(76, 195, 217, 0.10), transparent 65%),
+      var(--astro-low);
+    border-color: var(--astro-accent-bd);
+  }
+
+  .astro-card-sensitive {
+    border-left: 3px solid var(--astro-err);
+    background:
+      linear-gradient(90deg, rgba(179, 77, 80, 0.09) 0%, transparent 32%),
+      var(--astro-low);
+  }
+
+  /* High-Contrast Satin Primary CTA (Deep Glacier Teal, WCAG AA >= 5.4:1 with white text) */
   .btn-primary {
-    background: #00e5ff;
-    border: none;
-    color: #00363d;
+    background: linear-gradient(180deg, #28829c 0%, #1e6a80 100%);
+    border: 1px solid rgba(114, 206, 224, 0.38);
+    color: #f8fafc;
     cursor: pointer;
-    font-weight: bold;
-    transition: background 0.2s;
+    font-weight: 600;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 4px 12px rgba(10, 32, 44, 0.36);
+    transition: filter 0.15s ease, transform 0.1s ease, opacity 0.15s ease;
   }
 
-  .btn-primary:hover {
-    background: #9cf0ff;
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.10);
+  }
+
+  .btn-primary:active:not(:disabled) {
+    filter: brightness(0.96);
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  .btn-surface {
+    background: linear-gradient(180deg, #1d273c 0%, #161f32 100%);
+    border: 1px solid var(--astro-border-strong);
+    color: var(--astro-text);
+    font-weight: 600;
+    box-shadow: var(--astro-rim);
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .btn-surface:hover:not(:disabled) {
+    background: linear-gradient(180deg, #24304a 0%, #1c263c 100%);
+    border-color: rgba(255, 255, 255, 0.18);
+  }
+
+  .btn-surface:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--astro-border-strong);
+    color: var(--astro-muted);
+    font-weight: 500;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+
+  .btn-ghost:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--astro-text);
+  }
+
+  .btn-ok {
+    background: linear-gradient(180deg, rgba(56, 178, 124, 0.22) 0%, rgba(56, 178, 124, 0.13) 100%);
+    border: 1px solid var(--astro-ok-bd);
+    color: var(--astro-ok-soft);
+    font-weight: 600;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+
+  .btn-ok:hover:not(:disabled) {
+    background: linear-gradient(180deg, rgba(56, 178, 124, 0.30) 0%, rgba(56, 178, 124, 0.19) 100%);
+    border-color: rgba(106, 208, 162, 0.42);
+  }
+
+  .btn-err-soft {
+    background: linear-gradient(180deg, rgba(179, 77, 80, 0.20) 0%, rgba(179, 77, 80, 0.11) 100%);
+    border: 1px solid var(--astro-err-bd);
+    color: var(--astro-err-soft);
+    font-weight: 600;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+
+  .btn-err-soft:hover:not(:disabled) {
+    background: linear-gradient(180deg, rgba(179, 77, 80, 0.30) 0%, rgba(179, 77, 80, 0.18) 100%);
+    border-color: rgba(223, 138, 140, 0.42);
+  }
+
+  .btn-add-accent {
+    background: linear-gradient(180deg, rgba(76, 195, 217, 0.16), rgba(76, 195, 217, 0.08));
+    border: 1px solid var(--astro-accent-bd);
+    color: var(--astro-accent-soft);
+    font-weight: 600;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+
+  .btn-add-accent:hover:not(:disabled) {
+    background: linear-gradient(180deg, rgba(76, 195, 217, 0.24), rgba(76, 195, 217, 0.14));
+  }
+
+  /* Pixel-centered count badges */
+  .count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9999px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  .count-badge-acc {
+    background: var(--astro-accent-bg);
+    color: var(--astro-accent-soft);
+    border: 1px solid var(--astro-accent-bd);
+  }
+
+  .count-badge-err {
+    background: var(--astro-err-bg);
+    color: var(--astro-err-soft);
+    border: 1px solid var(--astro-err-bd);
+  }
+
+  .count-badge-warn {
+    background: var(--astro-warn-bg);
+    color: var(--astro-warn-soft);
+    border: 1px solid var(--astro-warn-bd);
+    min-width: 16px;
+    height: 16px;
+    padding: 0;
+  }
+
+  .astro-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 3.5px 8.5px;
+    border-radius: 9999px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .astro-progress-fill {
+    background: linear-gradient(90deg, #276984 0%, #4cc3d9 74%, #8ae0ef 100%);
+  }
+
+  /* Sidebar Account Row Selection */
+  .acct-row-selected {
+    background: linear-gradient(90deg, rgba(76, 195, 217, 0.13) 0%, rgba(76, 195, 217, 0.04) 100%);
+    border-color: rgba(76, 195, 217, 0.22);
+    position: relative;
+  }
+
+  .acct-row-selected::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--astro-accent);
+  }
+
+  /* Modern Pill Toggle (clear visual contrast between ON and OFF states) */
+  .astro-toggle {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 38px;
+    height: 21px;
+    border-radius: 9999px;
+    background-color: #1b2436 !important;
+    background-image: none !important;
+    border: 1px solid rgba(148, 163, 184, 0.28) !important;
+    position: relative;
+    flex-shrink: 0;
+    cursor: pointer;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+    transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  }
+
+  .astro-toggle::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 15px;
+    height: 15px;
+    border-radius: 9999px;
+    background: #8494ac;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    transition: transform 0.18s ease, background-color 0.18s ease;
+  }
+
+  .astro-toggle:checked {
+    background-color: #27859e !important;
+    background-image: linear-gradient(180deg, #3eb4cc 0%, #247e96 100%) !important;
+    border-color: rgba(133, 214, 230, 0.72) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 0 8px rgba(76, 195, 217, 0.22);
+  }
+
+  .astro-toggle:checked::after {
+    background: #ffffff;
+    transform: translateX(17px);
+  }
+
+  .astro-toggle:focus {
+    outline: none !important;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+  }
+
+  .astro-toggle:checked:focus {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 0 8px rgba(76, 195, 217, 0.22);
+  }
+
+  .astro-toggle:focus-visible {
+    outline: none !important;
+    box-shadow: 0 0 0 2px rgba(76, 195, 217, 0.55) !important;
+  }
+
+  .astro-toggle:disabled {
+    opacity: 0.42;
+    cursor: not-allowed;
+  }
+
+  /* Desktop Split-Pane Shell (>= 680px) vs Compact (< 680px) */
+  .astro-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  .astro-sidebar {
+    display: none;
+  }
+
+  .astro-topbar {
+    display: none;
+  }
+
+  .astro-compact-header {
+    display: flex;
+  }
+
+  .astro-compact-accounts {
+    display: flex;
+  }
+
+  .astro-bottom-nav {
+    display: grid;
+  }
+
+  .astro-settings-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .astro-settings-rail {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  @media (min-width: 680px) {
+    .astro-shell {
+      display: grid;
+      grid-template-columns: 244px 1fr;
+    }
+
+    .astro-sidebar {
+      display: flex;
+    }
+
+    .astro-topbar {
+      display: flex;
+    }
+
+    .astro-compact-header {
+      display: none;
+    }
+
+    .astro-compact-accounts {
+      display: none;
+    }
+
+    .astro-bottom-nav {
+      display: none;
+    }
+
+    .astro-settings-shell {
+      display: grid;
+      grid-template-columns: 186px 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .astro-settings-rail {
+      flex-direction: column;
+      overflow-x: visible;
+    }
   }
 
   .loader {
-    animation: spin 1s linear infinite;
-    border: 4px solid rgba(255, 255, 255, 0.1);
-    border-left-color: #00e5ff;
+    animation: spin 0.9s linear infinite;
+    border: 3px solid rgba(255, 255, 255, 0.10);
+    border-left-color: var(--astro-accent);
     border-radius: 50%;
-    height: 40px;
-    width: 40px;
+    height: 36px;
+    width: 36px;
   }
 
   .ui-icon {
     display: inline-block;
     fill: none;
-    height: 1.25rem;
+    height: 1.125rem;
     stroke: currentColor;
     stroke-linecap: round;
     stroke-linejoin: round;
-    stroke-width: 1.8;
+    stroke-width: 1.85;
     vertical-align: middle;
-    width: 1.25rem;
+    width: 1.125rem;
   }
 
   .ui-icon-fill {
@@ -101,44 +478,35 @@
 
   .renew-session-icon {
     overflow: visible;
-    stroke-width: 2.25;
+    stroke-width: 2.15;
   }
 
-  .account-list-scroll {
-    box-sizing: content-box;
-    height: 16.5rem;
-    scrollbar-color: rgba(78, 222, 163, 0.85) rgba(45, 52, 73, 0.85);
+  /* Subtle dark scrollbars */
+  .astro-scroll {
+    scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
     scrollbar-width: thin;
   }
 
-  .account-list-row {
-    height: 2.75rem;
-    min-height: 2.75rem;
+  .astro-scroll::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
   }
 
-  .account-list-scroll::-webkit-scrollbar {
-    width: 0.625rem;
+  .astro-scroll::-webkit-scrollbar-track {
+    background: transparent;
   }
 
-  .account-list-scroll::-webkit-scrollbar-track {
-    background: rgba(45, 52, 73, 0.85);
-    box-shadow: inset 0 0 0 1px rgba(195, 245, 255, 0.08);
+  .astro-scroll::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.28);
     border-radius: 9999px;
-    margin-block: 0.375rem;
+    border: 2px solid transparent;
+    background-clip: padding-box;
   }
 
-  .account-list-scroll::-webkit-scrollbar-thumb {
-    background: rgba(78, 222, 163, 0.7);
-    border: 2px solid #060e20;
-    border-radius: 9999px;
-  }
-
-  .account-list-scroll::-webkit-scrollbar-thumb:hover {
-    background: #c3f5ff;
-  }
-
-  .account-list-scroll::-webkit-scrollbar-corner {
-    background: rgba(45, 52, 73, 0.85);
+  .astro-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(133, 214, 230, 0.45);
+    border: 2px solid transparent;
+    background-clip: padding-box;
   }
 }
 
@@ -147,9 +515,9 @@
   to { transform: rotate(360deg); }
 }
 
-body[data-page="dashboard"] input[type="checkbox"]:checked {
-  background-color: theme("colors.secondary") !important;
+body[data-page="dashboard"] input[type="checkbox"]:not(.astro-toggle):checked {
+  background-color: #28829c !important;
   background-image: url("../icons/check.svg") !important;
-  border-color: theme("colors.secondary") !important;
-  color: theme("colors.secondary") !important;
+  border-color: #4cc3d9 !important;
+  color: #f8fafc !important;
 }

@@ -16,29 +16,46 @@ module.exports = {
         mono: ["JetBrains Mono", ...defaultTheme.fontFamily.mono]
       },
       colors: {
-        "surface-variant": "#2d3449",
-        "on-surface": "#dae2fd",
-        primary: "#c3f5ff",
-        "primary-fixed": "#9cf0ff",
-        background: "#0b1326",
-        "surface-container-low": "#131b2e",
-        "surface-container": "#171f33",
-        "surface-container-high": "#222a3d",
-        "primary-container": "#00e5ff",
-        "on-surface-variant": "#bac9cc",
-        "surface-container-lowest": "#060e20",
-        "surface-container-highest": "#2d3449",
-        surface: "#0b1326",
-        "on-primary": "#00363d",
-        "on-primary-container": "#00363d",
-        secondary: "#4edea3",
-        "secondary-container": "#00a572",
-        "on-secondary": "#003824",
-        "surface-bright": "#31394d",
-        error: "#ff5449",
-        "on-error": "#690005",
-        "error-container": "#93000a",
-        "on-error-container": "#ffb4ab"
+        // Refined v2 Calm Slate-Navy Surfaces
+        canvas: "#070b13",
+        background: "#0d1320",
+        surface: "#0d1320",
+        "surface-container-lowest": "#090e19",
+        "surface-container-low": "#121a2b",
+        "surface-container": "#161f32",
+        "surface-container-high": "#1e283e",
+        "surface-container-highest": "#27324a",
+        "surface-variant": "#27324a",
+        "surface-bright": "#2d3a54",
+
+        // Deep Glacier Teal & Soft Glacier Cyan (Interactive / Primary)
+        primary: "#85d6e6",
+        "primary-fixed": "#4cc3d9",
+        "primary-container": "#28829c",
+        "primary-deep": "#1e6a80",
+        "on-primary": "#f8fafc",
+        "on-primary-container": "#f8fafc",
+
+        // Muted Sage Emerald (Healthy / Approve only)
+        secondary: "#6ad0a2",
+        "secondary-container": "#38b27c",
+        "on-secondary": "#052318",
+
+        // Muted Gold (Caution / Unsaved dirty indicators)
+        warning: "#e6be73",
+        "warning-container": "#d49e3d",
+
+        // Muted Rose-Crimson (Errors / Destructive — calm, zero neon glare)
+        error: "#df8a8c",
+        "error-strong": "#b34d50",
+        "error-container": "#8f3538",
+        "on-error": "#fbf6f6",
+        "on-error-container": "#f5d0d1",
+
+        // Cool Slate Typography
+        "on-surface": "#e4eaf4",
+        "on-surface-variant": "#96a4b8",
+        "on-surface-subtle": "#64748b"
       }
     }
   },

@@ -436,18 +436,19 @@ namespace Steam_Desktop_Authenticator
 
         private async void SetupModernUI()
         {
-            this.Size = new Size(450, 750);
-            this.MinimumSize = new Size(450, 750);
-            this.MaximumSize = new Size(450, 750);
+            this.Size = new Size(440, 520);
+            this.MinimumSize = new Size(440, 520);
+            this.MaximumSize = new Size(440, 520);
             this.MaximizeBox = false;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
-            this.BackColor = Color.FromArgb(11, 19, 38);
-            this.Text = "Astro SDA - Login";
+            this.BackColor = AstroTheme.Background;
+            this.Text = "Astro SDA — Steam Login";
+            AstroTheme.ApplyDarkTitleBar(this);
 
             Panel loadingPanel = new Panel();
             loadingPanel.Dock = DockStyle.Fill;
-            loadingPanel.BackColor = Color.FromArgb(11, 19, 38);
-            Label lblLoading = new Label() { Text = "Loading Astro UI...", ForeColor = Color.White, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+            loadingPanel.BackColor = AstroTheme.Background;
+            Label lblLoading = new Label() { Text = "Loading Astro UI...", ForeColor = AstroTheme.OnSurfaceVariant, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
             loadingPanel.Controls.Add(lblLoading);
             this.Controls.Add(loadingPanel);
             loadingPanel.BringToFront();
@@ -525,6 +526,14 @@ namespace Steam_Desktop_Authenticator
                 // Push initial values to JS
                 string jsExp = Newtonsoft.Json.JsonConvert.SerializeObject(labelLoginExplanation.Text);
                 _ = ExecuteScriptSafelyAsync($"setExplanation({jsExp})", "Login explanation UI");
+
+                string contextLabel = this.LoginReason == LoginType.Transfer
+                    ? "Transfer Authenticator"
+                    : (this.LoginReason == LoginType.Refresh
+                        ? "Refresh Steam Session"
+                        : (this.LoginReason == LoginType.Import ? "Import Account" : "Setup New Account"));
+                string jsContext = Newtonsoft.Json.JsonConvert.SerializeObject(contextLabel);
+                _ = ExecuteScriptSafelyAsync($"if (typeof setContextLabel === 'function') setContextLabel({jsContext})", "Login context UI");
                 
                 if (this.account != null)
                 {
@@ -576,6 +585,11 @@ namespace Steam_Desktop_Authenticator
                 txtPassword.Text = password;
                 btnSteamLogin_Click(this, EventArgs.Empty);
             }
+            else if (action == "cancel")
+            {
+                if (!transferContinueInFlight)
+                    Close();
+            }
         }
 
         public void SetUsername(string username)
@@ -611,8 +625,8 @@ namespace Steam_Desktop_Authenticator
             }
 
             btnSteamLogin.Enabled = true;
-            btnSteamLogin.Text = "Login";
-            _ = ExecuteScriptSafelyAsync("setButtonState('LOGIN', false)", "Login button UI");
+            btnSteamLogin.Text = "Sign In to Steam";
+            _ = ExecuteScriptSafelyAsync("setButtonState('Sign In to Steam', false)", "Login button UI");
         }
 
         private static async Task WaitForSteamConnectionAsync(SteamClient steamClient, CancellationToken cancellationToken)
@@ -635,8 +649,8 @@ namespace Steam_Desktop_Authenticator
 
             // Disable button while we login
             btnSteamLogin.Enabled = false;
-            btnSteamLogin.Text = "Logging in...";
-            _ = ExecuteScriptSafelyAsync("setButtonState('LOGGING IN...', true)", "Login button UI");
+            btnSteamLogin.Text = "Signing in...";
+            _ = ExecuteScriptSafelyAsync("setButtonState('Signing in…', true)", "Login button UI");
 
             string username = txtUsername.Text;
             string password = txtPassword.Text;

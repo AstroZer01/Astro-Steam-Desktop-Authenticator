@@ -8,65 +8,117 @@ namespace Steam_Desktop_Authenticator
     internal sealed class ExportQrForm : Form
     {
         private readonly SteamGuardAccount account;
-        private readonly RadioButton rbKeePassXC;
-        private readonly RadioButton rbBitwarden;
+        private readonly Button btnKeePassXC;
+        private readonly Button btnBitwarden;
         private readonly PictureBox picQr;
         private readonly Label lblFormatNote;
         private readonly Label lblError;
+        private SecretQrFormat selectedFormat = SecretQrFormat.KeePassXC;
         private Bitmap currentQrBitmap;
 
         public ExportQrForm(SteamGuardAccount account)
         {
             this.account = account ?? throw new ArgumentNullException(nameof(account));
 
-            Text = "Export Secret QR Code - " + (account.AccountName ?? "Account");
+            Text = "Export Secret QR Code — " + (account.AccountName ?? "Account");
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(420, 560);
+            ClientSize = new Size(440, 588);
 
+            // Muted gold left-accent security warning callout
+            Panel warningCallout = new Panel
+            {
+                Location = new Point(22, 16),
+                Size = new Size(396, 98),
+                BackColor = AstroTheme.WarningSurface
+            };
+            Panel warningBar = new Panel
+            {
+                BackColor = AstroTheme.Warning,
+                Dock = DockStyle.Left,
+                Width = 4
+            };
             Label lblWarning = new Label
             {
                 Text = "SECURITY WARNING: Anyone who scans this QR code can generate your Steam Guard login codes.\n\n" +
-                    "QR codes transfer only shared_secret (5-character login codes). They do NOT include identity_secret (trade/market confirmations) or revocation_code — export a .maFile or encrypted .zip for a complete backup.",
+                    "QR codes transfer only shared_secret (5-character codes). Export a .maFile or encrypted .zip for a complete backup.",
                 AutoSize = false,
-                Location = new Point(20, 14),
-                Size = new Size(380, 96),
-                ForeColor = Color.FromArgb(255, 200, 140)
+                Location = new Point(14, 9),
+                Size = new Size(370, 82),
+                Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+                ForeColor = AstroTheme.WarningSoft,
+                BackColor = Color.Transparent
+            };
+            warningCallout.Controls.Add(lblWarning);
+            warningCallout.Controls.Add(warningBar);
+            warningCallout.Paint += (s, e) =>
+            {
+                using (Pen borderPen = new Pen(Color.FromArgb(62, 54, 42), 1f))
+                {
+                    e.Graphics.DrawRectangle(borderPen, 0, 0, warningCallout.Width - 1, warningCallout.Height - 1);
+                }
             };
 
             Label lblFormatTitle = new Label
             {
-                Text = "Steam TOTP Format:",
+                Text = "STEAM TOTP FORMAT",
                 AutoSize = true,
-                Location = new Point(20, 118),
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
+                Location = new Point(22, 126),
+                Font = new Font("Segoe UI", 7.75F, FontStyle.Bold),
+                ForeColor = AstroTheme.Outline,
+                BackColor = Color.Transparent
             };
 
-            rbKeePassXC = new RadioButton
+            // Flat segmented format toggle buttons (replaces legacy RadioButtons)
+            Panel formatTrack = new Panel
             {
-                Text = "KeePassXC (otpauth Steam encoder)",
-                Location = new Point(20, 142),
-                Size = new Size(210, 24),
-                Checked = true
+                Location = new Point(22, 146),
+                Size = new Size(396, 36),
+                BackColor = AstroTheme.SurfaceContainerLowest,
+                Padding = new Padding(3)
             };
-            rbKeePassXC.CheckedChanged += FormatSelectionChanged;
+            formatTrack.Paint += (s, e) =>
+            {
+                using (Pen borderPen = new Pen(AstroTheme.Divider, 1f))
+                {
+                    e.Graphics.DrawRectangle(borderPen, 0, 0, formatTrack.Width - 1, formatTrack.Height - 1);
+                }
+            };
 
-            rbBitwarden = new RadioButton
+            btnKeePassXC = new Button
+            {
+                Text = "KeePassXC (otpauth)",
+                Location = new Point(3, 3),
+                Size = new Size(194, 30)
+            };
+            btnKeePassXC.Click += (s, e) => SelectFormat(SecretQrFormat.KeePassXC);
+
+            btnBitwarden = new Button
             {
                 Text = "Bitwarden (steam://)",
-                Location = new Point(236, 142),
-                Size = new Size(164, 24)
+                Location = new Point(199, 3),
+                Size = new Size(194, 30)
             };
-            rbBitwarden.CheckedChanged += FormatSelectionChanged;
+            btnBitwarden.Click += (s, e) => SelectFormat(SecretQrFormat.Bitwarden);
+
+            formatTrack.Controls.Add(btnKeePassXC);
+            formatTrack.Controls.Add(btnBitwarden);
 
             Panel qrContainer = new Panel
             {
-                Location = new Point(60, 174),
-                Size = new Size(300, 300),
+                Location = new Point(68, 196),
+                Size = new Size(304, 304),
                 BackColor = Color.White,
-                Padding = new Padding(10)
+                Padding = new Padding(14)
+            };
+            qrContainer.Paint += (s, e) =>
+            {
+                using (Pen borderPen = new Pen(AstroTheme.OutlineVariant, 1f))
+                {
+                    e.Graphics.DrawRectangle(borderPen, 0, 0, qrContainer.Width - 1, qrContainer.Height - 1);
+                }
             };
 
             picQr = new PictureBox
@@ -81,8 +133,11 @@ namespace Steam_Desktop_Authenticator
             {
                 Text = String.Empty,
                 AutoSize = false,
-                Location = new Point(20, 482),
-                Size = new Size(380, 28),
+                Location = new Point(22, 506),
+                Size = new Size(396, 22),
+                Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+                ForeColor = AstroTheme.OnSurfaceVariant,
+                BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleCenter
             };
 
@@ -90,51 +145,95 @@ namespace Steam_Desktop_Authenticator
             {
                 Text = String.Empty,
                 AutoSize = false,
-                Location = new Point(20, 482),
-                Size = new Size(380, 28),
-                ForeColor = Color.FromArgb(255, 180, 171),
+                Location = new Point(22, 506),
+                Size = new Size(396, 22),
+                Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+                ForeColor = AstroTheme.Error,
+                BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleCenter,
                 Visible = false
             };
 
+            Panel footerDivider = AstroTheme.CreateDivider(396);
+            footerDivider.Location = new Point(22, 534);
+
             Button btnClose = new Button
             {
                 Text = "Close",
-                Location = new Point(150, 516),
-                Size = new Size(120, 32),
+                Location = new Point(314, 546),
+                Size = new Size(104, 34),
                 DialogResult = DialogResult.OK
             };
             btnClose.Click += (s, e) => Close();
             CancelButton = btnClose;
 
-            Controls.Add(lblWarning);
+            Controls.Add(warningCallout);
             Controls.Add(lblFormatTitle);
-            Controls.Add(rbKeePassXC);
-            Controls.Add(rbBitwarden);
+            Controls.Add(formatTrack);
             Controls.Add(qrContainer);
             Controls.Add(lblFormatNote);
             Controls.Add(lblError);
+            Controls.Add(footerDivider);
             Controls.Add(btnClose);
 
             AstroTheme.ApplyTheme(this);
-            // Preserve crisp white quiet-zone around QR code after applying dark theme.
+            // Preserve crisp white quiet-zone & callout colors after applying dark theme.
+            warningCallout.BackColor = AstroTheme.WarningSurface;
+            warningBar.BackColor = AstroTheme.Warning;
+            lblWarning.ForeColor = AstroTheme.WarningSoft;
+            lblFormatTitle.ForeColor = AstroTheme.Outline;
+            formatTrack.BackColor = AstroTheme.SurfaceContainerLowest;
             qrContainer.BackColor = Color.White;
             picQr.BackColor = Color.White;
-            lblWarning.ForeColor = Color.FromArgb(255, 200, 140);
+            lblFormatNote.ForeColor = AstroTheme.OnSurfaceVariant;
+            lblError.ForeColor = AstroTheme.Error;
             AstroTheme.StyleSurfaceButton(btnClose);
 
+            UpdateFormatToggleStyles();
             RenderSelectedFormat();
         }
 
-        private void FormatSelectionChanged(object sender, EventArgs e)
+        private void SelectFormat(SecretQrFormat format)
         {
-            if (sender is RadioButton rb && rb.Checked)
-                RenderSelectedFormat();
+            if (selectedFormat == format)
+                return;
+            selectedFormat = format;
+            UpdateFormatToggleStyles();
+            RenderSelectedFormat();
+        }
+
+        private void UpdateFormatToggleStyles()
+        {
+            StyleSegmentedButton(btnKeePassXC, selectedFormat == SecretQrFormat.KeePassXC);
+            StyleSegmentedButton(btnBitwarden, selectedFormat == SecretQrFormat.Bitwarden);
+        }
+
+        private static void StyleSegmentedButton(Button button, bool active)
+        {
+            button.FlatStyle = FlatStyle.Flat;
+            button.Font = new Font("Segoe UI", 8.75F, active ? FontStyle.Bold : FontStyle.Regular);
+            button.Cursor = Cursors.Hand;
+            button.FlatAppearance.BorderSize = active ? 1 : 0;
+            if (active)
+            {
+                button.BackColor = AstroTheme.SurfaceContainerHigh;
+                button.ForeColor = AstroTheme.PrimaryLight;
+                button.FlatAppearance.BorderColor = Color.FromArgb(58, 125, 146);
+                button.FlatAppearance.MouseOverBackColor = AstroTheme.SurfaceBright;
+                button.FlatAppearance.MouseDownBackColor = AstroTheme.SurfaceContainerHigh;
+            }
+            else
+            {
+                button.BackColor = AstroTheme.SurfaceContainerLowest;
+                button.ForeColor = AstroTheme.OnSurfaceVariant;
+                button.FlatAppearance.MouseOverBackColor = AstroTheme.SurfaceContainerLow;
+                button.FlatAppearance.MouseDownBackColor = AstroTheme.SurfaceContainer;
+            }
         }
 
         private void RenderSelectedFormat()
         {
-            SecretQrFormat format = rbBitwarden.Checked ? SecretQrFormat.Bitwarden : SecretQrFormat.KeePassXC;
+            SecretQrFormat format = selectedFormat;
             Bitmap previous = currentQrBitmap;
             picQr.Image = null;
             currentQrBitmap = null;

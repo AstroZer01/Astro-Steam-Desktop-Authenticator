@@ -26,16 +26,144 @@ namespace Steam_Desktop_Authenticator
         };
         private Manifest man;
 
+        private Bitmap appIconBitmap;
+
         public WelcomeForm()
         {
             InitializeComponent();
             AstroTheme.ApplyTheme(this);
-
-            // Style buttons as primary
-            AstroTheme.StylePrimaryButton(btnImportConfig);
-            AstroTheme.StylePrimaryButton(btnJustStart);
+            ApplyRefinedOnboardingLayout();
 
             man = Manifest.GetManifest();
+        }
+
+        private void ApplyRefinedOnboardingLayout()
+        {
+            ClientSize = new Size(460, 344);
+            BackColor = AstroTheme.Background;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            Text = "Astro Steam Desktop Authenticator";
+
+            PictureBox iconBox = new PictureBox
+            {
+                Location = new Point(206, 22),
+                Size = new Size(48, 48),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = AstroTheme.SurfaceContainer
+            };
+            if (Icon != null)
+            {
+                appIconBitmap = Icon.ToBitmap();
+                iconBox.Image = appIconBitmap;
+            }
+            iconBox.Paint += (s, e) =>
+            {
+                using (Pen pen = new Pen(AstroTheme.OutlineVariant, 1f))
+                {
+                    e.Graphics.DrawRectangle(pen, 0, 0, iconBox.Width - 1, iconBox.Height - 1);
+                }
+            };
+            Controls.Add(iconBox);
+
+            label1.Text = "Welcome to Astro SDA";
+            label1.Font = new Font("Segoe UI", 16F, FontStyle.Bold);
+            label1.ForeColor = AstroTheme.OnSurface;
+            label1.Location = new Point(24, 80);
+            label1.Size = new Size(412, 30);
+            label1.TextAlign = ContentAlignment.MiddleCenter;
+
+            label2.Text = "Manage Steam Guard codes, confirmations, and login approvals locally.";
+            label2.Font = new Font("Segoe UI", 9.25F, FontStyle.Regular);
+            label2.ForeColor = AstroTheme.OnSurfaceVariant;
+            label2.Location = new Point(28, 112);
+            label2.Size = new Size(404, 34);
+            label2.TextAlign = ContentAlignment.TopCenter;
+
+            ConfigureChoiceCardButton(
+                btnJustStart,
+                "Start Fresh & Sign In to Steam",
+                "Recommended for new setups or adding your first Steam account.",
+                isPrimary: true,
+                top: 162);
+
+            ConfigureChoiceCardButton(
+                btnImportConfig,
+                "Import an Existing Astro SDA Folder",
+                "Restore accounts and settings from another local maFiles folder.",
+                isPrimary: false,
+                top: 248);
+
+            AcceptButton = btnJustStart;
+            FormClosed += (s, e) =>
+            {
+                if (appIconBitmap != null)
+                {
+                    iconBox.Image = null;
+                    appIconBitmap.Dispose();
+                    appIconBitmap = null;
+                }
+            };
+        }
+
+        private static void ConfigureChoiceCardButton(Button button, string title, string subtitle, bool isPrimary, int top)
+        {
+            button.Location = new Point(24, top);
+            button.Size = new Size(412, 74);
+            button.Text = string.Empty;
+            button.AccessibleName = title;
+            button.AccessibleDescription = subtitle;
+            button.FlatStyle = FlatStyle.Flat;
+            button.Cursor = Cursors.Hand;
+            button.FlatAppearance.BorderSize = 1;
+            button.BackColor = isPrimary ? Color.FromArgb(22, 41, 56) : AstroTheme.SurfaceContainerLow;
+            button.FlatAppearance.BorderColor = isPrimary ? Color.FromArgb(53, 121, 141) : AstroTheme.OutlineVariant;
+            button.FlatAppearance.MouseOverBackColor = isPrimary ? Color.FromArgb(29, 54, 73) : AstroTheme.SurfaceContainer;
+            button.FlatAppearance.MouseDownBackColor = isPrimary ? Color.FromArgb(18, 35, 48) : AstroTheme.SurfaceContainerHigh;
+
+            button.Paint += (sender, e) =>
+            {
+                Graphics g = e.Graphics;
+                if (isPrimary)
+                {
+                    using (SolidBrush barBrush = new SolidBrush(AstroTheme.PrimaryAccent))
+                    {
+                        g.FillRectangle(barBrush, 0, 0, 4, button.Height);
+                    }
+                }
+
+                Rectangle titleRect = new Rectangle(18, 14, button.Width - 52, 22);
+                Rectangle subRect = new Rectangle(18, 37, button.Width - 52, 24);
+                Rectangle chevronRect = new Rectangle(button.Width - 32, 0, 20, button.Height);
+
+                using (Font titleFont = new Font("Segoe UI", 10F, FontStyle.Bold))
+                using (Font subFont = new Font("Segoe UI", 8.5F, FontStyle.Regular))
+                using (Font chevronFont = new Font("Segoe UI", 14F, FontStyle.Regular))
+                {
+                    TextRenderer.DrawText(
+                        g,
+                        title,
+                        titleFont,
+                        titleRect,
+                        isPrimary ? Color.FromArgb(244, 248, 252) : AstroTheme.OnSurface,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+                    TextRenderer.DrawText(
+                        g,
+                        subtitle,
+                        subFont,
+                        subRect,
+                        AstroTheme.OnSurfaceVariant,
+                        TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.EndEllipsis);
+
+                    TextRenderer.DrawText(
+                        g,
+                        "›",
+                        chevronFont,
+                        chevronRect,
+                        isPrimary ? AstroTheme.PrimaryLight : AstroTheme.Outline,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+            };
         }
 
         private void btnJustStart_Click(object sender, EventArgs e)
