@@ -72,6 +72,16 @@ namespace Steam_Desktop_Authenticator
         private readonly ConcurrentDictionary<ulong, byte> unresolvedTransferMarkerSteamIds = new ConcurrentDictionary<ulong, byte>();
         private readonly object loginRateLimitLock = new object();
         private DateTime loginRateLimitedUntilUtc = DateTime.MinValue;
+        private readonly object manualLoginRefreshLock = new object();
+        private bool manualLoginRefreshActive;
+        private bool manualLoginRefreshScanStarted;
+        private bool manualLoginRefreshPublishing;
+        private long manualLoginRefreshRunnerSequence;
+        private long manualLoginRefreshOwnerId;
+        private ManualLoginRefreshScope activeManualLoginRefreshScope;
+        private ManualLoginRefreshScope queuedManualLoginRefreshScope;
+        private TaskCompletionSource<bool> activeManualLoginRefreshCompletion;
+        private TaskCompletionSource<bool> queuedManualLoginRefreshCompletion;
         private readonly Dictionary<ulong, LoginMonitorSchedule> loginMonitorSchedules = new Dictionary<ulong, LoginMonitorSchedule>();
         private int loginMonitoringAccountIndex;
         private long loginMonitorRequestCount;
@@ -108,6 +118,9 @@ namespace Steam_Desktop_Authenticator
         private readonly Func<string, DialogResult> confirmAutomaticLoginAction;
         private readonly Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate;
         private readonly Func<bool, string, string, Task> publishUpdateCheckStateAsync;
+        private readonly Action<string, string, ToolTipIcon> notifyLoginAction;
+        private readonly Func<Task> publishLoginActionsAsync;
+        private readonly Func<CancellationToken, Task<string>> getCurrentPublicIpv4Async;
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
@@ -810,13 +823,19 @@ namespace Steam_Desktop_Authenticator
             HttpClient updateClient = null,
             Func<string, DialogResult> confirmAutomaticLoginAction = null,
             Func<Version, string, (DialogResult Result, bool DisableStartupChecks)> promptForUpdate = null,
-            Func<bool, string, string, Task> publishUpdateCheckStateAsync = null)
+            Func<bool, string, string, Task> publishUpdateCheckStateAsync = null,
+            LoginApprovalService loginApprovalService = null,
+            Action<string, string, ToolTipIcon> notifyLoginAction = null,
+            SteamGuardAccount[] initialAccounts = null,
+            Func<Task> publishLoginActionsAsync = null,
+            Func<CancellationToken, Task<string>> getCurrentPublicIpv4Async = null)
         {
             InitializeComponent();
             timerSteamGuard.Enabled = false;
             timerTradesPopup.Enabled = false;
             loginActionsTimer.Tick += loginActionsTimer_Tick;
             manifest = initialManifest;
+            allAccounts = initialAccounts;
             this.updatePreferenceRevision = updatePreferenceRevision ?? new UpdatePreferenceRevisionTracker();
             this.proxyTestAsync = proxyTestAsync ?? ProxyService.TestAsync;
             this.applyProxy = applyProxy ?? ProxyService.Apply;
@@ -824,6 +843,10 @@ namespace Steam_Desktop_Authenticator
             this.confirmAutomaticLoginAction = confirmAutomaticLoginAction ?? ShowAutomaticLoginActionConfirmation;
             this.promptForUpdate = promptForUpdate ?? ShowUpdateAvailablePrompt;
             this.publishUpdateCheckStateAsync = publishUpdateCheckStateAsync;
+            this.loginApprovalService = loginApprovalService;
+            this.notifyLoginAction = notifyLoginAction ?? ShowLoginActionNotification;
+            this.publishLoginActionsAsync = publishLoginActionsAsync ?? PublishCachedLoginActionsToWebViewAsync;
+            this.getCurrentPublicIpv4Async = getCurrentPublicIpv4Async ?? GetCurrentPublicIpv4Async;
         }
 
         private static (DialogResult Result, bool DisableStartupChecks) ShowUpdateAvailablePrompt(Version latestVersion, string checkboxText)
@@ -921,7 +944,7 @@ namespace Steam_Desktop_Authenticator
             btnManageEncryption.Enabled = manifest.Entries.Count > 0;
 
             loadAccountsList();
-            loginApprovalService = new LoginApprovalService(
+            loginApprovalService = loginApprovalService ?? new LoginApprovalService(
                 account => manifest?.GetAccountStorageRevision(account?.Session?.SteamID ?? 0) ?? 0,
                 (account, session, expectedRevision) => PersistLoginSession(account, session, expectedRevision));
 
@@ -2677,7 +2700,7 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private async Task MonitorLoginActionsAsync()
+        internal async Task MonitorLoginActionsAsync()
         {
             if (manifest == null || loginApprovalService == null || !manifest.LoginActionMonitoringEnabled || allAccounts == null)
                 return;
@@ -2694,165 +2717,369 @@ namespace Steam_Desktop_Authenticator
             if (!await loginActionsSemaphore.WaitAsync(0))
                 return;
 
+            bool scannedAccount = false;
             try
             {
-                string currentDeviceIp = null;
-                bool currentDeviceIpChecked = false;
                 SteamGuardAccount nextAccount = GetNextLoginAccountToMonitor();
                 if (nextAccount == null || IsAccountBusyWithRecoveryOrTransfer(nextAccount.Session.SteamID))
                     return;
 
-                foreach (SteamGuardAccount account in new[] { nextAccount })
-                {
-                    Dictionary<ulong, PendingLoginRequest> knownRequests = pendingLoginRequests.Values
-                        .Where(request => request.SteamId == account.Session.SteamID)
-                        .GroupBy(request => request.ClientId)
-                        .ToDictionary(group => group.Key, group => group.First());
-                    Interlocked.Increment(ref loginMonitorRequestCount);
-                    (bool acquired, LoginApprovalFetchResult result) = await TryRunAvailableSteamAccountOperationNowAsync(account,
-                        () => loginApprovalService.FetchPendingRequestsAsync(account, knownRequests, cancellationToken), cancellationToken,
-                        fetchResult =>
-                        {
-                            if (fetchResult.ErrorKind == LoginApprovalErrorKind.SessionExpired || fetchResult.ErrorKind == LoginApprovalErrorKind.Unauthorized)
-                            {
-                                MarkSessionRenewalRequired(account, fetchResult.ErrorMessage);
-                                DispatchBackgroundSilentRelogin(account);
-                            }
-                        });
-                    if (!acquired || result == null)
-                    {
-                        ScheduleLoginAccountScan(account, TimeSpan.FromSeconds(5), false);
-                        continue;
-                    }
-                    if (result.ErrorKind == LoginApprovalErrorKind.SessionExpired || result.ErrorKind == LoginApprovalErrorKind.Unauthorized)
-                    {
-                        continue;
-                    }
-
-                    if (!IsSessionAvailableForAccountOperations(account))
-                        continue;
-
-                    if (result.ErrorKind == LoginApprovalErrorKind.RateLimited)
-                    {
-                        ApplyLoginRateLimit();
-                        ScheduleLoginAccountScan(account, LoginMonitorMaximumFailureBackoff, true);
-                        DiagnosticErrorLogger.Log("Login action monitor", new InvalidOperationException(result.ErrorMessage), "Steam rate limited the login-request monitor.");
-                        return;
-                    }
-
-                    if (result.ErrorKind != LoginApprovalErrorKind.None)
-                    {
-                        ScheduleLoginAccountFailure(account);
-                        continue;
-                    }
-
-                    unavailableLoginAccounts.Remove(account.AccountName);
-                    string accountRequestPrefix = account.Session.SteamID + ":";
-                    var fetchedRequestKeys = new HashSet<string>(result.Requests
-                        .Select(request => BuildLoginRequestKey(request.SteamId, request.ClientId)));
-                    foreach (string resolvedKey in recentlyResolvedLoginRequests.Keys
-                        .Where(key => key.StartsWith(accountRequestPrefix, StringComparison.Ordinal) && !fetchedRequestKeys.Contains(key))
-                        .ToList())
-                    {
-                        recentlyResolvedLoginRequests.Remove(resolvedKey);
-                    }
-                    foreach (PendingLoginRequest request in result.Requests)
-                    {
-                        if (!IsSessionAvailableForAccountOperations(account))
-                            break;
-                        string requestKey = BuildLoginRequestKey(request.SteamId, request.ClientId);
-                        if (IsRecentlyResolved(recentlyResolvedLoginRequests, requestKey))
-                            continue;
-                        pendingLoginRequests[requestKey] = request;
-
-                        if (manifest.LoginActionMode == LoginActionModes.Manual)
-                        {
-                            if (notifiedLoginRequests.Add(requestKey))
-                            {
-                                string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
-                                NotifyLoginAction("Steam login approval needed", account.AccountName + ": " + device, ToolTipIcon.Info);
-                            }
-                            continue;
-                        }
-
-                        bool allowWhitelistedIp = false;
-                        if (manifest.LoginActionMode == LoginActionModes.Deny && manifest.LoginActionAutoAllowIpEnabled)
-                        {
-                            bool allowAdditionalIp = !String.IsNullOrWhiteSpace(manifest.LoginActionAutoAllowIp) &&
-                                AreSameIpv4Address(request.IPAddress, manifest.LoginActionAutoAllowIp);
-                            bool allowCurrentDeviceIp = false;
-                            if (manifest.LoginActionAutoAllowCurrentDeviceIp)
-                            {
-                                if (!currentDeviceIpChecked)
-                                {
-                                    currentDeviceIp = await GetCurrentPublicIpv4Async(cancellationToken);
-                                    currentDeviceIpChecked = true;
-                                }
-                                allowCurrentDeviceIp = AreSameIpv4Address(request.IPAddress, currentDeviceIp);
-                            }
-                            allowWhitelistedIp = allowAdditionalIp || allowCurrentDeviceIp;
-                        }
-                        LoginApprovalDecision decision = manifest.LoginActionMode == LoginActionModes.ApprovePersistent || allowWhitelistedIp
-                            ? LoginApprovalDecision.ApprovePersistent
-                            : LoginApprovalDecision.Deny;
-                        string actionKey = requestKey + "|" + manifest.LoginActionMode + "|" + decision;
-                        if (completedAutomatedLoginActions.Contains(actionKey))
-                            continue;
-
-                        LoginApprovalActionResult actionResult = await RunAvailableSteamAccountOperationAsync(account,
-                            () => loginApprovalService.RespondAsync(account, request, decision, cancellationToken), cancellationToken,
-                            response =>
-                            {
-                                if (response.ErrorKind == LoginApprovalErrorKind.SessionExpired || response.ErrorKind == LoginApprovalErrorKind.Unauthorized)
-                                    MarkSessionRenewalRequired(account, response.ErrorMessage);
-                            });
-                        if (actionResult.ErrorKind == LoginApprovalErrorKind.RateLimited)
-                        {
-                            ApplyLoginRateLimit();
-                            ScheduleLoginAccountScan(account, LoginMonitorMaximumFailureBackoff, true);
-                            DiagnosticErrorLogger.Log("Login action monitor", new InvalidOperationException(actionResult.ErrorMessage), "Steam rate limited an automatic login action.");
-                            return;
-                        }
-                        if (actionResult.ErrorKind == LoginApprovalErrorKind.SessionExpired || actionResult.ErrorKind == LoginApprovalErrorKind.Unauthorized)
-                        {
-                            break;
-                        }
-                        if (actionResult.Succeeded || actionResult.ErrorKind == LoginApprovalErrorKind.ExpiredOrDuplicate)
-                        {
-                            MarkRecentlyResolved(recentlyResolvedLoginRequests, requestKey);
-                            pendingLoginRequests.Remove(requestKey);
-                            completedAutomatedLoginActions.Add(actionKey);
-                            RecordRecentLoginAttempt(request, actionResult.Succeeded
-                                ? (allowWhitelistedIp ? "Approved automatically (whitelisted IP)" : (decision == LoginApprovalDecision.ApprovePersistent ? "Approved automatically" : "Denied automatically"))
-                                : "Expired or already handled");
-                            NotifyAutomatedLoginActionOnce(actionKey,
-                                actionResult.Succeeded
-                                    ? (allowWhitelistedIp ? "Automatically allowed whitelisted Steam login" : (decision == LoginApprovalDecision.ApprovePersistent ? "Automatically approved Steam login" : "Automatically denied Steam login"))
-                                    : "Steam login request was already handled",
-                                account.AccountName + ": " + (request.DeviceName ?? request.Platform),
-                                actionResult.Succeeded ? ToolTipIcon.Info : ToolTipIcon.Warning);
-                        }
-                        else
-                        {
-                            NotifyAutomatedLoginActionOnce(actionKey + "|failed",
-                                "Automatic Steam login action failed",
-                                account.AccountName + ": " + actionResult.ErrorMessage,
-                                ToolTipIcon.Warning);
-                        }
-                    }
-
-                    if (!IsSessionAvailableForAccountOperations(account))
-                        continue;
-                    ReconcilePendingLoginRequestsForAccount(account, result.Requests);
-                    ScheduleLoginAccountScan(account, LoginMonitorSuccessInterval, true);
-                }
+                scannedAccount = true;
+                await ScanLoginAccountAsync(
+                    nextAccount,
+                    useKnownRequestsCache: true,
+                    notifyManualRequests: true,
+                    isBackgroundMonitor: true,
+                    scanContext: new LoginScanContext(),
+                    cancellationToken: cancellationToken);
             }
             finally
             {
                 loginActionsSemaphore.Release();
-                if (IsWebTabActive("login-actions"))
+                if (scannedAccount && IsWebTabActive("login-actions") && !IsManualLoginRefreshActive())
                     await PublishCachedLoginActionsAsync();
             }
+        }
+
+        private sealed class LoginScanContext
+        {
+            public string CurrentDeviceIp { get; set; }
+            public bool CurrentDeviceIpChecked { get; set; }
+        }
+
+        private enum LoginAccountScanOutcome
+        {
+            Completed,
+            RateLimited
+        }
+
+        private sealed class ManualLoginRefreshScope
+        {
+            public bool AllAccounts { get; private set; }
+            public HashSet<string> SelectionKeys { get; } = new HashSet<string>(StringComparer.Ordinal);
+
+            public void Add(string selectionKey)
+            {
+                string normalized = NormalizeLoginRefreshSelection(selectionKey);
+                if (normalized == "all")
+                {
+                    AllAccounts = true;
+                    SelectionKeys.Clear();
+                }
+                else if (!AllAccounts)
+                {
+                    SelectionKeys.Add(normalized);
+                }
+            }
+
+            public bool Covers(string selectionKey)
+            {
+                if (AllAccounts)
+                    return true;
+                string normalized = NormalizeLoginRefreshSelection(selectionKey);
+                return normalized != "all" && SelectionKeys.Contains(normalized);
+            }
+        }
+
+        internal static string NormalizeLoginRefreshSelection(string selectionKey)
+        {
+            if (String.IsNullOrWhiteSpace(selectionKey) || String.Equals(selectionKey.Trim(), "all", StringComparison.OrdinalIgnoreCase))
+                return "all";
+            return selectionKey.Trim();
+        }
+
+        private bool IsManualLoginRefreshActive()
+        {
+            lock (manualLoginRefreshLock)
+            {
+                return manualLoginRefreshActive;
+            }
+        }
+
+        private void NotifyManualLoginRequestIfNeeded(
+            SteamGuardAccount account,
+            PendingLoginRequest request,
+            string requestKey,
+            bool notifyManualRequests)
+        {
+            if (notifyManualRequests &&
+                manifest?.LoginActionMonitoringEnabled == true &&
+                manifest.LoginActionMode == LoginActionModes.Manual &&
+                notifiedLoginRequests.Add(requestKey))
+            {
+                string device = String.IsNullOrWhiteSpace(request.DeviceName) ? request.Platform : request.DeviceName;
+                NotifyLoginAction("Steam login approval needed", account.AccountName + ": " + device, ToolTipIcon.Info);
+            }
+        }
+
+        private bool TryEvaluateAutomaticLoginDecision(
+            PendingLoginRequest request,
+            LoginScanContext scanContext,
+            out string actionMode,
+            out LoginApprovalDecision decision,
+            out bool allowWhitelistedIp)
+        {
+            actionMode = manifest?.LoginActionMode ?? LoginActionModes.Manual;
+            decision = LoginApprovalDecision.Deny;
+            allowWhitelistedIp = false;
+            if (manifest == null || !manifest.LoginActionMonitoringEnabled || actionMode == LoginActionModes.Manual)
+                return false;
+
+            if (actionMode == LoginActionModes.Deny && manifest.LoginActionAutoAllowIpEnabled)
+            {
+                bool allowAdditionalIp = !String.IsNullOrWhiteSpace(manifest.LoginActionAutoAllowIp) &&
+                    AreSameIpv4Address(request.IPAddress, manifest.LoginActionAutoAllowIp);
+                bool allowCurrentDeviceIp = false;
+                if (!allowAdditionalIp && manifest.LoginActionAutoAllowCurrentDeviceIp && IsValidIpv4Address(request.IPAddress))
+                {
+                    if (!scanContext.CurrentDeviceIpChecked)
+                        return false;
+                    allowCurrentDeviceIp = AreSameIpv4Address(request.IPAddress, scanContext.CurrentDeviceIp);
+                }
+                allowWhitelistedIp = allowAdditionalIp || allowCurrentDeviceIp;
+            }
+
+            decision = actionMode == LoginActionModes.ApprovePersistent || allowWhitelistedIp
+                ? LoginApprovalDecision.ApprovePersistent
+                : LoginApprovalDecision.Deny;
+            return true;
+        }
+
+        private async Task<LoginAccountScanOutcome> ScanLoginAccountAsync(
+            SteamGuardAccount account,
+            bool useKnownRequestsCache,
+            bool notifyManualRequests,
+            bool isBackgroundMonitor,
+            LoginScanContext scanContext,
+            CancellationToken cancellationToken)
+        {
+            if (!IsSessionAvailableForAccountOperations(account) ||
+                IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID))
+                return LoginAccountScanOutcome.Completed;
+
+            Dictionary<ulong, PendingLoginRequest> knownRequests = useKnownRequestsCache
+                ? pendingLoginRequests.Values
+                    .Where(request => request.SteamId == account.Session.SteamID)
+                    .GroupBy(request => request.ClientId)
+                    .ToDictionary(group => group.Key, group => group.First())
+                : null;
+            if (isBackgroundMonitor)
+                Interlocked.Increment(ref loginMonitorRequestCount);
+
+            LoginApprovalFetchResult result;
+            try
+            {
+                Action<LoginApprovalFetchResult> onFetchResult = fetchResult =>
+                {
+                    if (fetchResult.ErrorKind == LoginApprovalErrorKind.SessionExpired || fetchResult.ErrorKind == LoginApprovalErrorKind.Unauthorized)
+                    {
+                        MarkSessionRenewalRequired(account, fetchResult.ErrorMessage);
+                        DispatchBackgroundSilentRelogin(account);
+                    }
+                };
+
+                if (isBackgroundMonitor)
+                {
+                    (bool acquired, LoginApprovalFetchResult fetched) = await TryRunAvailableSteamAccountOperationNowAsync(
+                        account,
+                        () => loginApprovalService.FetchPendingRequestsAsync(account, knownRequests, cancellationToken),
+                        cancellationToken,
+                        onFetchResult);
+                    if (!acquired || fetched == null)
+                    {
+                        ScheduleLoginAccountScan(account, TimeSpan.FromSeconds(5), false);
+                        return LoginAccountScanOutcome.Completed;
+                    }
+                    result = fetched;
+                }
+                else
+                {
+                    result = await RunAvailableSteamAccountOperationAsync(
+                        account,
+                        () => loginApprovalService.FetchPendingRequestsAsync(account, knownRequests, cancellationToken),
+                        cancellationToken,
+                        onFetchResult);
+                }
+            }
+            catch (SessionUnavailableException)
+            {
+                return LoginAccountScanOutcome.Completed;
+            }
+
+            if (result.ErrorKind == LoginApprovalErrorKind.SessionExpired || result.ErrorKind == LoginApprovalErrorKind.Unauthorized)
+                return LoginAccountScanOutcome.Completed;
+
+            if (!IsSessionAvailableForAccountOperations(account))
+                return LoginAccountScanOutcome.Completed;
+
+            if (result.ErrorKind == LoginApprovalErrorKind.RateLimited)
+            {
+                ApplyLoginRateLimit();
+                ScheduleLoginAccountScan(account, LoginMonitorMaximumFailureBackoff, true);
+                DiagnosticErrorLogger.Log(
+                    isBackgroundMonitor ? "Login action monitor" : "Login action refresh",
+                    new InvalidOperationException(result.ErrorMessage),
+                    isBackgroundMonitor
+                        ? "Steam rate limited the login-request monitor."
+                        : "Steam rate limited the manual login-request refresh.");
+                return LoginAccountScanOutcome.RateLimited;
+            }
+
+            if (result.ErrorKind != LoginApprovalErrorKind.None)
+            {
+                ScheduleLoginAccountFailure(account);
+                return LoginAccountScanOutcome.Completed;
+            }
+
+            unavailableLoginAccounts.Remove(account.AccountName);
+            string accountRequestPrefix = account.Session.SteamID + ":";
+            var fetchedRequestKeys = new HashSet<string>(result.Requests
+                .Select(request => BuildLoginRequestKey(request.SteamId, request.ClientId)));
+            foreach (string resolvedKey in recentlyResolvedLoginRequests.Keys
+                .Where(key => key.StartsWith(accountRequestPrefix, StringComparison.Ordinal) && !fetchedRequestKeys.Contains(key))
+                .ToList())
+            {
+                recentlyResolvedLoginRequests.Remove(resolvedKey);
+            }
+            foreach (PendingLoginRequest request in result.Requests)
+            {
+                if (!IsSessionAvailableForAccountOperations(account))
+                    break;
+                string requestKey = BuildLoginRequestKey(request.SteamId, request.ClientId);
+                if (IsRecentlyResolved(recentlyResolvedLoginRequests, requestKey))
+                    continue;
+                pendingLoginRequests[requestKey] = request;
+
+                if (!manifest.LoginActionMonitoringEnabled || manifest.LoginActionMode == LoginActionModes.Manual)
+                {
+                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
+                    continue;
+                }
+
+                if (manifest.LoginActionMode == LoginActionModes.Deny &&
+                    manifest.LoginActionAutoAllowIpEnabled &&
+                    manifest.LoginActionAutoAllowCurrentDeviceIp &&
+                    !(!String.IsNullOrWhiteSpace(manifest.LoginActionAutoAllowIp) &&
+                      AreSameIpv4Address(request.IPAddress, manifest.LoginActionAutoAllowIp)) &&
+                    IsValidIpv4Address(request.IPAddress) &&
+                    !scanContext.CurrentDeviceIpChecked)
+                {
+                    scanContext.CurrentDeviceIp = await getCurrentPublicIpv4Async(cancellationToken);
+                    scanContext.CurrentDeviceIpChecked = true;
+                }
+
+                // Re-evaluate live rules and session availability after any async public-IP lookup.
+                if (!IsSessionAvailableForAccountOperations(account))
+                    break;
+                if (!TryEvaluateAutomaticLoginDecision(
+                    request,
+                    scanContext,
+                    out string currentActionMode,
+                    out LoginApprovalDecision decision,
+                    out bool allowWhitelistedIp))
+                {
+                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
+                    continue;
+                }
+                string actionKey = requestKey + "|" + currentActionMode + "|" + decision;
+                if (completedAutomatedLoginActions.Contains(actionKey))
+                    continue;
+
+                bool IsAutomaticDecisionStillCurrent()
+                {
+                    return TryEvaluateAutomaticLoginDecision(
+                        request,
+                        scanContext,
+                        out string liveActionMode,
+                        out LoginApprovalDecision liveDecision,
+                        out bool liveAllowWhitelistedIp) &&
+                        String.Equals(liveActionMode, currentActionMode, StringComparison.Ordinal) &&
+                        liveDecision == decision &&
+                        liveAllowWhitelistedIp == allowWhitelistedIp;
+                }
+
+                LoginApprovalActionResult actionResult;
+                try
+                {
+                    actionResult = await RunAvailableSteamAccountOperationAsync(account,
+                        () =>
+                        {
+                            if (!IsAutomaticDecisionStillCurrent())
+                                return Task.FromResult(new LoginApprovalActionResult { Succeeded = false, Skipped = true });
+
+                            return loginApprovalService.RespondAsync(
+                                account,
+                                request,
+                                decision,
+                                cancellationToken,
+                                shouldSubmitDecision: IsAutomaticDecisionStillCurrent);
+                        },
+                        cancellationToken,
+                        response =>
+                        {
+                            if (response.ErrorKind == LoginApprovalErrorKind.SessionExpired || response.ErrorKind == LoginApprovalErrorKind.Unauthorized)
+                                MarkSessionRenewalRequired(account, response.ErrorMessage);
+                        });
+                }
+                catch (SessionUnavailableException)
+                {
+                    break;
+                }
+
+                if (actionResult.Skipped)
+                {
+                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
+                    continue;
+                }
+
+                if (actionResult.ErrorKind == LoginApprovalErrorKind.RateLimited)
+                {
+                    ApplyLoginRateLimit();
+                    ScheduleLoginAccountScan(account, LoginMonitorMaximumFailureBackoff, true);
+                    DiagnosticErrorLogger.Log(
+                        isBackgroundMonitor ? "Login action monitor" : "Login action refresh",
+                        new InvalidOperationException(actionResult.ErrorMessage),
+                        "Steam rate limited an automatic login action.");
+                    NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests: true);
+                    return LoginAccountScanOutcome.RateLimited;
+                }
+                if (actionResult.ErrorKind == LoginApprovalErrorKind.SessionExpired || actionResult.ErrorKind == LoginApprovalErrorKind.Unauthorized)
+                    break;
+                if (actionResult.Succeeded || actionResult.ErrorKind == LoginApprovalErrorKind.ExpiredOrDuplicate)
+                {
+                    MarkRecentlyResolved(recentlyResolvedLoginRequests, requestKey);
+                    pendingLoginRequests.Remove(requestKey);
+                    completedAutomatedLoginActions.Add(actionKey);
+                    RecordRecentLoginAttempt(request, actionResult.Succeeded
+                        ? (allowWhitelistedIp ? "Approved automatically (whitelisted IP)" : (decision == LoginApprovalDecision.ApprovePersistent ? "Approved automatically" : "Denied automatically"))
+                        : "Expired or already handled");
+                    NotifyAutomatedLoginActionOnce(actionKey,
+                        actionResult.Succeeded
+                            ? (allowWhitelistedIp ? "Automatically allowed whitelisted Steam login" : (decision == LoginApprovalDecision.ApprovePersistent ? "Automatically approved Steam login" : "Automatically denied Steam login"))
+                            : "Steam login request was already handled",
+                        account.AccountName + ": " + (request.DeviceName ?? request.Platform),
+                        actionResult.Succeeded ? ToolTipIcon.Info : ToolTipIcon.Warning);
+                }
+                else
+                {
+                    if (!IsAutomaticDecisionStillCurrent())
+                    {
+                        NotifyManualLoginRequestIfNeeded(account, request, requestKey, notifyManualRequests);
+                        continue;
+                    }
+
+                    NotifyAutomatedLoginActionOnce(actionKey + "|failed",
+                        "Automatic Steam login action failed",
+                        account.AccountName + ": " + actionResult.ErrorMessage,
+                        ToolTipIcon.Warning);
+                }
+            }
+
+            if (!IsSessionAvailableForAccountOperations(account))
+                return LoginAccountScanOutcome.Completed;
+            ReconcilePendingLoginRequestsForAccount(account, result.Requests);
+            ScheduleLoginAccountScan(account, LoginMonitorSuccessInterval, true);
+            return LoginAccountScanOutcome.Completed;
         }
 
         private void NotifyAutomatedLoginActionOnce(string key, string title, string message, ToolTipIcon icon)
@@ -2874,9 +3101,14 @@ namespace Steam_Desktop_Authenticator
 
         private void NotifyLoginAction(string title, string message, ToolTipIcon icon)
         {
+            notifyLoginAction(title, message, icon);
+        }
+
+        private void ShowLoginActionNotification(string title, string message, ToolTipIcon icon)
+        {
             if (InvokeRequired)
             {
-                TryBeginInvoke(() => NotifyLoginAction(title, message, icon));
+                TryBeginInvoke(() => ShowLoginActionNotification(title, message, icon));
                 return;
             }
             if (IsDisposed || Disposing)
@@ -3054,11 +3286,16 @@ namespace Steam_Desktop_Authenticator
 
         private SteamGuardAccount FindAccountBySelectionKey(string selectionKey)
         {
-            if (String.IsNullOrWhiteSpace(selectionKey) || selectionKey == "all" || allAccounts == null)
+            return FindAccountBySelectionKey(allAccounts, selectionKey);
+        }
+
+        private static SteamGuardAccount FindAccountBySelectionKey(SteamGuardAccount[] accounts, string selectionKey)
+        {
+            if (String.IsNullOrWhiteSpace(selectionKey) || selectionKey == "all" || accounts == null)
                 return null;
             if (ulong.TryParse(selectionKey, NumberStyles.None, CultureInfo.InvariantCulture, out ulong steamId) && steamId != 0)
-                return allAccounts.FirstOrDefault(account => account.Session?.SteamID == steamId);
-            return allAccounts.FirstOrDefault(account => String.Equals(account.AccountName, selectionKey, StringComparison.Ordinal));
+                return accounts.FirstOrDefault(account => account?.Session?.SteamID == steamId);
+            return accounts.FirstOrDefault(account => String.Equals(account?.AccountName, selectionKey, StringComparison.Ordinal));
         }
 
         private void ClearSessionRecoveryState(SteamGuardAccount account)
@@ -3262,13 +3499,16 @@ namespace Steam_Desktop_Authenticator
                 return null;
 
             DateTime now = DateTime.UtcNow;
-            for (int attempt = 0; attempt < accountsToMonitor.Length; attempt++)
+            lock (sessionStateLock)
             {
-                loginMonitoringAccountIndex = ((loginMonitoringAccountIndex % accountsToMonitor.Length) + accountsToMonitor.Length) % accountsToMonitor.Length;
-                SteamGuardAccount candidate = accountsToMonitor[loginMonitoringAccountIndex];
-                loginMonitoringAccountIndex = (loginMonitoringAccountIndex + 1) % accountsToMonitor.Length;
-                if (!loginMonitorSchedules.TryGetValue(candidate.Session.SteamID, out LoginMonitorSchedule schedule) || schedule.NextScanUtc <= now)
-                    return candidate;
+                for (int attempt = 0; attempt < accountsToMonitor.Length; attempt++)
+                {
+                    loginMonitoringAccountIndex = ((loginMonitoringAccountIndex % accountsToMonitor.Length) + accountsToMonitor.Length) % accountsToMonitor.Length;
+                    SteamGuardAccount candidate = accountsToMonitor[loginMonitoringAccountIndex];
+                    loginMonitoringAccountIndex = (loginMonitoringAccountIndex + 1) % accountsToMonitor.Length;
+                    if (!loginMonitorSchedules.TryGetValue(candidate.Session.SteamID, out LoginMonitorSchedule schedule) || schedule.NextScanUtc <= now)
+                        return candidate;
+                }
             }
 
             return null;
@@ -3279,18 +3519,23 @@ namespace Steam_Desktop_Authenticator
             if (!IsSessionAvailableForAccountOperations(account))
                 return;
 
-            if (!loginMonitorSchedules.TryGetValue(account.Session.SteamID, out LoginMonitorSchedule schedule))
+            DateTime nextScanUtc;
+            lock (sessionStateLock)
             {
-                schedule = new LoginMonitorSchedule();
-                loginMonitorSchedules[account.Session.SteamID] = schedule;
-            }
-            if (resetFailureCount)
-                schedule.ConsecutiveFailures = 0;
+                if (!loginMonitorSchedules.TryGetValue(account.Session.SteamID, out LoginMonitorSchedule schedule))
+                {
+                    schedule = new LoginMonitorSchedule();
+                    loginMonitorSchedules[account.Session.SteamID] = schedule;
+                }
+                if (resetFailureCount)
+                    schedule.ConsecutiveFailures = 0;
 
-            // Stable per-account jitter prevents accounts from re-forming a request burst.
-            int jitterMilliseconds = (int)(account.Session.SteamID % 3001) - 1500;
-            schedule.NextScanUtc = DateTime.UtcNow.Add(interval).AddMilliseconds(jitterMilliseconds);
-            Debug.WriteLine("Login monitor scheduled next scan; account=" + account.Session.SteamID + "; next=" + schedule.NextScanUtc.ToString("O") + "; requests=" + Interlocked.Read(ref loginMonitorRequestCount));
+                // Stable per-account jitter prevents accounts from re-forming a request burst.
+                int jitterMilliseconds = (int)(account.Session.SteamID % 3001) - 1500;
+                nextScanUtc = DateTime.UtcNow.Add(interval).AddMilliseconds(jitterMilliseconds);
+                schedule.NextScanUtc = nextScanUtc;
+            }
+            Debug.WriteLine("Login monitor scheduled next scan; account=" + account.Session.SteamID + "; next=" + nextScanUtc.ToString("O") + "; requests=" + Interlocked.Read(ref loginMonitorRequestCount));
         }
 
         private void ScheduleLoginAccountFailure(SteamGuardAccount account)
@@ -3298,16 +3543,20 @@ namespace Steam_Desktop_Authenticator
             if (!IsSessionAvailableForAccountOperations(account))
                 return;
 
-            if (!loginMonitorSchedules.TryGetValue(account.Session.SteamID, out LoginMonitorSchedule schedule))
+            TimeSpan backoff;
+            lock (sessionStateLock)
             {
-                schedule = new LoginMonitorSchedule();
-                loginMonitorSchedules[account.Session.SteamID] = schedule;
+                if (!loginMonitorSchedules.TryGetValue(account.Session.SteamID, out LoginMonitorSchedule schedule))
+                {
+                    schedule = new LoginMonitorSchedule();
+                    loginMonitorSchedules[account.Session.SteamID] = schedule;
+                }
+                schedule.ConsecutiveFailures = Math.Min(schedule.ConsecutiveFailures + 1, 10);
+                double multiplier = Math.Pow(2, schedule.ConsecutiveFailures - 1);
+                backoff = TimeSpan.FromSeconds(Math.Min(
+                    LoginMonitorInitialFailureBackoff.TotalSeconds * multiplier,
+                    LoginMonitorMaximumFailureBackoff.TotalSeconds));
             }
-            schedule.ConsecutiveFailures = Math.Min(schedule.ConsecutiveFailures + 1, 10);
-            double multiplier = Math.Pow(2, schedule.ConsecutiveFailures - 1);
-            TimeSpan backoff = TimeSpan.FromSeconds(Math.Min(
-                LoginMonitorInitialFailureBackoff.TotalSeconds * multiplier,
-                LoginMonitorMaximumFailureBackoff.TotalSeconds));
             ScheduleLoginAccountScan(account, backoff, false);
         }
 
@@ -3537,26 +3786,80 @@ namespace Steam_Desktop_Authenticator
                 IPAddress.Parse(first).Equals(IPAddress.Parse(second));
         }
 
-        private static async Task<string> GetCurrentPublicIpv4Async(CancellationToken cancellationToken = default)
+        private const int MaximumPublicIpResponseBytes = 256;
+        private static readonly TimeSpan PublicIpLookupTimeout = TimeSpan.FromSeconds(5);
+
+        internal static async Task<string> GetCurrentPublicIpv4Async(CancellationToken cancellationToken = default)
         {
             try
             {
-                using (var client = ProxyService.CreateActiveHttpClient())
+                using (ProxyService.ActiveHttpClientLease clientLease = ProxyService.AcquireActiveHttpClient())
                 {
-                    client.Timeout = TimeSpan.FromSeconds(5);
-                    string candidate = (await client.GetStringAsync("https://api.ipify.org", cancellationToken)).Trim();
-                    return IsValidIpv4Address(candidate) ? candidate : null;
+                    return await GetCurrentPublicIpv4Async(clientLease.Client, PublicIpLookupTimeout, cancellationToken);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }
+
+        internal static async Task<string> GetCurrentPublicIpv4Async(
+            HttpClient client,
+            TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            if (client == null)
+                throw new ArgumentNullException(nameof(client));
+            if (timeout <= TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
+                throw new ArgumentOutOfRangeException(nameof(timeout));
+
+            try
+            {
+                using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, "https://api.ipify.org"))
+                {
+                    timeoutSource.CancelAfter(timeout);
+                    using (HttpResponseMessage response = await client.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        timeoutSource.Token))
+                    {
+                        if (!response.IsSuccessStatusCode || response.Content == null)
+                            return null;
+                        if (response.Content.Headers.ContentLength > MaximumPublicIpResponseBytes)
+                            return null;
+
+                        string candidate = (await ReadBoundedResponseBodyAsync(
+                            response.Content,
+                            MaximumPublicIpResponseBytes,
+                            "The public IP lookup returned an oversized response.",
+                            timeoutSource.Token)).Trim();
+                        return IsValidIpv4Address(candidate) ? candidate : null;
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
             catch (HttpRequestException)
             {
                 return null;
             }
-            catch (TaskCanceledException)
+            catch (IOException)
+            {
+                return null;
+            }
+            catch (InvalidDataException)
+            {
+                return null;
+            }
+            catch (DecoderFallbackException)
             {
                 return null;
             }
@@ -3605,104 +3908,70 @@ namespace Steam_Desktop_Authenticator
             return true;
         }
 
-        private async Task FetchLoginActionsForManualRefreshAsync()
+        private SteamGuardAccount[] GetLoginActionsRefreshTargets(ManualLoginRefreshScope scope)
+        {
+            SteamGuardAccount[] accountsSnapshot = allAccounts;
+            if (accountsSnapshot == null || accountsSnapshot.Length == 0 || scope == null)
+                return Array.Empty<SteamGuardAccount>();
+
+            if (scope.AllAccounts)
+                return accountsSnapshot
+                    .Where(account => IsSessionAvailableForAccountOperations(account) &&
+                        !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID))
+                    .ToArray();
+
+            var targets = new List<SteamGuardAccount>();
+            var seenSteamIds = new HashSet<ulong>();
+            foreach (string selectionKey in scope.SelectionKeys)
+            {
+                SteamGuardAccount account = FindAccountBySelectionKey(accountsSnapshot, selectionKey);
+                if (account != null &&
+                    IsSessionAvailableForAccountOperations(account) &&
+                    !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID) &&
+                    seenSteamIds.Add(account.Session.SteamID))
+                    targets.Add(account);
+            }
+            return targets.ToArray();
+        }
+
+        private async Task FetchLoginActionsForManualRefreshCoreAsync(ManualLoginRefreshScope scope, CancellationToken cancellationToken)
         {
             if (manifest == null || loginApprovalService == null || allAccounts == null)
                 return;
-            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
             if (cancellationToken.IsCancellationRequested)
                 return;
             if (TryGetLoginRateLimitMessage(out _))
                 return;
             PersistExpiredRefreshTokenStates();
             DispatchEligibleSilentReloginsForExpiredAccounts(allAccounts);
-            if (!allAccounts.Any(account => IsSessionAvailableForAccountOperations(account) &&
-                !IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID)))
+
+            SteamGuardAccount[] targetAccounts = GetLoginActionsRefreshTargets(scope);
+            if (targetAccounts.Length == 0)
                 return;
-            if (!await loginActionsSemaphore.WaitAsync(0))
-                return;
 
-            try
+            var scanContext = new LoginScanContext();
+            foreach (SteamGuardAccount account in targetAccounts)
             {
-                foreach (SteamGuardAccount account in allAccounts)
-                {
-                    if (!IsSessionAvailableForAccountOperations(account))
-                        continue;
-                    if (IsAccountBusyWithRecoveryOrTransfer(account.Session.SteamID))
-                        continue;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (TryGetLoginRateLimitMessage(out _))
+                    return;
 
-                    LoginApprovalFetchResult result;
-                    try
-                    {
-                        (bool acquired, LoginApprovalFetchResult fetched) = await TryRunAvailableSteamAccountOperationNowAsync(account,
-                            () => loginApprovalService.FetchPendingRequestsAsync(account, cancellationToken: cancellationToken), cancellationToken,
-                            fetchResult =>
-                            {
-                                if (fetchResult.ErrorKind == LoginApprovalErrorKind.SessionExpired || fetchResult.ErrorKind == LoginApprovalErrorKind.Unauthorized)
-                                {
-                                    MarkSessionRenewalRequired(account, fetchResult.ErrorMessage);
-                                    DispatchBackgroundSilentRelogin(account);
-                                }
-                            });
-                        if (!acquired || fetched == null)
-                            continue;
-                        result = fetched;
-                    }
-                    catch (SessionUnavailableException)
-                    {
-                        continue;
-                    }
-                    if (result.ErrorKind == LoginApprovalErrorKind.SessionExpired || result.ErrorKind == LoginApprovalErrorKind.Unauthorized)
-                    {
-                        continue;
-                    }
-
-                    if (!IsSessionAvailableForAccountOperations(account))
-                        continue;
-
-                    if (result.ErrorKind == LoginApprovalErrorKind.RateLimited)
-                    {
-                        ApplyLoginRateLimit();
-                        DiagnosticErrorLogger.Log("Login action refresh", new InvalidOperationException(result.ErrorMessage), "Steam rate limited the manual login-request refresh.");
-                        return;
-                    }
-
-                    if (result.ErrorKind != LoginApprovalErrorKind.None)
-                        continue;
-
-                    unavailableLoginAccounts.Remove(account.AccountName);
-                    string accountRequestPrefix = account.Session.SteamID + ":";
-                    var fetchedRequestKeys = new HashSet<string>(result.Requests
-                        .Select(request => BuildLoginRequestKey(request.SteamId, request.ClientId)));
-                    foreach (string resolvedKey in recentlyResolvedLoginRequests.Keys
-                        .Where(key => key.StartsWith(accountRequestPrefix, StringComparison.Ordinal) && !fetchedRequestKeys.Contains(key))
-                        .ToList())
-                    {
-                        recentlyResolvedLoginRequests.Remove(resolvedKey);
-                    }
-                    foreach (PendingLoginRequest request in result.Requests)
-                    {
-                        string requestKey = BuildLoginRequestKey(request.SteamId, request.ClientId);
-                        if (!IsRecentlyResolved(recentlyResolvedLoginRequests, requestKey))
-                            pendingLoginRequests[requestKey] = request;
-                    }
-                    ReconcilePendingLoginRequestsForAccount(account, result.Requests);
-                }
-            }
-            finally
-            {
-                loginActionsSemaphore.Release();
+                LoginAccountScanOutcome outcome = await ScanLoginAccountAsync(
+                    account,
+                    useKnownRequestsCache: false,
+                    notifyManualRequests: false,
+                    isBackgroundMonitor: false,
+                    scanContext: scanContext,
+                    cancellationToken: cancellationToken);
+                if (outcome == LoginAccountScanOutcome.RateLimited)
+                    return;
             }
         }
 
-        private async Task PublishCachedLoginActionsAsync()
+        internal string BuildCachedLoginActionsPayloadJson()
         {
-            CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
-            if (coreWebView == null)
-                return;
-
             var jsonSettings = new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeHtml };
-            string json = JsonConvert.SerializeObject(new
+            return JsonConvert.SerializeObject(new
             {
                 revision = Interlocked.Increment(ref loginViewRevision),
                 requests = pendingLoginRequests.Values
@@ -3722,6 +3991,7 @@ namespace Steam_Desktop_Authenticator
                     deviceName = request.DeviceName,
                     requestedPersistence = request.RequestedPersistence,
                     securityHistory = request.SecurityHistory,
+                    isNewLogin = request.IsNewLogin,
                     locationMismatch = request.LocationMismatch,
                     highUsageLogin = request.HighUsageLogin
                 }),
@@ -3748,12 +4018,27 @@ namespace Steam_Desktop_Authenticator
                     deviceName = attempt.Request.DeviceName,
                     requestedPersistence = attempt.Request.RequestedPersistence,
                     securityHistory = attempt.Request.SecurityHistory,
+                    isNewLogin = attempt.Request.IsNewLogin,
                     locationMismatch = attempt.Request.LocationMismatch,
                     highUsageLogin = attempt.Request.HighUsageLogin,
                     outcome = attempt.Outcome,
                     occurredAtUtc = attempt.OccurredAtUtc.ToString("O")
                 })
             }, jsonSettings);
+        }
+
+        private Task PublishCachedLoginActionsAsync()
+        {
+            return publishLoginActionsAsync();
+        }
+
+        private async Task PublishCachedLoginActionsToWebViewAsync()
+        {
+            CoreWebView2 coreWebView = GetCoreWebView2IfAvailable();
+            if (coreWebView == null)
+                return;
+
+            string json = BuildCachedLoginActionsPayloadJson();
             try
             {
                 await coreWebView.ExecuteScriptAsync("loadLoginActions(" + json + ");");
@@ -3764,26 +4049,211 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private async Task RefreshLoginActionsAsync()
+        internal async Task RefreshLoginActionsAsync(string selectionKey = null)
         {
+            Task waitTask = null;
+            long runnerId = 0;
+            lock (manualLoginRefreshLock)
+            {
+                if (!manualLoginRefreshActive)
+                {
+                    manualLoginRefreshActive = true;
+                    manualLoginRefreshScanStarted = false;
+                    manualLoginRefreshPublishing = false;
+                    runnerId = ++manualLoginRefreshRunnerSequence;
+                    manualLoginRefreshOwnerId = runnerId;
+                    activeManualLoginRefreshScope = new ManualLoginRefreshScope();
+                    activeManualLoginRefreshScope.Add(selectionKey);
+                    activeManualLoginRefreshCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+                else if (!manualLoginRefreshScanStarted)
+                {
+                    activeManualLoginRefreshScope.Add(selectionKey);
+                    waitTask = activeManualLoginRefreshCompletion.Task;
+                }
+                else if (!manualLoginRefreshPublishing && activeManualLoginRefreshScope.Covers(selectionKey))
+                {
+                    waitTask = activeManualLoginRefreshCompletion.Task;
+                }
+                else
+                {
+                    if (queuedManualLoginRefreshScope == null)
+                    {
+                        queuedManualLoginRefreshScope = new ManualLoginRefreshScope();
+                        queuedManualLoginRefreshCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    }
+                    queuedManualLoginRefreshScope.Add(selectionKey);
+                    waitTask = queuedManualLoginRefreshCompletion.Task;
+                }
+            }
+
+            if (runnerId == 0)
+            {
+                try
+                {
+                    await waitTask;
+                }
+                catch (OperationCanceledException) when (lifetimeCancellationSource.IsCancellationRequested)
+                {
+                    // The form is closing; cancellation is expected.
+                }
+                return;
+            }
+
             try
             {
-                if (manifest?.LoginActionMonitoringEnabled == true)
-                    await MonitorLoginActionsSafelyAsync();
-                else
-                    await FetchLoginActionsForManualRefreshAsync();
-            }
-            catch (SessionUnavailableException)
-            {
-                // The account was invalidated while waiting for its operation lock.
-            }
-            catch (Exception ex)
-            {
-                DiagnosticErrorLogger.Log("Login action refresh", ex, "The manual login-request refresh did not complete.");
+                await RunCoalescedManualLoginRefreshesAsync(runnerId);
             }
             finally
             {
-                await PublishCachedLoginActionsAsync();
+                List<TaskCompletionSource<bool>> remainingCompletions = null;
+                lock (manualLoginRefreshLock)
+                {
+                    if (manualLoginRefreshOwnerId == runnerId)
+                    {
+                        manualLoginRefreshActive = false;
+                        manualLoginRefreshScanStarted = false;
+                        manualLoginRefreshPublishing = false;
+                        manualLoginRefreshOwnerId = 0;
+                        activeManualLoginRefreshScope = null;
+                        queuedManualLoginRefreshScope = null;
+                        if (activeManualLoginRefreshCompletion != null)
+                        {
+                            remainingCompletions = remainingCompletions ?? new List<TaskCompletionSource<bool>>();
+                            remainingCompletions.Add(activeManualLoginRefreshCompletion);
+                            activeManualLoginRefreshCompletion = null;
+                        }
+                        if (queuedManualLoginRefreshCompletion != null)
+                        {
+                            remainingCompletions = remainingCompletions ?? new List<TaskCompletionSource<bool>>();
+                            remainingCompletions.Add(queuedManualLoginRefreshCompletion);
+                            queuedManualLoginRefreshCompletion = null;
+                        }
+                    }
+                }
+                if (remainingCompletions != null)
+                {
+                    foreach (TaskCompletionSource<bool> completion in remainingCompletions)
+                        completion.TrySetResult(true);
+                }
+            }
+        }
+
+        private async Task RunCoalescedManualLoginRefreshesAsync(long runnerId)
+        {
+            CancellationToken cancellationToken = lifetimeCancellationSource.Token;
+            while (true)
+            {
+                TaskCompletionSource<bool> currentCompletion = null;
+                try
+                {
+                    if (manifest != null && loginApprovalService != null && allAccounts != null && !cancellationToken.IsCancellationRequested)
+                    {
+                        await loginActionsSemaphore.WaitAsync(cancellationToken);
+                        try
+                        {
+                            ManualLoginRefreshScope scopeToScan;
+                            lock (manualLoginRefreshLock)
+                            {
+                                manualLoginRefreshScanStarted = true;
+                                scopeToScan = activeManualLoginRefreshScope;
+                                currentCompletion = activeManualLoginRefreshCompletion;
+                            }
+
+                            await FetchLoginActionsForManualRefreshCoreAsync(scopeToScan, cancellationToken);
+                        }
+                        finally
+                        {
+                            loginActionsSemaphore.Release();
+                        }
+                    }
+                    else
+                    {
+                        lock (manualLoginRefreshLock)
+                        {
+                            manualLoginRefreshScanStarted = true;
+                            currentCompletion = activeManualLoginRefreshCompletion;
+                        }
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (SessionUnavailableException)
+                {
+                    // The account was invalidated while waiting for its operation lock.
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticErrorLogger.Log("Login action refresh", ex, "The manual login-request refresh did not complete.");
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                    break;
+
+                bool shouldPublish = false;
+                lock (manualLoginRefreshLock)
+                {
+                    if (currentCompletion == null)
+                        currentCompletion = activeManualLoginRefreshCompletion;
+
+                    if (queuedManualLoginRefreshScope == null)
+                    {
+                        manualLoginRefreshScanStarted = true;
+                        manualLoginRefreshPublishing = true;
+                        shouldPublish = true;
+                    }
+                }
+
+                if (shouldPublish && !cancellationToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await PublishCachedLoginActionsAsync();
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticErrorLogger.Log("Login actions UI", ex, "The login-action list could not be returned to the UI.");
+                    }
+                }
+
+                bool continueLoop = false;
+                TaskCompletionSource<bool> canceledQueuedCompletion = null;
+                lock (manualLoginRefreshLock)
+                {
+                    manualLoginRefreshPublishing = false;
+                    if (!cancellationToken.IsCancellationRequested && queuedManualLoginRefreshScope != null)
+                    {
+                        activeManualLoginRefreshScope = queuedManualLoginRefreshScope;
+                        activeManualLoginRefreshCompletion = queuedManualLoginRefreshCompletion;
+                        queuedManualLoginRefreshScope = null;
+                        queuedManualLoginRefreshCompletion = null;
+                        manualLoginRefreshScanStarted = false;
+                        continueLoop = true;
+                    }
+                    else if (manualLoginRefreshOwnerId == runnerId)
+                    {
+                        manualLoginRefreshActive = false;
+                        manualLoginRefreshScanStarted = false;
+                        manualLoginRefreshOwnerId = 0;
+                        activeManualLoginRefreshScope = null;
+                        activeManualLoginRefreshCompletion = null;
+                        queuedManualLoginRefreshScope = null;
+                        canceledQueuedCompletion = queuedManualLoginRefreshCompletion;
+                        queuedManualLoginRefreshCompletion = null;
+                    }
+                }
+
+                currentCompletion?.TrySetResult(true);
+                canceledQueuedCompletion?.TrySetResult(true);
+
+                if (!continueLoop)
+                    break;
             }
         }
 
@@ -3861,7 +4331,7 @@ namespace Steam_Desktop_Authenticator
                 }
 
                 await PublishCachedLoginActionsAsync();
-                _ = RefreshLoginActionsAsync();
+                _ = RefreshLoginActionsAsync(steamId.ToString(CultureInfo.InvariantCulture));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -4026,12 +4496,12 @@ namespace Steam_Desktop_Authenticator
                 RebindTradeConfirmationCache();
                 foreach (ulong steamId in pendingTradeConfirmationCounts.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
                     pendingTradeConfirmationCounts.Remove(steamId);
-                foreach (ulong steamId in loginMonitorSchedules.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
-                    loginMonitorSchedules.Remove(steamId);
                 loadedTradeConfirmationAccounts.RemoveWhere(steamId => !activeSteamIds.Contains(steamId));
                 tradeConfirmationScheduler.PruneRemovedAccounts(activeSteamIds);
                 lock (sessionStateLock)
                 {
+                    foreach (ulong steamId in loginMonitorSchedules.Keys.Where(steamId => !activeSteamIds.Contains(steamId)).ToArray())
+                        loginMonitorSchedules.Remove(steamId);
                     sessionRenewalRequired.RemoveWhere(steamId => !activeSteamIds.Contains(steamId));
                     foreach (ulong steamId in sessionRenewalPersistBackoffUntilUtc.Keys.Where(id => !activeSteamIds.Contains(id)).ToArray())
                         sessionRenewalPersistBackoffUntilUtc.Remove(steamId);
@@ -5292,21 +5762,40 @@ namespace Steam_Desktop_Authenticator
                     StringComparison.OrdinalIgnoreCase);
         }
 
-        private static async Task<string> ReadResponseBodyWithLimitAsync(HttpContent content, CancellationToken cancellationToken)
+        private static Task<string> ReadResponseBodyWithLimitAsync(HttpContent content, CancellationToken cancellationToken)
+        {
+            return ReadBoundedResponseBodyAsync(
+                content,
+                MaximumUpdateResponseBytes,
+                "The update service returned an oversized response.",
+                cancellationToken);
+        }
+
+        private static async Task<string> ReadBoundedResponseBodyAsync(
+            HttpContent content,
+            int maximumBytes,
+            string oversizedMessage,
+            CancellationToken cancellationToken)
         {
             if (content == null)
-                throw new InvalidDataException("The update service returned an empty response.");
+                throw new InvalidDataException("The service returned an empty response.");
+            if (content.Headers.ContentLength > maximumBytes)
+                throw new InvalidDataException(oversizedMessage);
 
-            using (Stream responseStream = await content.ReadAsStreamAsync())
+            using (Stream responseStream = await content.ReadAsStreamAsync(cancellationToken))
             using (MemoryStream responseBody = new MemoryStream())
             {
-                byte[] buffer = new byte[81920];
+                byte[] buffer = new byte[Math.Min(81920, Math.Max(256, maximumBytes + 1))];
                 int bytesRead;
                 int totalBytes = 0;
-                while ((bytesRead = await responseStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                while (true)
                 {
-                    if (bytesRead > MaximumUpdateResponseBytes - totalBytes)
-                        throw new InvalidDataException("The update service returned an oversized response.");
+                    int maxBytesToRead = Math.Min(buffer.Length, (maximumBytes - totalBytes) + 1);
+                    bytesRead = await responseStream.ReadAsync(buffer, 0, maxBytesToRead, cancellationToken);
+                    if (bytesRead <= 0)
+                        break;
+                    if (bytesRead > maximumBytes - totalBytes)
+                        throw new InvalidDataException(oversizedMessage);
                     responseBody.Write(buffer, 0, bytesRead);
                     totalBytes += bytesRead;
                 }
@@ -6011,7 +6500,10 @@ namespace Steam_Desktop_Authenticator
             }
             else if (action == "refresh_login_actions")
             {
-                _ = RefreshLoginActionsAsync();
+                if (TryGetWebMessageString(payload, "steamId", 32, out string steamIdText))
+                    _ = RefreshLoginActionsAsync(steamIdText);
+                else
+                    _ = PublishCachedLoginActionsAsync();
             }
             else if (action == "respond_login_action")
             {

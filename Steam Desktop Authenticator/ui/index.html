@@ -1610,7 +1610,11 @@
 
     document.getElementById('btn-refresh-login-actions').addEventListener('click', () => {
         showRefreshSpinner('login-actions');
-        window.chrome.webview.postMessage({ action: 'refresh_login_actions' });
+        const loginSelect = document.getElementById('login-account-select');
+        window.chrome.webview.postMessage({
+            action: 'refresh_login_actions',
+            steamId: loginSelect ? (loginSelect.value || 'all') : 'all'
+        });
     });
     document.getElementById('login-account-select').addEventListener('change', event => {
         const selectedAccount = event.target.value;
@@ -1851,7 +1855,7 @@
             const badges = document.createElement('div');
             badges.className = 'flex flex-wrap gap-2';
             badges.appendChild(loginBadge(request.requestedPersistence || 'Not specified', 'neutral'));
-            if (request.securityHistory === 'New or unknown login') badges.appendChild(loginBadge('New login', 'warning'));
+            if (request.isNewLogin || request.securityHistory === 'First-time login') badges.appendChild(loginBadge('New login', 'warning'));
             if (request.locationMismatch) badges.appendChild(loginBadge('Location mismatch', 'warning'));
             if (request.highUsageLogin) badges.appendChild(loginBadge('High-use login', 'warning'));
             heading.appendChild(titleGroup);
