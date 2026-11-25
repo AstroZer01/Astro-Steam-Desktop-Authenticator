@@ -292,7 +292,7 @@ namespace Steam_Desktop_Authenticator
                             Path.Combine(maDir, SettingsBackupFilename),
                             "A stale manifest backup could not be removed after the settings were loaded.",
                             expectedCanonicalDir);
-                        if (!File.Exists(Path.Combine(maDir, StorageJournalFilename)))
+                        if (!HasPendingOrQuarantinedStorageJournal(maDir))
                         {
                             SweepOrphanedCredentialStoresLocked(maDir, loadedManifest.CredentialsStoreFilename, expectedCanonicalDir);
                             SweepOrphanedAccountBackupsLocked(maDir, expectedCanonicalDir);
@@ -645,7 +645,6 @@ namespace Steam_Desktop_Authenticator
 
             string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
             string manifestPath = Path.Combine(maDir, "manifest.json");
-            string journalPath = Path.Combine(maDir, StorageJournalFilename);
 
             for (int attempt = 0; attempt < 3; attempt++)
             {
@@ -695,7 +694,7 @@ namespace Steam_Desktop_Authenticator
 
                 lock (storageLock)
                 {
-                    bool unexpectedNewJournal = !retainedCleanupJournalPresent && File.Exists(journalPath);
+                    bool unexpectedNewJournal = !retainedCleanupJournalPresent && HasPendingOrQuarantinedStorageJournal(maDir);
                     if (this.storageRevision == revisionBefore &&
                         Interlocked.Read(ref storageMutationEpoch) == mutationEpochBefore &&
                         !unexpectedNewJournal)
@@ -865,7 +864,7 @@ namespace Steam_Desktop_Authenticator
                     string manifestPath = Path.Combine(maDir, "manifest.json");
                     pinnedDir = StoragePathGuard.TryPinExistingDirectory(maDir, out string validatedRoot);
                     if (pinnedDir != null &&
-                        File.Exists(Path.Combine(maDir, StorageJournalFilename)) &&
+                        HasPendingOrQuarantinedStorageJournal(maDir) &&
                         !RecoverPendingStorageTransaction(maDir, manifestPath, expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath, validatedRoot: validatedRoot))
                     {
                         return StorageResult.Failure(
@@ -974,7 +973,7 @@ namespace Steam_Desktop_Authenticator
                         return candidates;
 
                     string manifestPath = Path.Combine(maDir, "manifest.json");
-                    if (File.Exists(Path.Combine(maDir, StorageJournalFilename)) &&
+                    if (HasPendingOrQuarantinedStorageJournal(maDir) &&
                         !RecoverPendingStorageTransaction(maDir, manifestPath, expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath, validatedRoot: validatedRoot))
                     {
                         return candidates;
@@ -1062,7 +1061,7 @@ namespace Steam_Desktop_Authenticator
                     if (pinnedDir == null)
                         return StorageResult.Failure(StorageFailureKind.Validation, "One of the selected authenticator files is no longer available for import.");
 
-                    if (File.Exists(Path.Combine(maDir, StorageJournalFilename)) &&
+                    if (HasPendingOrQuarantinedStorageJournal(maDir) &&
                         !RecoverPendingStorageTransaction(maDir, manifestPath, expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath, validatedRoot: validatedRoot))
                     {
                         return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data transaction could not be recovered safely. No files were imported.");
@@ -1204,7 +1203,7 @@ namespace Steam_Desktop_Authenticator
                 string manifestPath = Path.Combine(maDir, "manifest.json");
                 pinnedDir = StoragePathGuard.TryPinExistingDirectory(maDir, out string validatedRoot);
                 if (pinnedDir != null &&
-                    File.Exists(Path.Combine(maDir, StorageJournalFilename)) &&
+                    HasPendingOrQuarantinedStorageJournal(maDir) &&
                     !RecoverPendingStorageTransaction(maDir, manifestPath, expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath, validatedRoot: validatedRoot))
                 {
                     return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data transaction could not be recovered safely. Encryption settings were not changed.");
@@ -1521,7 +1520,6 @@ namespace Steam_Desktop_Authenticator
             {
                 string maDir = Path.Combine(Manifest.GetExecutableDir(), "maFiles");
                 string manifestPath = Path.Combine(maDir, "manifest.json");
-                string journalPath = Path.Combine(maDir, StorageJournalFilename);
 
                 for (int attempt = 0; attempt < 3; attempt++)
                 {
@@ -1550,7 +1548,7 @@ namespace Steam_Desktop_Authenticator
                         if (!this.Encrypted || this.Entries == null || this.Entries.Count == 0)
                             return true;
 
-                        bool unexpectedNewJournal = !retainedCleanupJournalPresent && File.Exists(journalPath);
+                        bool unexpectedNewJournal = !retainedCleanupJournalPresent && HasPendingOrQuarantinedStorageJournal(maDir);
                         if (this.storageRevision != revisionBefore ||
                             Interlocked.Read(ref storageMutationEpoch) != mutationEpochBefore ||
                             unexpectedNewJournal)
@@ -1610,7 +1608,7 @@ namespace Steam_Desktop_Authenticator
                 string manifestPath = Path.Combine(maDir, "manifest.json");
                 pinnedDir = StoragePathGuard.TryPinExistingDirectory(maDir, out string validatedRoot);
                 if (pinnedDir != null &&
-                    File.Exists(Path.Combine(maDir, StorageJournalFilename)) &&
+                    HasPendingOrQuarantinedStorageJournal(maDir) &&
                     !RecoverPendingStorageTransaction(maDir, manifestPath, expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath, validatedRoot: validatedRoot))
                 {
                     return false;
@@ -1826,7 +1824,7 @@ namespace Steam_Desktop_Authenticator
                 string manifestPath = Path.Combine(maDir, "manifest.json");
                 pinnedDir = StoragePathGuard.TryPinExistingDirectory(maDir, out string validatedRoot);
                 if (pinnedDir != null &&
-                    File.Exists(Path.Combine(maDir, StorageJournalFilename)) &&
+                    HasPendingOrQuarantinedStorageJournal(maDir) &&
                     !RecoverPendingStorageTransaction(maDir, manifestPath, expectedCanonicalDir: pinnedDir.CanonicalDirectoryPath, validatedRoot: validatedRoot))
                 {
                     return StorageResult.Failure(StorageFailureKind.Io, "A previous account-data transaction could not be recovered safely. No account data was changed.");
@@ -2049,7 +2047,7 @@ namespace Steam_Desktop_Authenticator
                     if (pinnedDir.TryVerifyStillPinned(out Exception postCommitPinError))
                     {
                         DeleteFileBestEffort(backupFilename, "The completed manifest backup could not be removed.", pinnedDir.CanonicalDirectoryPath);
-                        if (!File.Exists(Path.Combine(maDir, StorageJournalFilename)))
+                        if (!HasPendingOrQuarantinedStorageJournal(maDir))
                             SweepOrphanedCredentialStoresLocked(maDir, this.CredentialsStoreFilename, pinnedDir.CanonicalDirectoryPath);
                     }
                     else

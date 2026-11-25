@@ -20,6 +20,7 @@ namespace Steam_Desktop_Authenticator
         private static long storageMutationEpoch;
 
         private const string StorageJournalFilename = ".asda-storage-transaction.json";
+        private const string StorageJournalQuarantineFilename = ".asda-storage-transaction.quarantined";
         private const int CurrentStorageJournalVersion = 2;
         private const string SettingsBackupFilename = ".manifest.settings.bak";
         private const string StorageBackupFilenamePrefix = ".manifest.";
@@ -108,14 +109,19 @@ namespace Steam_Desktop_Authenticator
             return new AccountFileTargetPlan(StagedAccountFileMode.CreateFallbackGuid, fallbackFilename);
         }
 
+        private static bool HasPendingOrQuarantinedStorageJournal(string maDir)
+        {
+            return Path.Exists(Path.Combine(maDir, StorageJournalFilename)) ||
+                   Path.Exists(Path.Combine(maDir, StorageJournalQuarantineFilename));
+        }
+
         private static bool TryRecoverPendingJournalBeforeReadLocked(
             string maDir,
             string manifestPath,
             out bool retainedCleanupJournalPresent)
         {
             retainedCleanupJournalPresent = false;
-            string journalPath = Path.Combine(maDir, StorageJournalFilename);
-            if (!File.Exists(journalPath))
+            if (!HasPendingOrQuarantinedStorageJournal(maDir))
                 return true;
 
             using (StoragePathGuard.PinnedStorageDirectory pinnedDir = StoragePathGuard.TryPinExistingDirectory(maDir, out string validatedRoot))
@@ -131,7 +137,7 @@ namespace Steam_Desktop_Authenticator
                     pinnedDir.CanonicalDirectoryPath,
                     validatedRoot,
                     allowLockedCompletedJournal: true);
-                retainedCleanupJournalPresent = recovered && File.Exists(journalPath);
+                retainedCleanupJournalPresent = recovered && HasPendingOrQuarantinedStorageJournal(maDir);
                 return recovered;
             }
         }
@@ -795,8 +801,18 @@ namespace Steam_Desktop_Authenticator
             bool allowLockedCompletedJournal = false)
         {
             string journalFilename = Path.Combine(maDir, StorageJournalFilename);
+            string quarantinedFilename = Path.Combine(maDir, StorageJournalQuarantineFilename);
             lock (storageLock)
             {
+                if (Path.Exists(quarantinedFilename))
+                {
+                    DiagnosticErrorLogger.Log(
+                        "Authenticator storage",
+                        new InvalidDataException("A rejected or tampered storage transaction journal is quarantined on disk."),
+                        "Storage recovery failed closed because a previous storage journal integrity check failed.");
+                    return false;
+                }
+
                 if (!File.Exists(journalFilename))
                     return true;
 
@@ -976,7 +992,17 @@ namespace Steam_Desktop_Authenticator
                                 if (remainingObsolete.Count != retainedObsolete.Count)
                                 {
                                     journal.RetainedObsoleteFilenames = remainingObsolete;
-                                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
+                                    try
+                                    {
+                                        WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
+                                    }
+                                    catch (Exception ex) when (allowLockedCompletedJournal)
+                                    {
+                                        DiagnosticErrorLogger.Log(
+                                            "Authenticator storage",
+                                            ex,
+                                            "The retained cleanup journal could not be compacted during read recovery because it is currently in use.");
+                                    }
                                 }
                                 if (retainedObsoleteFilenames != null)
                                 {
@@ -1035,7 +1061,17 @@ namespace Steam_Desktop_Authenticator
                                     journal.ReplacedFiles = null;
                                     journal.ObsoleteFilenames = new List<string>();
                                     journal.RetainedObsoleteFilenames = remainingObsolete;
-                                    WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
+                                    try
+                                    {
+                                        WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(journal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
+                                    }
+                                    catch (Exception ex) when (allowLockedCompletedJournal)
+                                    {
+                                        DiagnosticErrorLogger.Log(
+                                            "Authenticator storage",
+                                            ex,
+                                            "The committed storage journal could not be compacted during read recovery because it is currently in use.");
+                                    }
                                     if (retainedObsoleteFilenames != null)
                                     {
                                         foreach (string filename in remainingObsolete)
@@ -1046,7 +1082,9 @@ namespace Steam_Desktop_Authenticator
                             }
 
                             bool committedJournalDeleted = DeleteFileBestEffort(journalFilename, "The completed storage journal could not be removed during storage recovery.", canonicalDir);
-                            return committedJournalDeleted && !File.Exists(journalFilename);
+                            if (committedJournalDeleted && !File.Exists(journalFilename))
+                                return true;
+                            return allowLockedCompletedJournal;
                         }
 
                         if (!RestoreReplacedFilesIfNeeded(maDir, replaced, canonicalDir, manifestOwnership))
@@ -1153,8 +1191,11 @@ namespace Steam_Desktop_Authenticator
                     // A rebased journal must still be in retained-cleanup-only state with no injected entries.
                     bool hasUnexpectedState =
                         !String.IsNullOrWhiteSpace(journal.BackupFilename) ||
+                        !String.IsNullOrWhiteSpace(journal.PreviousManifestHash) ||
                         (journal.ReplacedFiles != null && journal.ReplacedFiles.Count > 0) ||
                         (journal.CreatedFilenames != null && journal.CreatedFilenames.Count > 0) ||
+                        (journal.CreatedFileHashes != null && journal.CreatedFileHashes.Count > 0) ||
+                        (journal.CreatedFileIdentities != null && journal.CreatedFileIdentities.Count > 0) ||
                         (journal.ObsoleteFilenames != null && journal.ObsoleteFilenames.Count > 0);
                     bool hasUnexpectedRetainedEntry = (journal.RetainedObsoleteFilenames ?? Enumerable.Empty<string>())
                         .Any(journalEntry => String.IsNullOrWhiteSpace(journalEntry) || !expectedSet.Contains(journalEntry));
@@ -1163,14 +1204,18 @@ namespace Steam_Desktop_Authenticator
                     {
                         // Scrub any rejected/injected entries from the on-disk journal before failing
                         // so a subsequent startup recovery cannot delete an unvalidated filename.
+                        // If a read-only handle prevents scrubbing the rejected journal, persist a
+                        // quarantine marker so subsequent startup fails closed instead of consuming
+                        // the un-scrubbed journal once the lock releases.
+                        bool scrubbed = false;
                         try
                         {
                             if (pendingRetainedObsolete.Count == 0)
                             {
-                                DeleteFileBestEffort(
+                                scrubbed = DeleteFileBestEffort(
                                     journalFilename,
                                     "The tampered storage journal could not be removed while rejecting settings rebase.",
-                                    canonicalDir);
+                                    canonicalDir) && !File.Exists(journalFilename);
                             }
                             else
                             {
@@ -1188,11 +1233,25 @@ namespace Steam_Desktop_Authenticator
                                     BackupFilename = null
                                 };
                                 WriteAllTextAtomically(journalFilename, JsonConvert.SerializeObject(sanitizedJournal, storageJsonSettings), expectedCanonicalDirectory: canonicalDir);
+                                scrubbed = true;
                             }
                         }
                         catch
                         {
-                            // Still fail closed below even if best-effort sanitization fails.
+                            scrubbed = false;
+                        }
+
+                        if (!scrubbed)
+                        {
+                            try
+                            {
+                                string quarantineFilename = Path.Combine(maDir, StorageJournalQuarantineFilename);
+                                WriteAllTextAtomically(quarantineFilename, "tampered-journal-rebase-rejected", expectedCanonicalDirectory: canonicalDir);
+                            }
+                            catch
+                            {
+                                // Still fail closed below.
+                            }
                         }
 
                         throw new InvalidDataException(hasUnexpectedState
@@ -1689,8 +1748,8 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrWhiteSpace(maDir) || !Directory.Exists(maDir))
                 return;
 
-            // Never sweep credential stores while a storage transaction journal exists on disk.
-            if (File.Exists(Path.Combine(maDir, StorageJournalFilename)))
+            // Never sweep credential stores while a storage transaction journal or quarantine marker exists on disk.
+            if (HasPendingOrQuarantinedStorageJournal(maDir))
                 return;
 
             try
@@ -1721,8 +1780,8 @@ namespace Steam_Desktop_Authenticator
             if (String.IsNullOrWhiteSpace(maDir) || !Directory.Exists(maDir))
                 return true;
 
-            // Never sweep account backups while a storage transaction journal exists on disk.
-            if (File.Exists(Path.Combine(maDir, StorageJournalFilename)))
+            // Never sweep account backups or rollback staging copies while a storage transaction journal or quarantine marker exists on disk.
+            if (HasPendingOrQuarantinedStorageJournal(maDir))
                 return true;
 
             bool allDeleted = true;
@@ -1737,6 +1796,16 @@ namespace Steam_Desktop_Authenticator
                     if (!DeleteFileBestEffort(filePath, "An orphaned pre-journal authenticator backup could not be removed.", expectedCanonicalDir))
                         allDeleted = false;
                 }
+
+                foreach (string filePath in Directory.EnumerateFiles(maDir, ".mafile-*.tmp", SearchOption.TopDirectoryOnly))
+                {
+                    string fileName = Path.GetFileName(filePath);
+                    if (!IsValidOrphanedStagingTempFilename(fileName))
+                        continue;
+
+                    if (!DeleteFileBestEffort(filePath, "An orphaned authenticator staging temporary file could not be removed.", expectedCanonicalDir))
+                        allDeleted = false;
+                }
             }
             catch (Exception ex)
             {
@@ -1745,6 +1814,30 @@ namespace Steam_Desktop_Authenticator
             }
 
             return allDeleted;
+        }
+
+        private static bool IsValidOrphanedStagingTempFilename(string filename)
+        {
+            if (String.IsNullOrWhiteSpace(filename) ||
+                !filename.EndsWith(StoragePathGuard.StagingTempSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string prefix = null;
+            if (filename.StartsWith(StoragePathGuard.RestoredTargetTempPrefix, StringComparison.OrdinalIgnoreCase))
+                prefix = StoragePathGuard.RestoredTargetTempPrefix;
+            else if (filename.StartsWith(StoragePathGuard.StagedFileTempPrefix, StringComparison.OrdinalIgnoreCase))
+                prefix = StoragePathGuard.StagedFileTempPrefix;
+            else
+                return false;
+
+            int guidLength = filename.Length - prefix.Length - StoragePathGuard.StagingTempSuffix.Length;
+            if (guidLength != 32)
+                return false;
+
+            string guidText = filename.Substring(prefix.Length, guidLength);
+            return Guid.TryParseExact(guidText, "N", out _);
         }
 
         private static bool IsValidAccountBackupFilename(string filename)

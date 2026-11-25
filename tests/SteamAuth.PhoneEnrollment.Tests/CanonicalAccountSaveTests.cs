@@ -1953,14 +1953,11 @@ namespace SteamAuth.PhoneEnrollment.Tests
 
             string manifestContents = File.ReadAllText(manifestPath);
             string originalCiphertext = File.ReadAllText(canonicalPath);
-            byte[] capturedMidWriteBytes = null;
 
-            // Capture the exact on-disk bytes produced by OverwriteAndFlush right after writing
-            // the encrypted replacement body and before finalizing byte 0 (simulating power loss).
+            // Simulate an I/O failure inside OverwriteAndFlush after writing the sentinel-prefixed
+            // encrypted body and before finalizing byte 0, verifying clean in-memory rollback.
             StoragePathGuard.OnBeforeFlushReplacementForTest = path =>
             {
-                // Keep the sentinel-prefixed body bytes in memory, then abort to trigger rollback.
-                // On disk at this point byte 0 is 0xFF and bytes [1..] are the new Base64 ciphertext.
                 throw new IOException("Simulated crash before byte-0 commit on encrypted replacement.");
             };
             try
@@ -1981,13 +1978,12 @@ namespace SteamAuth.PhoneEnrollment.Tests
             string backupPath = Path.Combine(maDirectory, backupFilename);
             File.WriteAllText(backupPath, originalCiphertext);
 
-            byte[] validBase64Body = Encoding.UTF8.GetBytes(originalCiphertext);
-            capturedMidWriteBytes = (byte[])validBase64Body.Clone();
-            capturedMidWriteBytes[0] = 0xFF;
+            byte[] midWriteSentinelBytes = (byte[])Encoding.UTF8.GetBytes(originalCiphertext).Clone();
+            midWriteSentinelBytes[0] = 0xFF;
             using (FileStream fs = new FileStream(canonicalPath, FileMode.Open, FileAccess.Write, FileShare.None))
             {
-                fs.Write(capturedMidWriteBytes, 0, capturedMidWriteBytes.Length);
-                fs.SetLength(capturedMidWriteBytes.Length);
+                fs.Write(midWriteSentinelBytes, 0, midWriteSentinelBytes.Length);
+                fs.SetLength(midWriteSentinelBytes.Length);
                 fs.Flush(true);
             }
             string sameTargetIdentity = StoragePathGuard.GetFileIdentityToken(canonicalPath, canonicalDir);
@@ -2151,6 +2147,158 @@ namespace SteamAuth.PhoneEnrollment.Tests
             Assert.False(File.Exists(journalPath));
             Assert.False(File.Exists(orphanedCredPath));
             Assert.Equal(2, finalReload.GetAllAccounts("cleanup-key-1").Length);
+        }
+
+        [Fact]
+        public void SaveWithResult_RejectedRebaseWithReadLockedJournalQuarantinesAndNeverDeletesInjectedFileOnRestart()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000030000UL;
+            ulong secondId = 76561198000030001UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string quarantinePath = Path.Combine(maDirectory, ".asda-storage-transaction.quarantined");
+            string lockedSourceFilename = "quarantine-locked-obsolete.maFile";
+            string lockedSourcePath = Path.Combine(maDirectory, lockedSourceFilename);
+            File.WriteAllText(lockedSourcePath, JsonConvert.SerializeObject(CreateAccount(secondId)));
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Single(candidates);
+
+            string injectedFilename = "injected-must-survive-locked-rebase.maFile";
+            string injectedPath = Path.Combine(maDirectory, injectedFilename);
+            File.WriteAllText(injectedPath, "{\"untracked\":\"must-survive-even-when-journal-read-locked\"}");
+
+            FileStream journalReadLock = null;
+            using (new FileStream(lockedSourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Assert.True(manifest.ImportUnmanagedMaFiles(candidates).Succeeded);
+                Assert.True(File.Exists(journalPath));
+
+                // Inject an unvalidated filename into the journal AND hold a read-only handle on the
+                // journal so scrubbing fails inside RebaseRetainedStorageTransaction.
+                Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = () =>
+                {
+                    JObject injected = JObject.Parse(File.ReadAllText(journalPath));
+                    ((JArray)injected["retained_obsolete_filenames"]).Add(injectedFilename);
+                    File.WriteAllText(journalPath, injected.ToString(Formatting.None));
+                    journalReadLock = new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                };
+                try
+                {
+                    manifest.MinimizeToTray = !manifest.MinimizeToTray;
+                    StorageResult result = manifest.SaveWithResult();
+                    Assert.False(result.Succeeded);
+                    Assert.True(File.Exists(quarantinePath));
+                }
+                finally
+                {
+                    Manifest.OnBeforeRebaseRetainedStorageTransactionForTest = null;
+                    journalReadLock?.Dispose();
+                    journalReadLock = null;
+                }
+            }
+
+            // Once all handles close, restart MUST fail closed on the quarantine marker and MUST NOT
+            // delete the rejected injected file (or even consume the tampered journal).
+            Assert.Throws<ManifestRecoveryException>(() => Manifest.GetManifest(true));
+            Assert.True(File.Exists(injectedPath));
+            Assert.Equal("{\"untracked\":\"must-survive-even-when-journal-read-locked\"}", File.ReadAllText(injectedPath));
+        }
+
+        [Fact]
+        public void StartupAndEncryptionSetup_SweepOrphanedRestoreAndStageTempFilesFromHardCrash()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong accountId = 76561198000031000UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(accountId), false).Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string orphanedRestoreTmp = Path.Combine(maDirectory, ".mafile-restore.11111111111111111111111111111111.tmp");
+            string orphanedStageTmp = Path.Combine(maDirectory, ".mafile-stage.22222222222222222222222222222222.tmp");
+            string unrelatedUserTmp = Path.Combine(maDirectory, "user-note.tmp");
+            File.WriteAllText(orphanedRestoreTmp, "{\"plaintext\":\"orphaned-restore-copy\"}");
+            File.WriteAllText(orphanedStageTmp, "{\"plaintext\":\"orphaned-stage-copy\"}");
+            File.WriteAllText(unrelatedUserTmp, "keep-user-file");
+
+            // 1. If a hard-crash restore temp copy is locked while enabling encryption, ObsoleteCleanupPending surfaces.
+            using (new FileStream(orphanedRestoreTmp, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                StorageResult encryptResult = manifest.ChangeEncryptionKey(null, "sweep-tmp-key");
+                Assert.True(encryptResult.Succeeded);
+                Assert.True(encryptResult.ObsoleteCleanupPending);
+                Assert.True(File.Exists(orphanedRestoreTmp));
+                Assert.False(File.Exists(orphanedStageTmp));
+                Assert.True(File.Exists(unrelatedUserTmp));
+            }
+
+            // 2. Once unlocked, startup sweeps the remaining orphaned restore temp file while leaving unrelated files alone.
+            Manifest reloaded = Manifest.GetManifest(true);
+            Assert.False(File.Exists(orphanedRestoreTmp));
+            Assert.True(File.Exists(unrelatedUserTmp));
+            Assert.Single(reloaded.GetAllAccounts("sweep-tmp-key"));
+        }
+
+        [Fact]
+        public void CleanupOnlyJournal_PartialMultiFileCleanupWithReadLockedJournalStillAllowsRepeatedVerifyPasskey()
+        {
+            Manifest manifest = Manifest.GenerateNewManifest(false);
+            ulong firstId = 76561198000032000UL;
+            ulong secondId = 76561198000032001UL;
+            ulong thirdId = 76561198000032002UL;
+            Assert.True(manifest.SaveAccount(CreateAccount(firstId), true, "multi-cleanup-key").Succeeded);
+
+            string maDirectory = Path.Combine(dataDirectory, "maFiles");
+            string journalPath = Path.Combine(maDirectory, ".asda-storage-transaction.json");
+            string obsoleteOnePath = Path.Combine(maDirectory, "multi-obsolete-1.maFile");
+            string obsoleteTwoPath = Path.Combine(maDirectory, "multi-obsolete-2.maFile");
+            File.WriteAllText(obsoleteOnePath, JsonConvert.SerializeObject(CreateAccount(secondId)));
+            File.WriteAllText(obsoleteTwoPath, JsonConvert.SerializeObject(CreateAccount(thirdId)));
+            var candidates = manifest.FindUnmanagedMaFiles();
+            Assert.Equal(2, candidates.Count);
+
+            // Lock BOTH obsolete files during import, then transition the journal into cleanup-only
+            // retained state (while both stay locked) so VerifyPasskey hits the cleanup-only fast path.
+            using (new FileStream(obsoleteTwoPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                using (new FileStream(obsoleteOnePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    StorageResult importResult = manifest.ImportUnmanagedMaFiles(candidates, "multi-cleanup-key");
+                    Assert.True(importResult.Succeeded);
+                    Assert.True(importResult.ObsoleteCleanupPending);
+                    Assert.True(File.Exists(journalPath));
+
+                    // First verify while journal is still pre-compaction and read-locked.
+                    using (new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        Assert.True(manifest.VerifyPasskey("multi-cleanup-key"));
+                    }
+
+                    // Transition journal to retained-cleanup-only state with both obsolete files listed.
+                    Manifest transitioned = Manifest.GetManifest(true);
+                    Assert.Equal(3, transitioned.Entries.Count);
+                    Assert.True(File.Exists(journalPath));
+                }
+
+                // Now obsoleteOne is unlocked (will be deleted), obsoleteTwo stays locked, AND the
+                // cleanup-only journal itself is read-locked so compacting the shortened list fails.
+                // Repeated VerifyPasskey and GetAllAccounts calls must STILL succeed!
+                using (new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    Assert.True(manifest.VerifyPasskey("multi-cleanup-key"));
+                    Assert.False(File.Exists(obsoleteOnePath));
+                    Assert.True(File.Exists(obsoleteTwoPath));
+                    Assert.True(manifest.VerifyPasskey("multi-cleanup-key"));
+                    Assert.Equal(3, manifest.GetAllAccounts("multi-cleanup-key").Length);
+                }
+            }
+
+            // Once both locks release, startup finishes deleting obsoleteTwo and removes the journal.
+            Manifest finalReload = Manifest.GetManifest(true);
+            Assert.False(File.Exists(obsoleteTwoPath));
+            Assert.False(File.Exists(journalPath));
+            Assert.Equal(3, finalReload.GetAllAccounts("multi-cleanup-key").Length);
         }
 
         public void Dispose()

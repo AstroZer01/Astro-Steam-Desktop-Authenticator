@@ -39,6 +39,9 @@ namespace Steam_Desktop_Authenticator
         private const int ErrorPathNotFound = 3;
         private const int Win32LongPathThreshold = 248;
         private const byte InPlaceOverwriteSentinelByte = 0xFF;
+        internal const string RestoredTargetTempPrefix = ".mafile-restore.";
+        internal const string StagedFileTempPrefix = ".mafile-stage.";
+        internal const string StagingTempSuffix = ".tmp";
 
         private static readonly char[] DirectorySeparators =
         {
@@ -841,7 +844,10 @@ namespace Steam_Desktop_Authenticator
                 throw new ArgumentNullException(nameof(contents));
 
             string targetFullPath = Path.GetFullPath(targetPath);
-            string tempFullPath = targetFullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            string targetParentDir = Path.GetDirectoryName(targetFullPath);
+            string tempFullPath = Path.Combine(
+                targetParentDir,
+                StagedFileTempPrefix + Guid.NewGuid().ToString("N") + StagingTempSuffix);
             string win32TempPath = ToWin32OpenPath(tempFullPath);
 
             // Hold an exclusive handle with DELETE access across write, flush, and handle-bound
@@ -1504,7 +1510,10 @@ namespace Steam_Desktop_Authenticator
             string destinationFullPath,
             string expectedCanonicalDirectory)
         {
-            string tempFullPath = destinationFullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            string parentDirectory = Path.GetDirectoryName(destinationFullPath);
+            string tempFullPath = Path.Combine(
+                parentDirectory,
+                RestoredTargetTempPrefix + Guid.NewGuid().ToString("N") + StagingTempSuffix);
             string win32TempPath = ToWin32OpenPath(tempFullPath);
 
             SafeFileHandle tempHandle = CreateFileW(
@@ -1554,7 +1563,6 @@ namespace Steam_Desktop_Authenticator
 
                 OnBeforePublishRestoredMissingTargetForTest?.Invoke(destinationFullPath);
 
-                string parentDirectory = Path.GetDirectoryName(destinationFullPath);
                 using (PinnedStorageDirectory pinnedDir = TryPinExistingDirectory(parentDirectory, out _))
                 {
                     if (pinnedDir == null ||
