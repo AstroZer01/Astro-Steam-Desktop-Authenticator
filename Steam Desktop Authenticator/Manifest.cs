@@ -412,6 +412,11 @@ namespace Steam_Desktop_Authenticator
 
         public string PromptForPassKey()
         {
+            return PromptForPassKey(null);
+        }
+
+        public string PromptForPassKey(IWin32Window owner)
+        {
             if (!this.Encrypted)
             {
                 throw new ManifestNotEncryptedException();
@@ -423,7 +428,7 @@ namespace Steam_Desktop_Authenticator
             {
                 using (InputForm passKeyForm = new InputForm("Please enter your encryption passkey.", true))
                 {
-                    passKeyForm.ShowInputDialog();
+                    passKeyForm.ShowInputDialog(owner);
                     if (!passKeyForm.Canceled && passKeyForm.UiReady && !passKeyForm.LoadFailed)
                     {
                         passKey = passKeyForm.txtBox.Text;
