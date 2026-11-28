@@ -139,8 +139,6 @@ namespace Steam_Desktop_Authenticator
         private CancellationTokenSource proxyTestCancellationSource;
         private readonly CancellationTokenSource lifetimeCancellationSource = new CancellationTokenSource();
 
-        const int VK_RCONTROL = 0xA3;
-        const int VK_ESCAPE = 0x1B;
         [DllImport("user32.dll")]
         private static extern bool GetCursorPos(out Point lpPoint);
 
@@ -2177,13 +2175,21 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private void SetQrScanWaitingState(bool isWaiting, int remainingSeconds = 0)
+        private void SetQrScanWaitingState(bool isWaiting, int remainingSeconds = 0, string scanKeyLabel = null, string cancelKeyLabel = null)
         {
+            string resolvedScanLabel = String.IsNullOrWhiteSpace(scanKeyLabel)
+                ? HotkeyBindings.GetDisplayName(manifest?.QrScanHotkey ?? HotkeyBindings.DefaultQrScanVirtualKey)
+                : scanKeyLabel;
+            string resolvedCancelLabel = String.IsNullOrWhiteSpace(cancelKeyLabel)
+                ? HotkeyBindings.GetDisplayName(manifest?.QrCancelHotkey ?? HotkeyBindings.DefaultQrCancelVirtualKey)
+                : cancelKeyLabel;
+
             if (isWaiting)
             {
                 if (qrScanOverlay == null || qrScanOverlay.IsDisposed)
                     qrScanOverlay = new QrScanOverlayForm();
 
+                qrScanOverlay.SetHotkeyLabels(resolvedScanLabel, resolvedCancelLabel);
                 qrScanOverlay.FollowCursor();
                 if (!qrScanOverlay.Visible)
                     qrScanOverlay.Show(this);
@@ -2194,7 +2200,9 @@ namespace Steam_Desktop_Authenticator
             }
 
             string waitingValue = isWaiting ? "true" : "false";
-            _ = ExecuteScriptSafelyAsync($"setQrScanWaiting({waitingValue}, {remainingSeconds})", "QR login UI");
+            string jsScanLabel = JsonConvert.SerializeObject(resolvedScanLabel);
+            string jsCancelLabel = JsonConvert.SerializeObject(resolvedCancelLabel);
+            _ = ExecuteScriptSafelyAsync($"setQrScanWaiting({waitingValue}, {remainingSeconds}, {jsScanLabel}, {jsCancelLabel})", "QR login UI");
         }
 
         private async void btnLoginViaQr_Click(object sender, EventArgs e)
@@ -2210,6 +2218,11 @@ namespace Steam_Desktop_Authenticator
             }
 
             ulong steamIdAtScanStart = accountAtScanStart.Session.SteamID;
+            (int scanVirtualKey, int cancelVirtualKey) = HotkeyBindings.NormalizeQrHotkeys(
+                manifest?.QrScanHotkey ?? HotkeyBindings.DefaultQrScanVirtualKey,
+                manifest?.QrCancelHotkey ?? HotkeyBindings.DefaultQrCancelVirtualKey);
+            string scanKeyLabel = HotkeyBindings.GetDisplayName(scanVirtualKey);
+            string cancelKeyLabel = HotkeyBindings.GetDisplayName(cancelVirtualKey);
 
             qrScanInProgress = true;
             qrScanCancelRequested = false;
@@ -2217,19 +2230,39 @@ namespace Steam_Desktop_Authenticator
             {
                 this.btnLoginViaQr.Enabled = false;
                 string originalText = this.btnLoginViaQr.Text;
-                SetQrScanWaitingState(true, 30);
+                SetQrScanWaitingState(true, 30, scanKeyLabel, cancelKeyLabel);
 
+                bool waitForScanRelease = (GetAsyncKeyState(scanVirtualKey) & 0x8000) != 0;
+                bool waitForCancelRelease = (GetAsyncKeyState(cancelVirtualKey) & 0x8000) != 0;
                 bool keyPressed = false;
                 bool cancelled = false;
                 for (int i = 300; i > 0; i--)
                 {
-                    if (qrScanCancelRequested || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0)
+                    if (qrScanCancelRequested)
                     {
                         cancelled = true;
                         break;
                     }
 
-                    if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0)
+                    bool cancelDown = (GetAsyncKeyState(cancelVirtualKey) & 0x8000) != 0;
+                    if (waitForCancelRelease)
+                    {
+                        if (!cancelDown)
+                            waitForCancelRelease = false;
+                    }
+                    else if (cancelDown)
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
+                    bool scanDown = (GetAsyncKeyState(scanVirtualKey) & 0x8000) != 0;
+                    if (waitForScanRelease)
+                    {
+                        if (!scanDown)
+                            waitForScanRelease = false;
+                    }
+                    else if (scanDown)
                     {
                         keyPressed = true;
                         break;
@@ -2237,8 +2270,8 @@ namespace Steam_Desktop_Authenticator
 
                     if (i % 10 == 0)
                     {
-                        this.btnLoginViaQr.Text = $"Press Right CTRL ({i / 10}s)";
-                        SetQrScanWaitingState(true, i / 10);
+                        this.btnLoginViaQr.Text = $"Press {scanKeyLabel} ({i / 10}s)";
+                        SetQrScanWaitingState(true, i / 10, scanKeyLabel, cancelKeyLabel);
                     }
 
                     await Task.Delay(100, lifetimeCancellationSource.Token);
@@ -2246,7 +2279,7 @@ namespace Steam_Desktop_Authenticator
 
                 this.btnLoginViaQr.Text = originalText;
                 this.btnLoginViaQr.Enabled = IsSessionAvailableForAccountOperations(currentAccount);
-                SetQrScanWaitingState(false);
+                SetQrScanWaitingState(false, 0, scanKeyLabel, cancelKeyLabel);
 
                 if (!keyPressed)
                 {
@@ -6438,6 +6471,11 @@ namespace Steam_Desktop_Authenticator
             settings["manifestEncrypted"] = manifest.Encrypted;
             settings["allowSavedSteamPasswords"] = manifest.Encrypted && manifest.AllowSavedSteamPasswords;
             settings["aesGcmSupported"] = EncryptedCredentialStore.IsSupported;
+            (int qrScanHotkey, int qrCancelHotkey) = HotkeyBindings.NormalizeQrHotkeys(manifest.QrScanHotkey, manifest.QrCancelHotkey);
+            settings["qrScanHotkey"] = qrScanHotkey;
+            settings["qrScanHotkeyLabel"] = HotkeyBindings.GetDisplayName(qrScanHotkey);
+            settings["qrCancelHotkey"] = qrCancelHotkey;
+            settings["qrCancelHotkeyLabel"] = HotkeyBindings.GetDisplayName(qrCancelHotkey);
 
             _ = ExecuteScriptSafelyAsync($"loadSettings({settings.ToString(Newtonsoft.Json.Formatting.None)})", "Settings UI");
             PublishProxyStatusToWebView();
@@ -6586,6 +6624,14 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
+                int qrScanHotkey = (int?)payload["qrScanHotkey"] ?? manifest.QrScanHotkey;
+                int qrCancelHotkey = (int?)payload["qrCancelHotkey"] ?? manifest.QrCancelHotkey;
+                if (!HotkeyBindings.TryValidateQrHotkeys(qrScanHotkey, qrCancelHotkey, out string hotkeyError))
+                {
+                    await PublishSettingsSaveFailureAsync(hotkeyError);
+                    return;
+                }
+
                 bool tradeConfirmationCustomIntervalEnabled = (bool?)payload["tradeConfirmationCustomIntervalEnabled"] ?? false;
                 int tradeConfirmationCheckInterval = Math.Clamp((int?)payload["tradeConfirmationCheckInterval"] ?? 15, 3, 3600);
                 bool autoConfirmMarket = (bool?)payload["autoConfirmMarket"] ?? false;
@@ -6688,6 +6734,8 @@ namespace Steam_Desktop_Authenticator
                     staged.ProxyUsername = proxyConfiguration.Username;
                     staged.ProxyPassword = proxyConfiguration.Password;
                     staged.AllowSavedSteamPasswords = effectiveAllowSavedPasswords;
+                    staged.QrScanHotkey = qrScanHotkey;
+                    staged.QrCancelHotkey = qrCancelHotkey;
                 });
                 if (!saveResult.Succeeded)
                 {
@@ -6865,7 +6913,9 @@ namespace Steam_Desktop_Authenticator
             }
 
             if (!HasPayloadType(payload, "tradeConfirmationCheckInterval", JTokenType.Integer) ||
-                !HasPayloadType(payload, "proxyPort", JTokenType.Integer))
+                !HasPayloadType(payload, "proxyPort", JTokenType.Integer) ||
+                !HasPayloadType(payload, "qrScanHotkey", JTokenType.Integer) ||
+                !HasPayloadType(payload, "qrCancelHotkey", JTokenType.Integer))
                 return false;
 
             return TryGetWebMessageString(payload, "saveContext", 32, out _) &&

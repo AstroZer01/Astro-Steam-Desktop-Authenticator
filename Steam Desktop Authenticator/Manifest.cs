@@ -95,6 +95,12 @@ namespace Steam_Desktop_Authenticator
         [JsonProperty("proxy_password")]
         public string ProxyPassword { get; set; } = String.Empty;
 
+        [JsonProperty("qr_scan_hotkey")]
+        public int QrScanHotkey { get; set; } = HotkeyBindings.DefaultQrScanVirtualKey;
+
+        [JsonProperty("qr_cancel_hotkey")]
+        public int QrCancelHotkey { get; set; } = HotkeyBindings.DefaultQrCancelVirtualKey;
+
         [JsonProperty("allow_saved_steam_passwords", DefaultValueHandling = DefaultValueHandling.Ignore)]
         public bool AllowSavedSteamPasswords { get; set; } = false;
 
@@ -246,6 +252,7 @@ namespace Steam_Desktop_Authenticator
 
                     loadedManifest.NormalizeTradeConfirmationSettings();
                     loadedManifest.NormalizeLoginActionSettings();
+                    loadedManifest.NormalizeHotkeySettings();
 
                     if (migratedLegacyTradeSettings)
                     {
@@ -2261,6 +2268,8 @@ namespace Steam_Desktop_Authenticator
             destination.ProxyPort = ProxyPort;
             destination.ProxyUsername = ProxyUsername;
             destination.ProxyPassword = ProxyPassword;
+            destination.QrScanHotkey = QrScanHotkey;
+            destination.QrCancelHotkey = QrCancelHotkey;
         }
 
         private static bool IsValidAutomaticImportAccount(SteamGuardAccount account)
@@ -2881,6 +2890,13 @@ namespace Steam_Desktop_Authenticator
             {
                 LoginActionAutoAllowCurrentDeviceIp = false;
             }
+        }
+
+        public void NormalizeHotkeySettings()
+        {
+            (int normalizedScan, int normalizedCancel) = HotkeyBindings.NormalizeQrHotkeys(QrScanHotkey, QrCancelHotkey);
+            QrScanHotkey = normalizedScan;
+            QrCancelHotkey = normalizedCancel;
         }
 
         public void NormalizeTradeConfirmationSettings()

@@ -337,7 +337,7 @@
         <header class="flex items-center justify-between gap-3">
           <div>
             <h1 class="text-lg font-bold text-[#f3f6fb]">Settings</h1>
-            <p class="text-xs text-on-surface-subtle mt-0.5">Manage confirmation automation, login rules, network proxy, and vault preferences.</p>
+            <p class="text-xs text-on-surface-subtle mt-0.5">Manage confirmation automation, login rules, network proxy, hotkeys, and vault preferences.</p>
           </div>
           <div class="text-right">
             <p id="app-version-text" class="text-[11px] text-on-surface-subtle font-mono">Astro Steam Desktop Authenticator v…</p>
@@ -349,12 +349,13 @@
         </header>
 
         <div class="astro-settings-shell">
-          <!-- 4-Category Sub-Navigation -->
+          <!-- 5-Category Sub-Navigation -->
           <nav class="astro-settings-rail" role="tablist" aria-label="Settings categories">
             <button type="button" role="tab" data-settings-tab="confirmations" aria-selected="true" class="settings-subtab shrink-0 text-left px-3 py-2 rounded-lg text-xs font-semibold transition-colors">1. Confirmations</button>
             <button type="button" role="tab" data-settings-tab="logins" aria-selected="false" class="settings-subtab shrink-0 text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors">2. Login Actions &amp; IP</button>
             <button type="button" role="tab" data-settings-tab="proxy" aria-selected="false" class="settings-subtab shrink-0 text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors">3. Network &amp; Proxy</button>
-            <button type="button" role="tab" data-settings-tab="app" aria-selected="false" class="settings-subtab shrink-0 text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors">4. App, Vault &amp; Logs</button>
+            <button type="button" role="tab" data-settings-tab="hotkeys" aria-selected="false" class="settings-subtab shrink-0 text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors">4. Hotkeys</button>
+            <button type="button" role="tab" data-settings-tab="app" aria-selected="false" class="settings-subtab shrink-0 text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors">5. App, Vault &amp; Logs</button>
           </nav>
 
           <!-- Settings Sub-Tab Panels -->
@@ -505,7 +506,49 @@
               </div>
             </div>
 
-            <!-- Sub-Tab 4: App, Vault & Backup -->
+            <!-- Sub-Tab 4: Hotkeys -->
+            <div id="settings-panel-hotkeys" class="settings-panel hidden astro-card rounded-xl p-4 space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <h2 class="text-[11px] font-bold uppercase tracking-[0.08em] text-primary">Hotkeys</h2>
+                  <p class="text-[11px] text-on-surface-subtle mt-0.5">Customize keyboard bindings used while interacting with Astro SDA.</p>
+                </div>
+                <button id="btn-reset-hotkeys" type="button" class="btn-ghost rounded-lg px-2.5 py-1 text-[11px] shrink-0">Reset Defaults</button>
+              </div>
+
+              <div class="space-y-2.5 pt-1">
+                <div class="flex items-center justify-between text-[10.5px] font-bold uppercase tracking-[0.07em] text-on-surface-subtle">
+                  <h3>Login via QR</h3>
+                  <span class="normal-case tracking-normal font-normal">Global keys during QR scan</span>
+                </div>
+
+                <div class="bg-surface-container border border-white/[0.07] rounded-lg px-3.5 py-3 flex items-center justify-between gap-4">
+                  <div class="min-w-0">
+                    <span id="label-hotkey-qr-scan" class="block text-xs font-semibold text-on-surface">Capture &amp; Scan QR Code</span>
+                    <p class="text-[11px] text-on-surface-subtle mt-0.5">Press this key while framing Steam’s QR code inside the viewfinder.</p>
+                  </div>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <button id="btn-hotkey-qr-scan" type="button" aria-labelledby="label-hotkey-qr-scan" class="btn-surface font-mono text-xs rounded-lg px-3 py-1.5 min-w-[116px] text-center">Right Ctrl</button>
+                    <button id="btn-hotkey-qr-scan-cancel" type="button" class="hidden btn-ghost rounded-lg px-2 py-1.5 text-[11px]">Cancel</button>
+                  </div>
+                </div>
+
+                <div class="bg-surface-container border border-white/[0.07] rounded-lg px-3.5 py-3 flex items-center justify-between gap-4">
+                  <div class="min-w-0">
+                    <span id="label-hotkey-qr-cancel" class="block text-xs font-semibold text-on-surface">Cancel QR Scan</span>
+                    <p class="text-[11px] text-on-surface-subtle mt-0.5">Press this key to abort an active QR code scan.</p>
+                  </div>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <button id="btn-hotkey-qr-cancel" type="button" aria-labelledby="label-hotkey-qr-cancel" class="btn-surface font-mono text-xs rounded-lg px-3 py-1.5 min-w-[116px] text-center">Esc</button>
+                    <button id="btn-hotkey-qr-cancel-cancel" type="button" class="hidden btn-ghost rounded-lg px-2 py-1.5 text-[11px]">Cancel</button>
+                  </div>
+                </div>
+
+                <p id="hotkey-bind-status" class="hidden text-xs pt-0.5" role="status" aria-live="polite"></p>
+              </div>
+            </div>
+
+            <!-- Sub-Tab 5: App, Vault & Backup -->
             <div id="settings-panel-app" class="settings-panel hidden astro-card rounded-xl p-4 space-y-3">
               <div class="flex items-center justify-between">
                 <h2 class="text-[11px] font-bold uppercase tracking-[0.08em] text-primary">App, Vault &amp; Backup</h2>
@@ -786,7 +829,14 @@
   let settingsSavePending = false;
   let unsavedSettingsPreviousFocus = null;
   const validTabIds = new Set(['authenticator', 'trades', 'login-actions', 'settings']);
-  const validSettingsSubTabs = new Set(['confirmations', 'logins', 'proxy', 'app']);
+  const validSettingsSubTabs = new Set(['confirmations', 'logins', 'proxy', 'hotkeys', 'app']);
+  const DEFAULT_QR_SCAN_HOTKEY = 0xA3;
+  const DEFAULT_QR_CANCEL_HOTKEY = 0x1B;
+  let qrScanHotkeyVk = DEFAULT_QR_SCAN_HOTKEY;
+  let qrCancelHotkeyVk = DEFAULT_QR_CANCEL_HOTKEY;
+  let qrScanKeyLabel = 'Right Ctrl';
+  let qrCancelKeyLabel = 'Esc';
+  let recordingHotkeyTarget = null;
   const ACCOUNT_SCOPE_STORAGE_KEY = 'astro.confirmationsScope';
   let hasExplicitScopePreference = false;
   let hasInitializedCurrentAccount = false;
@@ -1106,6 +1156,7 @@
 
   function switchSettingsSubTab(subTab) {
     if (!validSettingsSubTabs.has(subTab)) return;
+    if (typeof stopHotkeyRecording === 'function') stopHotkeyRecording(false);
     activeSettingsSubTab = subTab;
     document.querySelectorAll('.settings-panel').forEach(p => p.classList.add('hidden'));
     const target = document.getElementById('settings-panel-' + subTab);
@@ -1261,9 +1312,11 @@
     }
   }
 
-  function setQrScanWaiting(isWaiting, remainingSeconds = 0) {
+  function setQrScanWaiting(isWaiting, remainingSeconds = 0, scanKeyLabel = null, cancelKeyLabel = null) {
     qrScanWaiting = !!isWaiting;
     qrScanRemainingSeconds = Math.max(0, Number(remainingSeconds) || 0);
+    if (typeof scanKeyLabel === 'string' && scanKeyLabel.trim()) qrScanKeyLabel = scanKeyLabel.trim();
+    if (typeof cancelKeyLabel === 'string' && cancelKeyLabel.trim()) qrCancelKeyLabel = cancelKeyLabel.trim();
     const card = document.getElementById('qr-action-card');
     const idle = document.getElementById('qr-idle-content');
     const status = document.getElementById('qr-scan-status');
@@ -1278,7 +1331,7 @@
     if (qrScanWaiting) {
       if (heading) heading.lastElementChild.textContent = 'Scanning QR (' + qrScanRemainingSeconds + 's)';
       document.getElementById('qr-scan-instructions').textContent =
-        'Frame Steam’s QR inside the 350×350 viewfinder and press Right Ctrl (' + qrScanRemainingSeconds + 's). Press Esc to cancel.';
+        'Frame Steam’s QR inside the 350×350 viewfinder and press ' + qrScanKeyLabel + ' (' + qrScanRemainingSeconds + 's). Press ' + qrCancelKeyLabel + ' to cancel.';
     }
     updateQrLoginButton();
   }
@@ -3039,7 +3092,9 @@
       proxyPort: parseInt(document.getElementById('proxy-port').value, 10) || 0,
       proxyUsername: document.getElementById('proxy-user').value.trim(),
       proxyPasswordAction: proxyPasswordAction,
-      proxyPassword: proxyPasswordAction === 'replace' ? document.getElementById('proxy-pass').value : ''
+      proxyPassword: proxyPasswordAction === 'replace' ? document.getElementById('proxy-pass').value : '',
+      qrScanHotkey: qrScanHotkeyVk,
+      qrCancelHotkey: qrCancelHotkeyVk
     };
   }
 
@@ -3278,9 +3333,189 @@
     testStatus.innerText = '';
     updateTradeConfirmationIntervalSettings();
     updateLoginAutoAllowIpSettings();
+    qrScanHotkeyVk = Number.isInteger(settings.qrScanHotkey) ? settings.qrScanHotkey : DEFAULT_QR_SCAN_HOTKEY;
+    qrCancelHotkeyVk = Number.isInteger(settings.qrCancelHotkey) ? settings.qrCancelHotkey : DEFAULT_QR_CANCEL_HOTKEY;
+    qrScanKeyLabel = (typeof settings.qrScanHotkeyLabel === 'string' && settings.qrScanHotkeyLabel) ? settings.qrScanHotkeyLabel : formatVirtualKeyLabel(qrScanHotkeyVk);
+    qrCancelKeyLabel = (typeof settings.qrCancelHotkeyLabel === 'string' && settings.qrCancelHotkeyLabel) ? settings.qrCancelHotkeyLabel : formatVirtualKeyLabel(qrCancelHotkeyVk);
+    stopHotkeyRecording(true);
+    renderHotkeySettingsUI();
     settingsBaseline = captureSettingsState();
     setSettingsDirty(false);
   }
+
+  // ==================== HOTKEY BINDINGS ====================
+  const KEYBOARD_CODE_TO_VK = {
+    Backspace: 0x08, Tab: 0x09, Enter: 0x0D, NumpadEnter: 0x0D, Pause: 0x13, CapsLock: 0x14,
+    Escape: 0x1B, Space: 0x20, PageUp: 0x21, PageDown: 0x22, End: 0x23, Home: 0x24,
+    ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28,
+    PrintScreen: 0x2C, Insert: 0x2D, Delete: 0x2E, ScrollLock: 0x91,
+    ShiftLeft: 0xA0, ShiftRight: 0xA1, ControlLeft: 0xA2, ControlRight: 0xA3, AltLeft: 0xA4, AltRight: 0xA5,
+    Digit0: 0x30, Digit1: 0x31, Digit2: 0x32, Digit3: 0x33, Digit4: 0x34,
+    Digit5: 0x35, Digit6: 0x36, Digit7: 0x37, Digit8: 0x38, Digit9: 0x39,
+    KeyA: 0x41, KeyB: 0x42, KeyC: 0x43, KeyD: 0x44, KeyE: 0x45, KeyF: 0x46, KeyG: 0x47, KeyH: 0x48,
+    KeyI: 0x49, KeyJ: 0x4A, KeyK: 0x4B, KeyL: 0x4C, KeyM: 0x4D, KeyN: 0x4E, KeyO: 0x4F, KeyP: 0x50,
+    KeyQ: 0x51, KeyR: 0x52, KeyS: 0x53, KeyT: 0x54, KeyU: 0x55, KeyV: 0x56, KeyW: 0x57, KeyX: 0x58,
+    KeyY: 0x59, KeyZ: 0x5A,
+    Numpad0: 0x60, Numpad1: 0x61, Numpad2: 0x62, Numpad3: 0x63, Numpad4: 0x64,
+    Numpad5: 0x65, Numpad6: 0x66, Numpad7: 0x67, Numpad8: 0x68, Numpad9: 0x69,
+    NumpadMultiply: 0x6A, NumpadAdd: 0x6B, NumpadSubtract: 0x6D, NumpadDecimal: 0x6E, NumpadDivide: 0x6F,
+    F1: 0x70, F2: 0x71, F3: 0x72, F4: 0x73, F5: 0x74, F6: 0x75, F7: 0x76, F8: 0x77,
+    F9: 0x78, F10: 0x79, F11: 0x7A, F12: 0x7B, F13: 0x7C, F14: 0x7D, F15: 0x7E, F16: 0x7F,
+    F17: 0x80, F18: 0x81, F19: 0x82, F20: 0x83, F21: 0x84, F22: 0x85, F23: 0x86, F24: 0x87,
+    Semicolon: 0xBA, Equal: 0xBB, Comma: 0xBC, Minus: 0xBD, Period: 0xBE, Slash: 0xBF,
+    Backquote: 0xC0, BracketLeft: 0xDB, Backslash: 0xDC, BracketRight: 0xDD, Quote: 0xDE
+  };
+
+  const VK_DISPLAY_NAMES = {
+    0x08: 'Backspace', 0x09: 'Tab', 0x0D: 'Enter', 0x13: 'Pause', 0x14: 'Caps Lock',
+    0x1B: 'Esc', 0x20: 'Space', 0x21: 'Page Up', 0x22: 'Page Down', 0x23: 'End', 0x24: 'Home',
+    0x25: 'Left', 0x26: 'Up', 0x27: 'Right', 0x28: 'Down',
+    0x2C: 'Print Screen', 0x2D: 'Insert', 0x2E: 'Delete', 0x91: 'Scroll Lock',
+    0xA0: 'Left Shift', 0xA1: 'Right Shift', 0xA2: 'Left Ctrl', 0xA3: 'Right Ctrl', 0xA4: 'Left Alt', 0xA5: 'Right Alt',
+    0x30: '0', 0x31: '1', 0x32: '2', 0x33: '3', 0x34: '4', 0x35: '5', 0x36: '6', 0x37: '7', 0x38: '8', 0x39: '9',
+    0x41: 'A', 0x42: 'B', 0x43: 'C', 0x44: 'D', 0x45: 'E', 0x46: 'F', 0x47: 'G', 0x48: 'H',
+    0x49: 'I', 0x4A: 'J', 0x4B: 'K', 0x4C: 'L', 0x4D: 'M', 0x4E: 'N', 0x4F: 'O', 0x50: 'P',
+    0x51: 'Q', 0x52: 'R', 0x53: 'S', 0x54: 'T', 0x55: 'U', 0x56: 'V', 0x57: 'W', 0x58: 'X',
+    0x59: 'Y', 0x5A: 'Z',
+    0x60: 'Num 0', 0x61: 'Num 1', 0x62: 'Num 2', 0x63: 'Num 3', 0x64: 'Num 4',
+    0x65: 'Num 5', 0x66: 'Num 6', 0x67: 'Num 7', 0x68: 'Num 8', 0x69: 'Num 9',
+    0x6A: 'Num *', 0x6B: 'Num +', 0x6D: 'Num -', 0x6E: 'Num .', 0x6F: 'Num /',
+    0x70: 'F1', 0x71: 'F2', 0x72: 'F3', 0x73: 'F4', 0x74: 'F5', 0x75: 'F6', 0x76: 'F7', 0x77: 'F8',
+    0x78: 'F9', 0x79: 'F10', 0x7A: 'F11', 0x7B: 'F12', 0x7C: 'F13', 0x7D: 'F14', 0x7E: 'F15', 0x7F: 'F16',
+    0x80: 'F17', 0x81: 'F18', 0x82: 'F19', 0x83: 'F20', 0x84: 'F21', 0x85: 'F22', 0x86: 'F23', 0x87: 'F24',
+    0xBA: ';', 0xBB: '=', 0xBC: ',', 0xBD: '-', 0xBE: '.', 0xBF: '/',
+    0xC0: '`', 0xDB: '[', 0xDC: '\\', 0xDD: ']', 0xDE: "'"
+  };
+
+  function formatVirtualKeyLabel(vk) {
+    return VK_DISPLAY_NAMES[vk] || ('Key 0x' + ((Number(vk) || 0) & 0xFF).toString(16).toUpperCase().padStart(2, '0'));
+  }
+
+  function setHotkeyStatus(message, tone = 'info') {
+    const status = document.getElementById('hotkey-bind-status');
+    if (!status) return;
+    if (!message) {
+      status.textContent = '';
+      status.className = 'hidden text-xs pt-0.5';
+      return;
+    }
+    status.textContent = message;
+    status.className = 'text-xs pt-0.5 ' + (tone === 'error' ? 'text-error' : tone === 'accent' ? 'text-primary' : 'text-on-surface-variant');
+  }
+
+  function renderHotkeySettingsUI() {
+    const scanBtn = document.getElementById('btn-hotkey-qr-scan');
+    const scanCancel = document.getElementById('btn-hotkey-qr-scan-cancel');
+    const cancelBtn = document.getElementById('btn-hotkey-qr-cancel');
+    const cancelCancel = document.getElementById('btn-hotkey-qr-cancel-cancel');
+
+    const scanRecording = recordingHotkeyTarget === 'qrScan';
+    const cancelRecording = recordingHotkeyTarget === 'qrCancel';
+
+    if (scanBtn) {
+      scanBtn.textContent = scanRecording ? 'Press a key…' : formatVirtualKeyLabel(qrScanHotkeyVk);
+      scanBtn.className = scanRecording
+        ? 'btn-add-accent font-mono text-xs rounded-lg px-3 py-1.5 min-w-[116px] text-center'
+        : 'btn-surface font-mono text-xs rounded-lg px-3 py-1.5 min-w-[116px] text-center';
+      scanBtn.setAttribute('aria-pressed', scanRecording ? 'true' : 'false');
+    }
+    if (scanCancel) scanCancel.classList.toggle('hidden', !scanRecording);
+
+    if (cancelBtn) {
+      cancelBtn.textContent = cancelRecording ? 'Press a key…' : formatVirtualKeyLabel(qrCancelHotkeyVk);
+      cancelBtn.className = cancelRecording
+        ? 'btn-add-accent font-mono text-xs rounded-lg px-3 py-1.5 min-w-[116px] text-center'
+        : 'btn-surface font-mono text-xs rounded-lg px-3 py-1.5 min-w-[116px] text-center';
+      cancelBtn.setAttribute('aria-pressed', cancelRecording ? 'true' : 'false');
+    }
+    if (cancelCancel) cancelCancel.classList.toggle('hidden', !cancelRecording);
+  }
+
+  function startHotkeyRecording(target) {
+    recordingHotkeyTarget = target;
+    renderHotkeySettingsUI();
+    const actionLabel = target === 'qrScan' ? 'Capture & Scan QR Code' : 'Cancel QR Scan';
+    setHotkeyStatus('Press any keyboard key for ' + actionLabel + ', or click Cancel to keep the current bind.', 'accent');
+  }
+
+  function stopHotkeyRecording(clearStatus = true) {
+    recordingHotkeyTarget = null;
+    renderHotkeySettingsUI();
+    if (clearStatus) setHotkeyStatus('');
+  }
+
+  function applyRecordedHotkey(event) {
+    if (!recordingHotkeyTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.repeat) return;
+
+    const vk = KEYBOARD_CODE_TO_VK[event.code];
+    if (!vk) {
+      setHotkeyStatus('That key cannot be bound. Press another keyboard key or click Cancel.', 'error');
+      return;
+    }
+
+    if (recordingHotkeyTarget === 'qrScan' && vk === qrCancelHotkeyVk) {
+      setHotkeyStatus(formatVirtualKeyLabel(vk) + ' is already bound to Cancel QR Scan. Choose a different key.', 'error');
+      return;
+    }
+    if (recordingHotkeyTarget === 'qrCancel' && vk === qrScanHotkeyVk) {
+      setHotkeyStatus(formatVirtualKeyLabel(vk) + ' is already bound to Capture & Scan QR Code. Choose a different key.', 'error');
+      return;
+    }
+
+    if (recordingHotkeyTarget === 'qrScan') {
+      qrScanHotkeyVk = vk;
+      qrScanKeyLabel = formatVirtualKeyLabel(vk);
+    } else {
+      qrCancelHotkeyVk = vk;
+      qrCancelKeyLabel = formatVirtualKeyLabel(vk);
+    }
+    stopHotkeyRecording(true);
+    updateSettingsDirty();
+  }
+
+  document.getElementById('btn-hotkey-qr-scan').addEventListener('click', e => {
+    e.stopPropagation();
+    if (recordingHotkeyTarget === 'qrScan') stopHotkeyRecording(true);
+    else startHotkeyRecording('qrScan');
+  });
+  document.getElementById('btn-hotkey-qr-scan-cancel').addEventListener('click', e => {
+    e.stopPropagation();
+    stopHotkeyRecording(true);
+  });
+  document.getElementById('btn-hotkey-qr-cancel').addEventListener('click', e => {
+    e.stopPropagation();
+    if (recordingHotkeyTarget === 'qrCancel') stopHotkeyRecording(true);
+    else startHotkeyRecording('qrCancel');
+  });
+  document.getElementById('btn-hotkey-qr-cancel-cancel').addEventListener('click', e => {
+    e.stopPropagation();
+    stopHotkeyRecording(true);
+  });
+  document.getElementById('btn-reset-hotkeys').addEventListener('click', () => {
+    qrScanHotkeyVk = DEFAULT_QR_SCAN_HOTKEY;
+    qrCancelHotkeyVk = DEFAULT_QR_CANCEL_HOTKEY;
+    qrScanKeyLabel = formatVirtualKeyLabel(qrScanHotkeyVk);
+    qrCancelKeyLabel = formatVirtualKeyLabel(qrCancelHotkeyVk);
+    stopHotkeyRecording(true);
+    updateSettingsDirty();
+  });
+
+  document.addEventListener('keydown', event => {
+    if (!recordingHotkeyTarget) return;
+    applyRecordedHotkey(event);
+  }, true);
+
+  document.addEventListener('keyup', event => {
+    if (!recordingHotkeyTarget || event.code !== 'PrintScreen') return;
+    applyRecordedHotkey(event);
+  }, true);
+
+  document.addEventListener('click', () => {
+    if (recordingHotkeyTarget) stopHotkeyRecording(true);
+  });
 
   function settingsSaved(saveContext = '') {
     hideSpinner('settings-save');
