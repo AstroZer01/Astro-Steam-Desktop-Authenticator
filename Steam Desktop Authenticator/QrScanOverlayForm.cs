@@ -12,6 +12,31 @@ namespace Steam_Desktop_Authenticator
         private const int VisualSize = CaptureSize;
         private const int InstructionsHeight = 52;
         private readonly Timer followCursorTimer = new Timer { Interval = 16 };
+        private string scanKeyLabel = HotkeyBindings.GetDisplayName(HotkeyBindings.DefaultQrScanVirtualKey);
+        private string cancelKeyLabel = HotkeyBindings.GetDisplayName(HotkeyBindings.DefaultQrCancelVirtualKey);
+        internal string ScanKeyLabel => scanKeyLabel;
+        internal string CancelKeyLabel => cancelKeyLabel;
+
+        public void SetHotkeyLabels(string scanLabel, string cancelLabel)
+        {
+            string nextScan = String.IsNullOrWhiteSpace(scanLabel)
+                ? HotkeyBindings.GetDisplayName(HotkeyBindings.DefaultQrScanVirtualKey)
+                : scanLabel;
+            string nextCancel = String.IsNullOrWhiteSpace(cancelLabel)
+                ? HotkeyBindings.GetDisplayName(HotkeyBindings.DefaultQrCancelVirtualKey)
+                : cancelLabel;
+
+            if (String.Equals(scanKeyLabel, nextScan, StringComparison.Ordinal) &&
+                String.Equals(cancelKeyLabel, nextCancel, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            scanKeyLabel = nextScan;
+            cancelKeyLabel = nextCancel;
+            if (!IsDisposed && !Disposing)
+                Invalidate();
+        }
 
         [DllImport("user32.dll")]
         private static extern bool GetCursorPos(out Point point);
@@ -142,17 +167,7 @@ namespace Steam_Desktop_Authenticator
             DrawCornerBracket(g, darkBacking, cyanAccent, VisualSize - 2, VisualSize - 2, arm, thick, -1, -1);
 
             // 4. Solid dark instruction pill below the capture frame (opaque bg = crisp text, zero magenta halo).
-            const int pillWidth = 282;
-            const int pillHeight = 32;
-            Rectangle pillRect = new Rectangle((VisualSize - pillWidth) / 2, VisualSize + 10, pillWidth, pillHeight);
-            using (SolidBrush bgBrush = new SolidBrush(pillBg))
-            using (Pen borderPen = new Pen(pillBorder, 1f))
-            {
-                g.FillRectangle(bgBrush, pillRect);
-                g.DrawRectangle(borderPen, pillRect.X, pillRect.Y, pillRect.Width - 1, pillRect.Height - 1);
-            }
-
-            DrawInstructionPillText(g, pillRect, pillBg, cyanLight, AstroTheme.OnSurfaceVariant);
+            DrawInstructionPill(g, pillBg, pillBorder, cyanLight, AstroTheme.OnSurfaceVariant);
         }
 
         private static void DrawTick(Graphics g, Color backing, Color fill, Rectangle rect)
@@ -185,13 +200,13 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
-        private static void DrawInstructionPillText(Graphics g, Rectangle pillRect, Color pillBg, Color keyColor, Color mutedColor)
+        private void DrawInstructionPill(Graphics g, Color pillBg, Color pillBorder, Color keyColor, Color mutedColor)
         {
             var segments = new (string Text, bool Bold, Color Color)[]
             {
-                ("Right Ctrl", true, keyColor),
+                (scanKeyLabel, true, keyColor),
                 (" to scan   ·   ", false, mutedColor),
-                ("Esc", true, keyColor),
+                (cancelKeyLabel, true, keyColor),
                 (" to cancel", false, mutedColor)
             };
 
@@ -209,11 +224,23 @@ namespace Steam_Desktop_Authenticator
                     totalWidth += widths[i];
                 }
 
+                const int pillHeight = 32;
+                int pillWidth = Math.Min(VisualSize - 4, Math.Max(240, totalWidth + 24));
+                Rectangle pillRect = new Rectangle((VisualSize - pillWidth) / 2, VisualSize + 10, pillWidth, pillHeight);
+                using (SolidBrush bgBrush = new SolidBrush(pillBg))
+                using (Pen borderPen = new Pen(pillBorder, 1f))
+                {
+                    g.FillRectangle(bgBrush, pillRect);
+                    g.DrawRectangle(borderPen, pillRect.X, pillRect.Y, pillRect.Width - 1, pillRect.Height - 1);
+                }
+
                 int cursorX = pillRect.X + Math.Max(8, (pillRect.Width - totalWidth) / 2);
-                for (int i = 0; i < segments.Length; i++)
+                int maxRight = pillRect.Right - 6;
+                for (int i = 0; i < segments.Length && cursorX < maxRight; i++)
                 {
                     Font f = segments[i].Bold ? boldFont : regularFont;
-                    Rectangle segRect = new Rectangle(cursorX, pillRect.Y, widths[i] + 2, pillRect.Height);
+                    int segWidth = Math.Min(widths[i] + 2, maxRight - cursorX);
+                    Rectangle segRect = new Rectangle(cursorX, pillRect.Y, segWidth, pillRect.Height);
                     TextRenderer.DrawText(g, segments[i].Text, f, segRect, segments[i].Color, pillBg, flags);
                     cursorX += widths[i];
                 }
