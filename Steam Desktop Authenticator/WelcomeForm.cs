@@ -578,8 +578,14 @@ namespace Steam_Desktop_Authenticator
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
             }
+            MainForm mainForm = new MainForm();
+            mainForm.FormClosed += (s, e) =>
+            {
+                if (!IsDisposed && !Disposing)
+                    this.Close();
+            };
             this.Hide();
-            new MainForm().Show();
+            mainForm.Show();
         }
     }
 }

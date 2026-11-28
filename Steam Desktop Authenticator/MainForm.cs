@@ -108,9 +108,13 @@ namespace Steam_Desktop_Authenticator
         private bool startSilent = false;
         private bool backgroundServicesEligible;
         private bool backgroundServicesStarted;
+        private bool startupInitialized;
         private bool startupAccountMaintenanceCompleted;
         private bool startupAccountMaintenanceFinished;
         private bool startupUpdateCheckStarted;
+        private Panel modernUiLoadingPanel;
+        private bool modernUiDocumentReady;
+        private bool modernUiRevealed;
         private bool settingsDirty;
         private bool explicitExitRequested;
         private bool allowExitAfterSettingsSave;
@@ -1011,6 +1015,47 @@ namespace Steam_Desktop_Authenticator
                 currentPassKey == null;
         }
 
+        internal static bool ShouldMinimizeToTrayOnClose(
+            CloseReason closeReason,
+            bool explicitExitRequested,
+            Manifest currentManifest,
+            bool startupInitialized,
+            string currentPassKey)
+        {
+            return closeReason == CloseReason.UserClosing &&
+                !explicitExitRequested &&
+                currentManifest != null &&
+                currentManifest.MinimizeToTray &&
+                startupInitialized &&
+                !ShouldPromptStartupPassKey(currentManifest, currentPassKey);
+        }
+
+        internal static bool CanRunActivationUpdateCheck(
+            Manifest currentManifest,
+            bool startupMaintenanceFinished,
+            string currentPassKey)
+        {
+            return currentManifest != null &&
+                startupMaintenanceFinished &&
+                !ShouldPromptStartupPassKey(currentManifest, currentPassKey);
+        }
+
+        internal static bool CanRevealModernUi(
+            Manifest currentManifest,
+            bool startupInitialized,
+            string currentPassKey)
+        {
+            return currentManifest != null &&
+                startupInitialized &&
+                !ShouldPromptStartupPassKey(currentManifest, currentPassKey);
+        }
+
+        private void ExitImmediatelyFromStartup()
+        {
+            explicitExitRequested = true;
+            this.Close();
+        }
+
         public void SetEncryptionKey(string key)
         {
             passKey = key;
@@ -1034,7 +1079,7 @@ namespace Steam_Desktop_Authenticator
             catch (ManifestParseException)
             {
                 AstroMessageBox.Show("Unable to read your settings. Try restarting Astro Steam Desktop Assistant.", "Astro Steam Desktop Assistant", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                this.Close();
+                ExitImmediatelyFromStartup();
                 return;
             }
 
@@ -1049,16 +1094,16 @@ namespace Steam_Desktop_Authenticator
                     "Astro Steam Desktop Assistant",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
-                this.Close();
+                ExitImmediatelyFromStartup();
                 return;
             }
 
             if (ShouldPromptStartupPassKey(manifest, passKey))
             {
-                passKey = manifest.PromptForPassKey();
+                passKey = manifest.PromptForPassKey(this);
                 if (passKey == null)
                 {
-                    Close();
+                    ExitImmediatelyFromStartup();
                     return;
                 }
             }
@@ -1081,7 +1126,9 @@ namespace Steam_Desktop_Authenticator
 
             btnManageEncryption.Enabled = manifest.Entries.Count > 0;
 
-            loadAccountsList();
+            startupInitialized = true;
+            if (!TryRevealModernUiAndPushInitialState())
+                loadAccountsList();
             loginApprovalService = loginApprovalService ?? new LoginApprovalService(
                 account => manifest?.GetAccountStorageRevision(account?.Session?.SteamID ?? 0) ?? 0,
                 (account, session, expectedRevision) => PersistLoginSession(account, session, expectedRevision));
@@ -1781,7 +1828,7 @@ namespace Steam_Desktop_Authenticator
                 return;
             }
 
-            if (e.CloseReason == CloseReason.UserClosing && !explicitExitRequested && manifest != null && manifest.MinimizeToTray)
+            if (ShouldMinimizeToTrayOnClose(e.CloseReason, explicitExitRequested, manifest, startupInitialized, passKey))
             {
                 e.Cancel = true;
                 this.Hide();
@@ -2349,12 +2396,7 @@ namespace Steam_Desktop_Authenticator
                 webView = null;
             }
 
-            if (loadingTimer != null)
-            {
-                loadingTimer.Stop();
-                loadingTimer.Dispose();
-                loadingTimer = null;
-            }
+            StopAndDisposeLoadingTimer();
 
             lifetimeCancellationSource.Dispose();
             base.OnFormClosed(e);
@@ -5405,6 +5447,9 @@ namespace Steam_Desktop_Authenticator
         /// </summary>
         private void loadAccountsList(ulong? preferredSteamId = null)
         {
+            if (manifest == null)
+                return;
+
             ulong? previousSteamId = preferredSteamId ?? currentAccount?.Session?.SteamID;
             currentAccount = null;
 
@@ -5882,7 +5927,7 @@ namespace Steam_Desktop_Authenticator
 
         private void StartUpdateCheckFromActivation()
         {
-            if (manifest == null)
+            if (!CanRunActivationUpdateCheck(manifest, startupAccountMaintenanceFinished, passKey))
                 return;
 
             if (TryStartStartupUpdateCheck(ref startupUpdateCheckStarted, () => _ = CheckForUpdatesAsync(true)))
@@ -6241,6 +6286,53 @@ namespace Steam_Desktop_Authenticator
             }
         }
 
+        private void StopAndDisposeLoadingTimer()
+        {
+            if (loadingTimer != null)
+            {
+                loadingTimer.Stop();
+                loadingTimer.Dispose();
+                loadingTimer = null;
+            }
+        }
+
+        private bool TryRevealModernUiAndPushInitialState()
+        {
+            if (!modernUiDocumentReady || modernUiRevealed ||
+                IsDisposed || Disposing || lifetimeCancellationSource.IsCancellationRequested ||
+                GetCoreWebView2IfAvailable() == null ||
+                !CanRevealModernUi(manifest, startupInitialized, passKey))
+            {
+                return false;
+            }
+
+            modernUiRevealed = true;
+            StopAndDisposeLoadingTimer();
+            if (modernUiLoadingPanel != null && !modernUiLoadingPanel.IsDisposed)
+                modernUiLoadingPanel.Visible = false;
+            if (webView != null && !webView.IsDisposed)
+                webView.Visible = true;
+
+            // Push initial data to JS now that startup unlock and WebView2 are both ready
+            loadAccountsList();
+            loadAccountInfo();
+
+            // Set app version
+            string jsVersion = JsonConvert.SerializeObject(Application.ProductVersion);
+            _ = ExecuteScriptSafelyAsync($"setAppVersion({jsVersion});", "Application version UI");
+
+            // Set autostart checkbox
+            bool isAutoStart = WindowsStartup.IsEnabled();
+            _ = ExecuteScriptSafelyAsync($"setAutoStart({isAutoStart.ToString().ToLowerInvariant()});", "Startup setting UI");
+            string savedConfirmationTab = TradeConfirmationClassifier.NormalizeSelectableTab(manifest?.TradeConfirmationSelectedTab);
+            _ = ExecuteScriptSafelyAsync($"hydrateConfirmationTab({JsonConvert.SerializeObject(savedConfirmationTab)});", "Trade confirmation tab UI");
+            _ = PublishAvailableUpdateAsync();
+            _ = PublishUpdateCheckStateAsync(isCheckingForUpdates, updateCheckStatusMessage, updateCheckStatusTone);
+
+            StartBackgroundServicesAfterUiReady();
+            return true;
+        }
+
         private async void SetupModernUI()
         {
             this.MinimumSize = new Size(600, 430);
@@ -6253,6 +6345,7 @@ namespace Steam_Desktop_Authenticator
 
             // Create loading screen
             Panel loadingPanel = new Panel();
+            modernUiLoadingPanel = loadingPanel;
             loadingPanel.Dock = DockStyle.Fill;
             loadingPanel.BackColor = AstroTheme.Background;
             
@@ -6322,8 +6415,7 @@ namespace Steam_Desktop_Authenticator
             }
             catch (Exception ex)
             {
-                loadingTimer.Stop();
-                loadingTimer.Dispose();
+                StopAndDisposeLoadingTimer();
                 if (!IsDisposed && !Disposing)
                     lblLoading.Text = "Astro UI could not be initialized. Restore the complete release folder and try again.";
                 DiagnosticErrorLogger.Log("Astro UI", ex, "The dashboard could not be initialized.");
@@ -6361,8 +6453,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 if (!args.IsSuccess)
                 {
-                    loadingTimer.Stop();
-                    loadingTimer.Dispose();
+                    StopAndDisposeLoadingTimer();
                     if (!IsDisposed && !Disposing)
                         lblLoading.Text = "Astro UI could not be loaded. Restore the complete release folder and try again.";
                     DiagnosticErrorLogger.Log("Astro UI", new InvalidOperationException("WebView2 navigation failed: " + args.WebErrorStatus), "The dashboard could not be loaded.");
@@ -6370,8 +6461,7 @@ namespace Steam_Desktop_Authenticator
                 }
                 if (!WebViewSecurityPolicy.IsTrustedLocalDocument(webView.CoreWebView2.Source, htmlPath))
                 {
-                    loadingTimer.Stop();
-                    loadingTimer.Dispose();
+                    StopAndDisposeLoadingTimer();
                     if (!IsDisposed && !Disposing)
                         lblLoading.Text = "Astro UI could not be loaded. Restore the complete release folder and try again.";
                     DiagnosticErrorLogger.Log(
@@ -6381,28 +6471,8 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                loadingTimer.Stop();
-                loadingTimer.Dispose();
-                loadingPanel.Visible = false;
-                webView.Visible = true;
-
-                // Push initial data to JS now that it's ready
-                loadAccountsList();
-                loadAccountInfo();
-                
-                // Set app version
-                string jsVersion = JsonConvert.SerializeObject(Application.ProductVersion);
-                _ = ExecuteScriptSafelyAsync($"setAppVersion({jsVersion});", "Application version UI");
-                
-                // Set autostart checkbox
-                bool isAutoStart = WindowsStartup.IsEnabled();
-                _ = ExecuteScriptSafelyAsync($"setAutoStart({isAutoStart.ToString().ToLowerInvariant()});", "Startup setting UI");
-                string savedConfirmationTab = TradeConfirmationClassifier.NormalizeSelectableTab(manifest?.TradeConfirmationSelectedTab);
-                _ = ExecuteScriptSafelyAsync($"hydrateConfirmationTab({JsonConvert.SerializeObject(savedConfirmationTab)});", "Trade confirmation tab UI");
-                _ = PublishAvailableUpdateAsync();
-                _ = PublishUpdateCheckStateAsync(isCheckingForUpdates, updateCheckStatusMessage, updateCheckStatusTone);
-
-                StartBackgroundServicesAfterUiReady();
+                modernUiDocumentReady = true;
+                TryRevealModernUiAndPushInitialState();
             };
 
             if (IsDisposed || lifetimeCancellationSource.IsCancellationRequested || webView == null)
